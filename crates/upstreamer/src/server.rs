@@ -2,17 +2,17 @@ use crate::state::AppState;
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full};
+use hyper::Request;
 use hyper::body::Incoming;
 use hyper::header::HOST;
 use hyper::server::conn::http1;
-use hyper::Request;
 use hyper::{Response, StatusCode};
+use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn};
-use hyper_util::rt::TokioIo;
 
 pub type ErrorResponse = Response<Full<Bytes>>;
 
@@ -34,7 +34,10 @@ pub async fn run_proxy(state: Arc<AppState>) -> Result<()> {
 
             match result {
                 Ok(_) => {
-                    debug!("Connection from {} closed after {:?}", remote_addr, duration);
+                    debug!(
+                        "Connection from {} closed after {:?}",
+                        remote_addr, duration
+                    );
                 }
                 Err(e) => {
                     error!("Connection from {} failed: {}", remote_addr, e);
@@ -76,7 +79,12 @@ async fn handle_request(
 
     let path = req.uri().path();
 
-    debug!("Incoming request: host={} path={} method={}", host, path, req.method());
+    debug!(
+        "Incoming request: host={} path={} method={}",
+        host,
+        path,
+        req.method()
+    );
 
     let router = state.router.load();
 
@@ -88,21 +96,14 @@ async fn handle_request(
         }
     };
 
-    debug!(
-        "Matched route with {} candidates",
-        route.candidates().len()
-    );
+    debug!("Matched route with {} candidates", route.candidates().len());
 
     // Rate limiting check
     let ip = remote_addr.ip();
-    let route_key = format!(
-        "{}:{}",
-        route.match_host().map(|s| s.as_str()).unwrap_or("*"),
-        route.match_path().map(|s| s.as_str()).unwrap_or("*")
-    );
+    let route_key = route.key();
 
     // Check per-route rate limit first, then global rate limit
-    let allowed = if let Some(route_limiter) = state.route_ratelimiters.get(&route_key) {
+    let allowed = if let Some(route_limiter) = state.route_ratelimiters.get(route_key) {
         route_limiter.check(ip)
     } else if let Some(ref global_limiter) = state.ratelimiter {
         global_limiter.check(ip)
@@ -122,7 +123,10 @@ async fn handle_request(
     {
         Some(o) => o,
         None => {
-            warn!("No healthy origin available for host={} path={}", host, path);
+            warn!(
+                "No healthy origin available for host={} path={}",
+                host, path
+            );
             return Ok(bad_gateway(&state, "No healthy origins available"));
         }
     };
@@ -134,12 +138,12 @@ async fn handle_request(
     let result = proxy_request(&mut req, &origin, &state.client).await;
 
     let latency = start.elapsed();
-    let origin_url = origin.url.to_string();
+    let origin_url = &origin.url_key;
 
     metrics::histogram!("upstreamer_proxy_request_duration_nanoseconds", "origin" => origin_url.clone())
         .record(latency.as_nanos() as f64);
 
-    if let Some(origin_state) = state.origin_states.get(&origin.url.to_string()) {
+    if let Some(origin_state) = state.origin_states.get(origin_url) {
         origin_state.increment_requests();
         origin_state.record_latency(latency);
 
@@ -195,17 +199,21 @@ async fn handle_request(
 async fn proxy_request(
     req: &mut Request<Incoming>,
     origin: &crate::balance::OriginEndpoint,
-    client: &hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>>,
+    client: &hyper_util::client::legacy::Client<
+        hyper_util::client::legacy::connect::HttpConnector,
+        Full<Bytes>,
+    >,
 ) -> Result<ErrorResponse> {
     let origin_uri = format!(
         "{}{}",
         origin.url.as_str().trim_end_matches('/'),
-        req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("")
+        req.uri()
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("")
     );
 
-    let mut builder = Request::builder()
-        .method(req.method())
-        .uri(&origin_uri);
+    let mut builder = Request::builder().method(req.method()).uri(&origin_uri);
 
     for (name, value) in req.headers().iter() {
         if name != HOST {

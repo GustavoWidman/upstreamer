@@ -11,6 +11,7 @@ pub struct Router {
 pub struct RouteEntry {
     match_host: Option<String>,
     match_path: Option<String>,
+    key: String,
     #[allow(dead_code)]
     config: RouteConfig,
     load_balancer: Arc<dyn crate::balance::LoadBalancer>,
@@ -26,12 +27,8 @@ impl RouteEntry {
         &self.candidates
     }
 
-    pub fn match_host(&self) -> Option<&String> {
-        self.match_host.as_ref()
-    }
-
-    pub fn match_path(&self) -> Option<&String> {
-        self.match_path.as_ref()
+    pub fn key(&self) -> &str {
+        &self.key
     }
 }
 
@@ -41,7 +38,8 @@ impl Router {
             .routes
             .iter()
             .map(|route| {
-                let load_balancer: Arc<dyn crate::balance::LoadBalancer> = match route.lb_algorithm {
+                let load_balancer: Arc<dyn crate::balance::LoadBalancer> = match route.lb_algorithm
+                {
                     LbAlgorithm::RoundRobin => Arc::new(crate::balance::RoundRobinBalancer::new()),
                     LbAlgorithm::WeightedLatency => {
                         Arc::new(crate::balance::WeightedLatencyBalancer::new())
@@ -56,15 +54,23 @@ impl Router {
                     for origin in &pool.origins {
                         candidates.push(OriginEndpoint {
                             url: origin.url.clone(),
+                            url_key: origin.url.to_string(),
                             weight: origin.weight,
                             health_check_path: origin.health_check_path.clone(),
                         });
                     }
                 }
 
+                let key = format!(
+                    "{}:{}",
+                    route.match_host.as_deref().unwrap_or("*"),
+                    route.match_path.as_deref().unwrap_or("*")
+                );
+
                 RouteEntry {
                     match_host: route.match_host.clone(),
                     match_path: route.match_path.clone(),
+                    key,
                     config: route.clone(),
                     load_balancer,
                     candidates,
@@ -83,18 +89,16 @@ impl Router {
             .routes
             .iter()
             .map(|route| {
-                let load_balancer: Arc<dyn crate::balance::LoadBalancer> =
-                    match route.lb_algorithm {
-                        LbAlgorithm::RoundRobin => {
-                            Arc::new(crate::balance::RoundRobinBalancer::new())
-                        }
-                        LbAlgorithm::WeightedLatency => {
-                            Arc::new(crate::balance::WeightedLatencyBalancer::new())
-                        }
-                        LbAlgorithm::WeightedMetrics => {
-                            Arc::new(crate::balance::WeightedMetricsBalancer::new())
-                        }
-                    };
+                let load_balancer: Arc<dyn crate::balance::LoadBalancer> = match route.lb_algorithm
+                {
+                    LbAlgorithm::RoundRobin => Arc::new(crate::balance::RoundRobinBalancer::new()),
+                    LbAlgorithm::WeightedLatency => {
+                        Arc::new(crate::balance::WeightedLatencyBalancer::new())
+                    }
+                    LbAlgorithm::WeightedMetrics => {
+                        Arc::new(crate::balance::WeightedMetricsBalancer::new())
+                    }
+                };
 
                 let mut candidates = Vec::new();
                 for pool in &route.pools {
@@ -102,6 +106,7 @@ impl Router {
                     for origin in &pool.origins {
                         candidates.push(OriginEndpoint {
                             url: origin.url.clone(),
+                            url_key: origin.url.to_string(),
                             weight: origin.weight,
                             health_check_path: origin.health_check_path.clone(),
                         });
@@ -111,6 +116,7 @@ impl Router {
                         for url in k8s_urls {
                             candidates.push(OriginEndpoint {
                                 url: url.clone(),
+                                url_key: url.to_string(),
                                 weight: None,
                                 health_check_path: None,
                             });
@@ -118,9 +124,16 @@ impl Router {
                     }
                 }
 
+                let key = format!(
+                    "{}:{}",
+                    route.match_host.as_deref().unwrap_or("*"),
+                    route.match_path.as_deref().unwrap_or("*")
+                );
+
                 RouteEntry {
                     match_host: route.match_host.clone(),
                     match_path: route.match_path.clone(),
+                    key,
                     config: route.clone(),
                     load_balancer,
                     candidates,
