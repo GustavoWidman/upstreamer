@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: html
+              mountPath: /usr/share/nginx/html
+      volumes:
+        - name: html
+          configMap:
+            name: backend-html
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-html
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html><body>backend ok</body></html>
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  annotations:
+    upstreamer.ora.ooo/pool: "backend"
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 80
+      targetPort: 80
