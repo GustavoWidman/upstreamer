@@ -1,3 +1,4 @@
+use crate::errors::ErrorResponse;
 use crate::state::AppState;
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
@@ -13,8 +14,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn};
-
-pub type ErrorResponse = Response<Full<Bytes>>;
 
 pub async fn run_proxy(state: Arc<AppState>) -> Result<()> {
     let config = state.config.load();

@@ -30,9 +30,7 @@ impl AppState {
         for route in &config.routes {
             for pool in &route.pools {
                 for origin in &pool.origins {
-                    states
-                        .entry(origin.url.to_string())
-                        .or_insert_with(OriginState::new);
+                    states.entry(origin.url.to_string()).or_default();
                 }
             }
         }

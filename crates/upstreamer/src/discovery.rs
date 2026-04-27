@@ -49,10 +49,7 @@ async fn rebuild_router(state: &AppState, k8s_origins: &HashMap<String, Vec<Url>
     // Add origin states for any new k8s origins
     for origins in k8s_origins.values() {
         for url in origins {
-            state
-                .origin_states
-                .entry(url.to_string())
-                .or_insert_with(crate::balance::OriginState::new);
+            state.origin_states.entry(url.to_string()).or_default();
         }
     }
 }

@@ -67,7 +67,7 @@ pub async fn watch_config(state: Arc<AppState>, config_path: PathBuf) -> Result<
                                 state
                                     .origin_states
                                     .entry(origin.url.to_string())
-                                    .or_insert_with(crate::balance::OriginState::new);
+                                    .or_default();
                             }
                         }
                     }

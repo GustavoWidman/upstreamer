@@ -1,7 +1,10 @@
 use crate::state::AppState;
 use bytes::Bytes;
 use dashmap::DashMap;
+use http_body_util::Full;
 use tracing::{info, warn};
+
+pub type ErrorResponse = hyper::Response<Full<Bytes>>;
 
 pub struct ErrorPageStore {
     pages: DashMap<u16, Bytes>,
@@ -40,7 +43,7 @@ pub fn get_error_response(
     state: &AppState,
     status: hyper::StatusCode,
     default_body: &str,
-) -> crate::server::ErrorResponse {
+) -> ErrorResponse {
     let code = status.as_u16();
 
     if let Some(ref store) = state.error_pages
