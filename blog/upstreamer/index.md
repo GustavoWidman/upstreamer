@@ -151,7 +151,19 @@ Round 3: 14.7 → 14.8 MB
 
 With a warm connection pool, throughput was ~115,000 RPS. Median latency was 0.2ms at 50 concurrent connections, 1.5ms at 200 concurrent. The Python backend was the bottleneck — direct benchmarking against it gave the same throughput, meaning proxy overhead was indistinguishable from noise.
 
-`perf_event_paranoid` was set to 3 on the test machine, so `samply` profiling couldn't run. The RSS numbers and the hot-path code review (no per-request allocations, atomic primitives for contention-free state) suggest the profile would be clean. The main allocation path is the DashMap entry lookup for rate limiting, which is amortized across requests from the same IP.
+`perf record` with 59k samples confirmed the hot path is clean. No single function dominates:
+
+```
+~10%   kernel (epoll, read/write syscalls)
+ 2.0%  malloc + _int_malloc + cfree  (DashMap entries for new IPs)
+ 0.8%  tokio scheduler
+ 0.6%  handle_request (our code)
+ 0.5%  hyper client::send_request
+ 0.5%  hyper server::Connection::poll
+ 0.3%  pow (EWMA floating point math)
+```
+
+The proxy's own request handler is 0.6% of CPU. Heap allocation at ~2% comes from DashMap entries for per-IP rate limiting — amortized across requests from the same IP. No suspicious allocation patterns, no hotspots.
 
 ## Project structure
 
