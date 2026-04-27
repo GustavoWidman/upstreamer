@@ -3,7 +3,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Service;
 use kube::{Api, Client};
-use kube_runtime::{watcher, WatchStreamExt};
+use kube_runtime::{WatchStreamExt, watcher};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -96,7 +96,10 @@ pub async fn run_k8s_discovery(state: Arc<AppState>) -> Result<()> {
             Ok(svc) => {
                 if let Some((pool, url)) = service_to_origin(&svc) {
                     let svc_name = svc.metadata.name.as_deref().unwrap_or("unknown");
-                    debug!("Discovered service {} -> pool {} at {}", svc_name, pool, url);
+                    debug!(
+                        "Discovered service {} -> pool {} at {}",
+                        svc_name, pool, url
+                    );
 
                     // Remove old entry for this service, then add new one
                     let entry = k8s_origins.entry(pool).or_default();

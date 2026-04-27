@@ -1,5 +1,5 @@
-use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
@@ -121,7 +121,10 @@ mod tests {
         let mut bucket = TokenBucket::new(10, 2);
         assert!(bucket.try_consume(), "First request should be allowed");
         assert!(bucket.try_consume(), "Second request should be allowed");
-        assert!(!bucket.try_consume(), "Third request should be rate limited");
+        assert!(
+            !bucket.try_consume(),
+            "Third request should be rate limited"
+        );
     }
 
     #[test]
@@ -132,7 +135,10 @@ mod tests {
         for _ in 0..5 {
             assert!(bucket.try_consume());
         }
-        assert!(!bucket.try_consume(), "Should be rate limited after exhaustion");
+        assert!(
+            !bucket.try_consume(),
+            "Should be rate limited after exhaustion"
+        );
 
         // Wait for at least one token to refill (100 tokens/sec = 10ms per token)
         thread::sleep(Duration::from_millis(20));

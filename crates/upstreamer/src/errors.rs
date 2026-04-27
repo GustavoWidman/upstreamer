@@ -14,7 +14,10 @@ impl ErrorPageStore {
             let path = config.directory.join(&page.file);
             match std::fs::read(&path) {
                 Ok(content) => {
-                    info!("Loaded custom error page for status {}: {}", page.code, page.file);
+                    info!(
+                        "Loaded custom error page for status {}: {}",
+                        page.code, page.file
+                    );
                     pages.insert(page.code, Bytes::from(content));
                 }
                 Err(e) => {
@@ -52,6 +55,8 @@ pub fn get_error_response(
 
     hyper::Response::builder()
         .status(status)
-        .body(http_body_util::Full::new(Bytes::from(default_body.to_string())))
+        .body(http_body_util::Full::new(Bytes::from(
+            default_body.to_string(),
+        )))
         .expect("default error response builder")
 }

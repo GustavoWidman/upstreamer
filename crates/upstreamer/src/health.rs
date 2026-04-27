@@ -19,8 +19,7 @@ pub async fn run_active_checks(state: Arc<AppState>) {
         return;
     }
 
-    let client: Client<HttpConnector, String> =
-        Client::builder(TokioExecutor::new()).build_http();
+    let client: Client<HttpConnector, String> = Client::builder(TokioExecutor::new()).build_http();
 
     let targets: Vec<(String, String)> = config
         .routes
@@ -69,11 +68,7 @@ pub async fn run_active_checks(state: Arc<AppState>) {
                     }
                     Ok(Ok(resp)) => {
                         state.record_failure_with_threshold(unhealthy_threshold);
-                        warn!(
-                            "Health check failed for {}: status {}",
-                            base,
-                            resp.status()
-                        );
+                        warn!("Health check failed for {}: status {}", base, resp.status());
                     }
                     Ok(Err(e)) => {
                         state.record_failure_with_threshold(unhealthy_threshold);
@@ -121,9 +116,7 @@ async fn handle_health_request(
                 .header("Content-Type", "text/plain; version=0.0.4")
                 .body(Full::new(Bytes::from(body)))?)
         }
-        "/healthz" => Ok(Response::new(Full::new(Bytes::from(
-            r#"{"status":"ok"}"#,
-        )))),
+        "/healthz" => Ok(Response::new(Full::new(Bytes::from(r#"{"status":"ok"}"#)))),
         "/healthz/upstreams" => {
             let mut origins = serde_json::Map::new();
             for entry in state.origin_states.iter() {
@@ -132,7 +125,9 @@ async fn handle_health_request(
                 let mut obj = serde_json::Map::new();
                 obj.insert(
                     "healthy".to_string(),
-                    serde_json::Value::Bool(state.healthy.load(std::sync::atomic::Ordering::Relaxed)),
+                    serde_json::Value::Bool(
+                        state.healthy.load(std::sync::atomic::Ordering::Relaxed),
+                    ),
                 );
                 obj.insert(
                     "consecutive_successes".to_string(),

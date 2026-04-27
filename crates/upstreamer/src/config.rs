@@ -22,7 +22,9 @@ pub enum ConfigError {
         reason: String,
     },
 
-    #[error("route '{route}' pool '{pool}' origin '{origin}' uses HTTPS scheme (not supported in v1)")]
+    #[error(
+        "route '{route}' pool '{pool}' origin '{origin}' uses HTTPS scheme (not supported in v1)"
+    )]
     HttpsNotSupported {
         route: String,
         pool: String,
@@ -33,7 +35,10 @@ pub enum ConfigError {
     InvalidRateLimit,
 
     #[error("duplicate route match: host '{}' path '{}'", host.as_deref().unwrap_or("*"), path.as_deref().unwrap_or("*"))]
-    DuplicateRouteMatch { host: Option<String>, path: Option<String> },
+    DuplicateRouteMatch {
+        host: Option<String>,
+        path: Option<String>,
+    },
 
     #[error("invalid socket address '{addr}': {reason}")]
     #[allow(dead_code)]

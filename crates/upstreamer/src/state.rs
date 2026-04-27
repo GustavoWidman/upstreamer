@@ -41,9 +41,10 @@ impl AppState {
         let error_pages = config.error_pages.as_ref().map(ErrorPageStore::from_config);
 
         // Initialize global rate limiter if configured
-        let ratelimiter = config.ratelimit.as_ref().map(|rl| {
-            RateLimiter::new(rl.rate, rl.burst)
-        });
+        let ratelimiter = config
+            .ratelimit
+            .as_ref()
+            .map(|rl| RateLimiter::new(rl.rate, rl.burst));
 
         // Initialize per-route rate limiters
         let route_ratelimiters = DashMap::new();
