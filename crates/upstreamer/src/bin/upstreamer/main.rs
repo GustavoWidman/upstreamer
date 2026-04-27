@@ -2,18 +2,13 @@ use anyhow::Result;
 use clap::Parser;
 use std::sync::Arc;
 use tracing::info;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt;
 
 mod cli;
 
 fn main() -> Result<()> {
     let args = cli::Args::parse();
 
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&args.log_level));
-
-    fmt().with_env_filter(filter).init();
+    upstreamer::logging::init(&args.log_level);
 
     let config = upstreamer::config::ProxyConfig::load(&args.config)?;
 

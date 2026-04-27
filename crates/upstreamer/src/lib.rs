@@ -3,6 +3,7 @@ pub mod config;
 pub mod discovery;
 pub mod errors;
 pub mod health;
+pub mod logging;
 pub mod metrics;
 pub mod ratelimit;
 pub mod reload;

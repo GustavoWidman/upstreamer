@@ -192,6 +192,17 @@ async fn handle_request(
         }
     }
 
+    if let Ok(ref resp) = result {
+        info!(
+            "{} {} → {} [{}] {:.1?}",
+            req.method(),
+            req.uri().path(),
+            origin.url,
+            resp.status().as_u16(),
+            latency
+        );
+    }
+
     result
 }
 
