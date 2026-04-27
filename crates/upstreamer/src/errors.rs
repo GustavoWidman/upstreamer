@@ -1,10 +1,12 @@
 use crate::state::AppState;
 use bytes::Bytes;
 use dashmap::DashMap;
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use tracing::{info, warn};
 
-pub type ErrorResponse = hyper::Response<Full<Bytes>>;
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+pub type ProxyBody = BoxBody<Bytes, BoxError>;
 
 pub struct ErrorPageStore {
     pages: DashMap<u16, Bytes>,
@@ -39,11 +41,17 @@ impl ErrorPageStore {
     }
 }
 
+fn full_body(bytes: Bytes) -> ProxyBody {
+    Full::new(bytes)
+        .map_err(|e| -> BoxError { match e {} })
+        .boxed()
+}
+
 pub fn get_error_response(
     state: &AppState,
     status: hyper::StatusCode,
     default_body: &str,
-) -> ErrorResponse {
+) -> hyper::Response<ProxyBody> {
     let code = status.as_u16();
 
     if let Some(ref store) = state.error_pages
@@ -52,14 +60,12 @@ pub fn get_error_response(
         return hyper::Response::builder()
             .status(status)
             .header("Content-Type", "text/html")
-            .body(http_body_util::Full::new(body))
+            .body(full_body(body))
             .expect("error page response builder");
     }
 
     hyper::Response::builder()
         .status(status)
-        .body(http_body_util::Full::new(Bytes::from(
-            default_body.to_string(),
-        )))
+        .body(full_body(Bytes::from(default_body.to_string())))
         .expect("default error response builder")
 }

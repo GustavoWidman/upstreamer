@@ -1,13 +1,13 @@
-use crate::errors::ErrorResponse;
+use crate::errors::ProxyBody;
 use crate::state::AppState;
 use anyhow::Result;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::Request;
 use hyper::body::Incoming;
 use hyper::header::HOST;
 use hyper::server::conn::http1;
-use hyper::{Response, StatusCode};
+use hyper::{Method, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -69,7 +69,7 @@ async fn handle_request(
     mut req: Request<Incoming>,
     state: Arc<AppState>,
     remote_addr: SocketAddr,
-) -> Result<ErrorResponse> {
+) -> Result<Response<ProxyBody>> {
     let host = req
         .headers()
         .get(HOST)
@@ -139,7 +139,7 @@ async fn handle_request(
     let latency = start.elapsed();
     let origin_url = &origin.url_key;
 
-    metrics::histogram!("upstreamer_proxy_request_duration_nanoseconds", "origin" => origin_url.clone())
+    metrics::histogram!("upstreamer_proxy_request_duration_nanoseconds", "origin" => origin_url.to_string())
         .record(latency.as_nanos() as f64);
 
     if let Some(origin_state) = state.origin_states.get(origin_url) {
@@ -185,7 +185,7 @@ async fn handle_request(
                     origin_state.record_success();
                 }
                 Err(e) => {
-                    error!("Failed to proxy to {}: {}", origin.url, e);
+                    error!("Failed to proxy to {}: {}", origin_url, e);
                     origin_state.record_failure();
                 }
             }
@@ -213,10 +213,10 @@ async fn proxy_request(
         hyper_util::client::legacy::connect::HttpConnector,
         Full<Bytes>,
     >,
-) -> Result<ErrorResponse> {
+) -> Result<Response<ProxyBody>> {
     let origin_uri = format!(
         "{}{}",
-        origin.url.as_str().trim_end_matches('/'),
+        origin.url_base,
         req.uri()
             .path_and_query()
             .map(|pq| pq.as_str())
@@ -234,26 +234,31 @@ async fn proxy_request(
     let authority = origin.url.authority();
     builder = builder.header(HOST, authority);
 
-    let body = collect_body(req).await?;
+    let body = if matches!(req.method(), &Method::GET | &Method::HEAD | &Method::DELETE) {
+        Full::new(Bytes::new())
+    } else {
+        Full::new(collect_body(req).await?)
+    };
 
-    let outgoing_req = builder.body(Full::new(body))?;
+    let outgoing_req = builder.body(body)?;
 
     let response = client.request(outgoing_req).await?;
 
-    let status = response.status();
-    let headers = response.headers().clone();
-    let body = response.collect().await?.to_bytes();
+    let (parts, body) = response.into_parts();
+    let body = body
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
+        .boxed();
 
-    let mut resp = Response::new(Full::new(body));
-    *resp.status_mut() = status;
-    *resp.headers_mut() = headers;
+    let mut resp = Response::new(body);
+    *resp.status_mut() = parts.status;
+    *resp.headers_mut() = parts.headers;
 
     Ok(resp)
 }
 
 async fn collect_body(req: &mut Request<Incoming>) -> Result<Bytes> {
     let body = req.body_mut();
-    let mut buf = BytesMut::new();
+    let mut buf = bytes::BytesMut::new();
 
     while let Some(frame_result) = body.frame().await {
         let frame = frame_result?;
@@ -265,14 +270,14 @@ async fn collect_body(req: &mut Request<Incoming>) -> Result<Bytes> {
     Ok(buf.freeze())
 }
 
-fn not_found(state: &AppState) -> ErrorResponse {
+fn not_found(state: &AppState) -> Response<ProxyBody> {
     crate::errors::get_error_response(state, StatusCode::NOT_FOUND, "Not Found")
 }
 
-fn bad_gateway(state: &AppState, message: &str) -> ErrorResponse {
+fn bad_gateway(state: &AppState, message: &str) -> Response<ProxyBody> {
     crate::errors::get_error_response(state, StatusCode::BAD_GATEWAY, message)
 }
 
-fn rate_limited(state: &AppState) -> ErrorResponse {
+fn rate_limited(state: &AppState) -> Response<ProxyBody> {
     crate::errors::get_error_response(state, StatusCode::TOO_MANY_REQUESTS, "Too Many Requests")
 }
