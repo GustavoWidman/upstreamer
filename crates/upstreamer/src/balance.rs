@@ -8,6 +8,7 @@ use url::Url;
 #[derive(Clone, Debug)]
 pub struct OriginEndpoint {
     pub url: Url,
+    pub url_key: String,
     pub weight: Option<u32>,
     #[allow(dead_code)]
     pub health_check_path: Option<String>,
@@ -36,12 +37,11 @@ impl OriginState {
     }
 
     pub fn record_latency(&self, latency: Duration) {
-        const EWMA_ALPHA: f64 = 0.1;
         let sample_ns = latency.as_nanos() as u64;
-
         let mut old = self.ewma_latency_ns.load(Ordering::Relaxed);
         loop {
-            let new = (EWMA_ALPHA * sample_ns as f64 + (1.0 - EWMA_ALPHA) * old as f64) as u64;
+            // α=0.1 EWMA as integer math: new = (sample + 9*old) / 10
+            let new = (sample_ns + 9 * old) / 10;
             match self.ewma_latency_ns.compare_exchange_weak(
                 old,
                 new,
@@ -128,7 +128,7 @@ impl LoadBalancer for RoundRobinBalancer {
         for i in 0..count {
             let idx = (start_idx + i) % count;
             let origin = &candidates[idx];
-            if let Some(state) = origin_states.get(&origin.url.to_string())
+            if let Some(state) = origin_states.get(&origin.url_key)
                 && state.healthy.load(Ordering::Relaxed)
             {
                 return Some(origin.clone());
