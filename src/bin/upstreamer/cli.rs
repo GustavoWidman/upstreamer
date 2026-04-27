@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 
-use upstreamer::config::ProxyConfig;
+use upstreamer::config::parser::ProxyConfig;
 
 #[derive(Parser, Debug)]
 #[command(name = "upstreamer")]

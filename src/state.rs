@@ -1,7 +1,7 @@
 use crate::balance::OriginState;
-use crate::config::ProxyConfig;
-use crate::errors::ErrorPageStore;
-use crate::ratelimit::RateLimiter;
+use crate::config::parser::ProxyConfig;
+use crate::middleware::errors::ErrorPageStore;
+use crate::middleware::ratelimit::RateLimiter;
 use crate::route::Router;
 use arc_swap::ArcSwap;
 use bytes::Bytes;

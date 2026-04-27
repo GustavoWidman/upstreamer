@@ -32,7 +32,7 @@ pub async fn watch_config(state: Arc<AppState>, config_path: PathBuf) -> Result<
 
         info!("Config file changed, reloading...");
 
-        match crate::config::ProxyConfig::load(&config_path) {
+        match crate::config::parser::ProxyConfig::load(&config_path) {
             Ok(new_config) => match new_config.validate() {
                 Ok(()) => {
                     info!(
@@ -54,9 +54,10 @@ pub async fn watch_config(state: Arc<AppState>, config_path: PathBuf) -> Result<
                                 route.match_host.as_deref().unwrap_or("*"),
                                 route.match_path.as_deref().unwrap_or("*")
                             );
-                            state
-                                .route_ratelimiters
-                                .insert(key, crate::ratelimit::RateLimiter::new(rl.rate, rl.burst));
+                            state.route_ratelimiters.insert(
+                                key,
+                                crate::middleware::ratelimit::RateLimiter::new(rl.rate, rl.burst),
+                            );
                         }
                     }
 

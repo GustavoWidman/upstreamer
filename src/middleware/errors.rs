@@ -13,7 +13,7 @@ pub struct ErrorPageStore {
 }
 
 impl ErrorPageStore {
-    pub fn from_config(config: &crate::config::ErrorPagesConfig) -> Self {
+    pub fn from_config(config: &crate::config::parser::ErrorPagesConfig) -> Self {
         let pages = DashMap::new();
         for page in &config.pages {
             let path = config.directory.join(&page.file);

@@ -1,4 +1,4 @@
-use crate::errors::ProxyBody;
+use crate::middleware::errors::ProxyBody;
 use crate::state::AppState;
 use anyhow::Result;
 use bytes::Bytes;
@@ -271,13 +271,17 @@ async fn collect_body(req: &mut Request<Incoming>) -> Result<Bytes> {
 }
 
 fn not_found(state: &AppState) -> Response<ProxyBody> {
-    crate::errors::get_error_response(state, StatusCode::NOT_FOUND, "Not Found")
+    crate::middleware::errors::get_error_response(state, StatusCode::NOT_FOUND, "Not Found")
 }
 
 fn bad_gateway(state: &AppState, message: &str) -> Response<ProxyBody> {
-    crate::errors::get_error_response(state, StatusCode::BAD_GATEWAY, message)
+    crate::middleware::errors::get_error_response(state, StatusCode::BAD_GATEWAY, message)
 }
 
 fn rate_limited(state: &AppState) -> Response<ProxyBody> {
-    crate::errors::get_error_response(state, StatusCode::TOO_MANY_REQUESTS, "Too Many Requests")
+    crate::middleware::errors::get_error_response(
+        state,
+        StatusCode::TOO_MANY_REQUESTS,
+        "Too Many Requests",
+    )
 }

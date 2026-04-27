@@ -11,9 +11,9 @@ mod cli;
 fn main() -> Result<()> {
     let args = cli::Args::parse();
 
-    upstreamer::logging::init(&args.log_level);
+    upstreamer::utils::logging::init(&args.log_level);
 
-    let config = upstreamer::config::ProxyConfig::load(&args.config)?;
+    let config = upstreamer::config::parser::ProxyConfig::load(&args.config)?;
 
     config.validate()?;
 
@@ -25,7 +25,7 @@ fn main() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
 
     rt.block_on(async {
-        let metrics_handle = upstreamer::metrics::init();
+        let metrics_handle = upstreamer::middleware::metrics::init();
 
         let state = Arc::new(upstreamer::state::AppState::new(config, metrics_handle));
 
@@ -67,7 +67,7 @@ fn main() -> Result<()> {
         if state.config.load().health.active.enabled {
             let state_clone = state.clone();
             tokio::spawn(async move {
-                upstreamer::health::run_active_checks(state_clone).await;
+                upstreamer::health::checker::run_active_checks(state_clone).await;
             });
         }
 
@@ -75,7 +75,7 @@ fn main() -> Result<()> {
         {
             let state_clone = state.clone();
             tokio::spawn(async move {
-                upstreamer::metrics::collect_self_metrics(state_clone).await;
+                upstreamer::middleware::metrics::collect_self_metrics(state_clone).await;
             });
         }
 
@@ -83,7 +83,8 @@ fn main() -> Result<()> {
         if state.config.load().kubernetes.is_some() {
             let state_clone = state.clone();
             tokio::spawn(async move {
-                if let Err(e) = upstreamer::discovery::run_k8s_discovery(state_clone).await {
+                if let Err(e) = upstreamer::health::discovery::run_k8s_discovery(state_clone).await
+                {
                     tracing::error!("k8s discovery error: {}", e);
                 }
             });
@@ -94,7 +95,9 @@ fn main() -> Result<()> {
             let state_clone = state.clone();
             let config_path = args.config.clone();
             tokio::spawn(async move {
-                if let Err(e) = upstreamer::reload::watch_config(state_clone, config_path).await {
+                if let Err(e) =
+                    upstreamer::config::reload::watch_config(state_clone, config_path).await
+                {
                     tracing::error!("config watcher error: {}", e);
                 }
             });
@@ -109,7 +112,7 @@ fn main() -> Result<()> {
                     tracing::error!("Proxy server error: {}", e);
                 }
             }
-            r = upstreamer::health::run_health_server(health_state) => {
+            r = upstreamer::health::checker::run_health_server(health_state) => {
                 if let Err(e) = r {
                     tracing::error!("Health server error: {}", e);
                 }

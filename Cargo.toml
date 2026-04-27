@@ -1,8 +1,43 @@
-[workspace]
-resolver = "2"
-members = ["crates/upstreamer"]
-
-[workspace.package]
+[package]
+name = "upstreamer"
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["full", "server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["full", "server", "http1", "http2"] }
+http-body-util = "0.1"
+tower = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+notify = "7"
+arc-swap = "1"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+dashmap = "6"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+anyhow = "1"
+thiserror = "2"
+kube = { version = "0.97", features = ["client", "runtime", "derive"], default-features = false }
+kube-runtime = "0.97"
+futures = "0.3"
+k8s-openapi = { version = "0.23", features = ["v1_30"] }
+url = { version = "2", features = ["serde"] }
+humantime = "2"
+humantime-serde = "1"
+rand = "0.9"
+async-trait = "0.1"
+libc = "0.2"
+tikv-jemallocator = "0.6"
+
+[features]
+jemalloc = []
+
+[dev-dependencies]
+k8s-openapi = { version = "0.23", features = ["v1_30"] }

@@ -1,5 +1,5 @@
 use crate::balance::OriginEndpoint;
-use crate::config::{LbAlgorithm, ProxyConfig, RouteConfig};
+use crate::config::parser::{LbAlgorithm, ProxyConfig, RouteConfig};
 use std::collections::HashMap;
 use std::sync::Arc;
 use url::Url;
@@ -193,7 +193,7 @@ impl Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::PoolRef;
+    use crate::config::parser::PoolRef;
 
     #[test]
     fn test_match_glob_exact() {
