@@ -3,6 +3,9 @@ use clap::Parser;
 use std::sync::Arc;
 use tracing::info;
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod cli;
 
 fn main() -> Result<()> {
