@@ -20,66 +20,100 @@ pub struct Args {
     pub log_level: String,
 }
 
+fn green(s: &str) -> String {
+    format!("\x1b[32m{}\x1b[0m", s)
+}
+
+fn dim(s: &str) -> String {
+    format!("\x1b[2m{}\x1b[0m", s)
+}
+
 pub fn print_config_summary(config: &ProxyConfig) {
-    println!("Configuration is valid");
+    let version = env!("CARGO_PKG_VERSION");
+    println!(
+        "  {} upstreamer v{} — {}",
+        green("✓"),
+        version,
+        green("configuration valid")
+    );
     println!();
-    println!("  listen:        {}", config.listen);
-    println!("  metrics_addr:  {}", config.metrics_addr);
+    println!("  {} {}", dim("listen:"), config.listen);
+    println!("  {} {}", dim("metrics:"), config.metrics_addr);
 
     println!();
-    println!("  routes ({}):", config.routes.len());
+    println!("  {} {}", dim("routes:"), config.routes.len());
     for (i, route) in config.routes.iter().enumerate() {
         let host = route.match_host.as_deref().unwrap_or("*");
         let path = route.match_path.as_deref().unwrap_or("/");
         let algo = format!("{:?}", route.lb_algorithm).to_lowercase();
-        println!("    [{}] host={} path={} algo={}", i, host, path, algo);
+
+        println!();
+        println!("  {} [{}]", dim("route"), i);
+        println!("    {:10} {} {}", dim("match:"), host, path);
+        println!("    {:10} {}", dim("algo:"), algo);
 
         for pool in &route.pools {
-            println!("      pool: {}", pool.name);
+            println!("    {:10} {}", dim("pool:"), pool.name);
             for origin in &pool.origins {
                 let weight = origin
                     .weight
-                    .map(|w| format!(" weight={}", w))
+                    .map(|w| format!(" {}", dim(&format!("weight={}", w))))
                     .unwrap_or_default();
-                println!("        - {}{}", origin.url, weight);
+                println!("      {} {}{}", dim("→"), origin.url, weight);
             }
         }
 
         if let Some(ref rl) = route.ratelimit {
-            println!("      ratelimit: rate={}/s burst={}", rl.rate, rl.burst);
+            println!(
+                "    {:10} {}/s burst={}",
+                dim("ratelimit:"),
+                rl.rate,
+                rl.burst
+            );
         }
     }
 
     if let Some(ref rl) = config.ratelimit {
         println!();
-        println!("  ratelimit: rate={}/s burst={}", rl.rate, rl.burst);
+        println!("  {} {}/s burst={}", dim("ratelimit:"), rl.rate, rl.burst);
     }
 
     let a = &config.health.active;
     let p = &config.health.passive;
     println!();
-    println!("  health:");
+    println!("  {}", dim("health:"));
+    if a.enabled {
+        println!(
+            "    {:10} {} interval={:?} timeout={:?} thresholds={}/{}",
+            dim("active:"),
+            green("on"),
+            a.interval,
+            a.timeout,
+            a.healthy_threshold,
+            a.unhealthy_threshold
+        );
+    } else {
+        println!("    {:10} \x1b[31moff\x1b[0m", dim("active:"));
+    }
     println!(
-        "    active:  enabled={} interval={:?} timeout={:?} thresholds={}/{}",
-        a.enabled, a.interval, a.timeout, a.healthy_threshold, a.unhealthy_threshold
-    );
-    println!(
-        "    passive: enabled={} failure_threshold={} success_threshold={}",
-        p.enabled, p.failure_threshold, p.success_threshold
+        "    {:10} failures={} successes={}",
+        dim("passive:"),
+        p.failure_threshold,
+        p.success_threshold
     );
 
     if let Some(ref k8s) = config.kubernetes {
         println!();
         let ns = k8s.namespace.as_deref().unwrap_or("default");
         let sel = k8s.label_selector.as_deref().unwrap_or("(none)");
-        println!("  kubernetes: namespace={} selector={}", ns, sel);
+        println!("  {} ns={} selector={}", dim("kubernetes:"), ns, sel);
     }
 
     if let Some(ref ep) = config.error_pages {
         println!();
-        println!("  error_pages: directory={}", ep.directory.display());
+        println!("  {} {}", dim("error_pages:"), ep.directory.display());
         for page in &ep.pages {
-            println!("    {} -> {}", page.code, page.file);
+            println!("    {} → {}", page.code, page.file);
         }
     }
 }
