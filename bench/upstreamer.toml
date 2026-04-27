@@ -1,0 +1,30 @@
+listen = "127.0.0.1:8080"
+metrics_addr = "127.0.0.1:9090"
+
+[ratelimit]
+rate = 100_000
+burst = 200_000
+
+[health]
+[health.active]
+enabled = true
+interval = "30s"
+timeout = "5s"
+healthy_threshold = 2
+unhealthy_threshold = 5
+
+[health.passive]
+enabled = true
+failure_threshold = 10
+success_threshold = 2
+observation_window = "60s"
+
+[[routes]]
+match_path = "/"
+lb_algorithm = "round_robin"
+
+[[routes.pools]]
+name = "backend"
+
+[[routes.pools.origins]]
+url = "http://127.0.0.1:8888"
