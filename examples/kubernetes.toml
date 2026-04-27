@@ -1,0 +1,30 @@
+listen = "0.0.0.0:8080"
+metrics_addr = "0.0.0.0:9090"
+
+[[routes]]
+match_path = "/api/"
+lb_algorithm = "weighted_latency"
+
+[[routes.pools]]
+name = "api-servers"
+
+[[routes.pools.origins]]
+url = "http://api-v1:8080"
+
+[[routes.pools.origins]]
+url = "http://api-v2:8080"
+
+[[routes]]
+match_host = "dashboard.example.com"
+match_path = "/"
+lb_algorithm = "round_robin"
+
+[[routes.pools]]
+name = "dashboard"
+
+[[routes.pools.origins]]
+url = "http://dashboard:3000"
+
+[kubernetes]
+namespace = "default"
+label_selector = "app=upstreamer-backend"

@@ -1,0 +1,15 @@
+listen = "0.0.0.0:8080"
+metrics_addr = "0.0.0.0:9090"
+
+[[routes]]
+match_path = "/"
+lb_algorithm = "round_robin"
+
+[[routes.pools]]
+name = "backend"
+
+[[routes.pools.origins]]
+url = "http://127.0.0.1:3000"
+
+[[routes.pools.origins]]
+url = "http://127.0.0.1:3001"

@@ -1,0 +1,65 @@
+listen = "0.0.0.0:8080"
+metrics_addr = "0.0.0.0:9090"
+
+[ratelimit]
+rate = 100
+burst = 150
+
+[health]
+[health.active]
+enabled = true
+interval = "5s"
+timeout = "3s"
+healthy_threshold = 2
+unhealthy_threshold = 3
+
+[health.passive]
+enabled = true
+failure_threshold = 5
+success_threshold = 2
+observation_window = "60s"
+
+[[routes]]
+match_path = "/api/"
+lb_algorithm = "weighted_metrics"
+
+[routes.ratelimit]
+rate = 50
+burst = 75
+
+[[routes.pools]]
+name = "primary"
+
+[[routes.pools.origins]]
+url = "http://10.0.0.1:8080"
+weight = 80
+
+[[routes.pools.origins]]
+url = "http://10.0.0.2:8080"
+weight = 20
+
+[[routes]]
+match_path = "/"
+lb_algorithm = "round_robin"
+
+[[routes.pools]]
+name = "fallback"
+
+[[routes.pools.origins]]
+url = "http://fallback:8080"
+health_check_path = "/ping"
+
+[error_pages]
+directory = "./errors"
+
+[[error_pages.pages]]
+code = 404
+file = "404.html"
+
+[[error_pages.pages]]
+code = 502
+file = "502.html"
+
+[[error_pages.pages]]
+code = 503
+file = "503.html"
