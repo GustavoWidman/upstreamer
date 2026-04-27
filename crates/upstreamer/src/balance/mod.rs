@@ -11,6 +11,7 @@ use url::Url;
 pub struct OriginEndpoint {
     pub url: Url,
     pub url_key: String,
+    pub url_base: String,
     pub weight: Option<u32>,
     #[allow(dead_code)]
     pub health_check_path: Option<String>,

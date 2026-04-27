@@ -52,9 +52,11 @@ impl Router {
                 let mut candidates = Vec::new();
                 for pool in &route.pools {
                     for origin in &pool.origins {
+                        let url = &origin.url;
                         candidates.push(OriginEndpoint {
-                            url: origin.url.clone(),
-                            url_key: origin.url.to_string(),
+                            url: url.clone(),
+                            url_key: url.to_string(),
+                            url_base: url.as_str().trim_end_matches('/').to_string(),
                             weight: origin.weight,
                             health_check_path: origin.health_check_path.clone(),
                         });
@@ -104,9 +106,11 @@ impl Router {
                 for pool in &route.pools {
                     // Static origins from config
                     for origin in &pool.origins {
+                        let url = &origin.url;
                         candidates.push(OriginEndpoint {
-                            url: origin.url.clone(),
-                            url_key: origin.url.to_string(),
+                            url: url.clone(),
+                            url_key: url.to_string(),
+                            url_base: url.as_str().trim_end_matches('/').to_string(),
                             weight: origin.weight,
                             health_check_path: origin.health_check_path.clone(),
                         });
@@ -117,6 +121,7 @@ impl Router {
                             candidates.push(OriginEndpoint {
                                 url: url.clone(),
                                 url_key: url.to_string(),
+                                url_base: url.as_str().trim_end_matches('/').to_string(),
                                 weight: None,
                                 health_check_path: None,
                             });
