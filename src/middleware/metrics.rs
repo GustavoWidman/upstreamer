@@ -2,6 +2,19 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
 pub fn init() -> PrometheusHandle {
     PrometheusBuilder::new()
+        .set_buckets(&[
+            50_000.0,
+            100_000.0,
+            250_000.0,
+            500_000.0,
+            1_000_000.0,
+            2_500_000.0,
+            5_000_000.0,
+            10_000_000.0,
+            50_000_000.0,
+            100_000_000.0,
+        ])
+        .expect("invalid buckets")
         .install_recorder()
         .expect("failed to install Prometheus recorder")
 }
