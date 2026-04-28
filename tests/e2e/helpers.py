@@ -17,12 +17,14 @@ UPSTREAMER_BIN = os.path.join(
 )
 
 
-def make_handler(status=200, body=b"ok", headers=None):
+def make_handler(status=200, body=b"ok", headers=None, delay=0):
     class Handler(BaseHTTPRequestHandler):
         request_count = 0
         received_requests = []
 
         def do_GET(self):
+            if delay > 0:
+                time.sleep(delay)
             Handler.request_count += 1
             Handler.received_requests.append(self.path)
             self.send_response(status)
@@ -55,10 +57,10 @@ def make_handler(status=200, body=b"ok", headers=None):
 
 
 class MockBackend:
-    def __init__(self, port, status=200, body=b"ok", headers=None):
+    def __init__(self, port, status=200, body=b"ok", headers=None, delay=0):
         self.port = port
         self.url = f"http://127.0.0.1:{port}"
-        handler = make_handler(status, body, headers)
+        handler = make_handler(status, body, headers, delay=delay)
         self.server = HTTPServer(("127.0.0.1", port), handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self._handler = handler
@@ -119,7 +121,12 @@ def generate_config(routes, proxy_port=PROXY_PORT, metrics_port=METRICS_PORT,
             lines.append(f'name = "{pool["name"]}"')
             for origin in pool.get("origins", []):
                 lines.append("[[routes.pools.origins]]")
-                lines.append(f'url = "{origin}"')
+                if isinstance(origin, dict):
+                    lines.append(f'url = "{origin["url"]}"')
+                    if origin.get("weight"):
+                        lines.append(f'weight = {origin["weight"]}')
+                else:
+                    lines.append(f'url = "{origin}"')
 
     return "\n".join(lines) + "\n"
 

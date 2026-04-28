@@ -41,7 +41,7 @@ kind: Service
 metadata:
   name: backend
   annotations:
-    upstreamer.ora.ooo/pool: "backend"
+    upstreamer/pool: "backend"
 spec:
   selector:
     app: backend

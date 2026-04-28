@@ -59,6 +59,15 @@ def given_backend_status(context, port, status):
     context.backends.append(backend)
 
 
+@given("a slow backend on port {port:d} with {delay:d}ms delay")
+def given_slow_backend(context, port, delay):
+    backend = MockBackend(port, delay=delay / 1000.0)
+    backend.start()
+    if not context.backends:
+        context.backends = []
+    context.backends.append(backend)
+
+
 @given("upstreamer is configured with round-robin across all 3 backends")
 def given_config_rr_3(context):
     origins = [b.url for b in context.backends]
@@ -85,9 +94,19 @@ def given_config_rr_1(context):
 def given_config_rr_ports(context, ports):
     port_list = [int(p.strip()) for p in ports.split(",")]
     origins = [f"http://127.0.0.1:{p}" for p in port_list]
+    context._current_ports = port_list
     _start_upstreamer(
         context,
         [{"pools": [{"name": "backend", "origins": origins}]}],
+    )
+
+
+@given("upstreamer is configured with weighted-latency balancing")
+def given_config_weighted_latency(context):
+    origins = [b.url for b in context.backends]
+    _start_upstreamer(
+        context,
+        [{"algo": "weighted_latency", "pools": [{"name": "backend", "origins": origins}]}],
     )
 
 
@@ -279,6 +298,56 @@ def then_proxy_responds_502(context):
     assert 502 in statuses, f"expected at least one 502, got statuses: {statuses}"
 
 
+@when("I add backend on port {port:d} to the running config")
+def when_add_backend_to_config(context, port):
+    backend = MockBackend(port)
+    backend.start()
+    context.backends.append(backend)
+    new_ports = context._current_ports + [port]
+    _rewrite_config(context, new_ports)
+
+
+@when("I remove backend on port {port:d} from the running config")
+def when_remove_backend_from_config(context, port):
+    context._new_ports = [p for p in context._current_ports if p != port]
+    _rewrite_config(context, context._new_ports)
+
+
+@when("I replace the running config with invalid content")
+def when_write_invalid_config(context):
+    with open(context.config_file, "w") as f:
+        f.write("this is not valid toml [[[[\n")
+
+
+@when("I wait for config reload")
+def when_wait_for_reload(context):
+    time.sleep(2.5)
+
+
+@then("backend {port:d} should have received at least {n:d} requests")
+def then_backend_at_least_n(context, port, n):
+    for backend in context.backends:
+        if backend.port == port:
+            actual = backend.request_count
+            assert actual >= n, (
+                f"backend {port} got {actual} requests, expected at least {n}"
+            )
+            return
+    assert False, f"no backend on port {port}"
+
+
+@then("backend {port:d} should have received at most {n:d} requests")
+def then_backend_at_most_n(context, port, n):
+    for backend in context.backends:
+        if backend.port == port:
+            actual = backend.request_count
+            assert actual <= n, (
+                f"backend {port} got {actual} requests, expected at most {n}"
+            )
+            return
+    assert False, f"no backend on port {port}"
+
+
 # --- Helpers ---
 
 
@@ -290,3 +359,12 @@ def _start_upstreamer(context, routes, ratelimit=None):
     context.config_file = path
     context.upstreamer = UpstreamerProcess(path)
     context.upstreamer.start()
+
+
+def _rewrite_config(context, ports):
+    origins = [f"http://127.0.0.1:{p}" for p in ports]
+    routes = [{"pools": [{"name": "backend", "origins": origins}]}]
+    toml_config = generate_config(routes)
+    with open(context.config_file, "w") as f:
+        f.write(toml_config)
+    context._current_ports = ports
