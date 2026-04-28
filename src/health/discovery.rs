@@ -9,8 +9,8 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 use url::Url;
 
-const POOL_ANNOTATION: &str = "upstreamer.ora.ooo/pool";
-const PORT_ANNOTATION: &str = "upstreamer.ora.ooo/port";
+const POOL_ANNOTATION: &str = "upstreamer/pool";
+const PORT_ANNOTATION: &str = "upstreamer/port";
 
 fn service_to_origin(svc: &Service) -> Option<(String, Url)> {
     let name = svc.metadata.name.as_deref()?;

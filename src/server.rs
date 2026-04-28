@@ -11,6 +11,7 @@ use hyper::{Method, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn};
@@ -24,6 +25,7 @@ pub async fn run_proxy(state: Arc<AppState>) -> Result<()> {
 
     loop {
         let (stream, remote_addr) = listener.accept().await?;
+        stream.set_nodelay(true)?;
         let state = state.clone();
 
         tokio::spawn(async move {
@@ -118,7 +120,6 @@ async fn handle_request(
     let origin = match route
         .load_balancer()
         .select_origin(route.candidates(), &state.origin_states)
-        .await
     {
         Some(o) => o,
         None => {
@@ -134,22 +135,21 @@ async fn handle_request(
 
     let start = Instant::now();
 
-    let result = proxy_request(&mut req, &origin, &state.client).await;
+    let result = proxy_request(&mut req, origin, &state.client).await;
 
     let latency = start.elapsed();
     let origin_url = &origin.url_key;
 
-    metrics::histogram!("upstreamer_proxy_request_duration_nanoseconds", "origin" => origin_url.to_string())
+    metrics::histogram!("upstreamer_proxy_request_duration_nanoseconds")
         .record(latency.as_nanos() as f64);
 
     if let Some(origin_state) = state.origin_states.get(origin_url) {
         origin_state.increment_requests();
         origin_state.record_latency(latency);
 
-        let config = state.config.load();
-        let passive = &config.health.passive;
-
-        if passive.enabled {
+        if state.passive_enabled.load(Ordering::Relaxed) {
+            let ft = state.passive_failure_threshold.load(Ordering::Relaxed);
+            let st = state.passive_success_threshold.load(Ordering::Relaxed);
             match &result {
                 Ok(resp) if resp.status().is_server_error() => {
                     warn!(
@@ -159,14 +159,14 @@ async fn handle_request(
                         req.method(),
                         req.uri().path()
                     );
-                    origin_state.record_failure_with_threshold(passive.failure_threshold);
+                    origin_state.record_failure_with_threshold(ft);
                 }
                 Ok(_) => {
-                    origin_state.record_success_with_threshold(passive.success_threshold);
+                    origin_state.record_success_with_threshold(st);
                 }
                 Err(e) => {
                     error!("Failed to proxy to {}: {}", origin.url, e);
-                    origin_state.record_failure_with_threshold(passive.failure_threshold);
+                    origin_state.record_failure_with_threshold(ft);
                 }
             }
         } else {
@@ -214,14 +214,14 @@ async fn proxy_request(
         Full<Bytes>,
     >,
 ) -> Result<Response<ProxyBody>> {
-    let origin_uri = format!(
-        "{}{}",
-        origin.url_base,
-        req.uri()
-            .path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("")
-    );
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("");
+    let mut origin_uri = String::with_capacity(origin.url_base.len() + path.len());
+    origin_uri.push_str(&origin.url_base);
+    origin_uri.push_str(path);
 
     let mut builder = Request::builder().method(req.method()).uri(&origin_uri);
 

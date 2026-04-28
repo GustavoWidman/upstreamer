@@ -1,5 +1,4 @@
 use super::{LoadBalancer, OriginEndpoint, OriginState};
-use async_trait::async_trait;
 use dashmap::DashMap;
 use rand::Rng;
 use std::sync::atomic::Ordering;
@@ -52,13 +51,12 @@ fn weighted_random_select(weights: &[f64]) -> usize {
     weights.len() - 1
 }
 
-#[async_trait]
 impl LoadBalancer for WeightedLatencyBalancer {
-    async fn select_origin(
+    fn select_origin<'a>(
         &self,
-        candidates: &[OriginEndpoint],
+        candidates: &'a [OriginEndpoint],
         origin_states: &DashMap<String, OriginState>,
-    ) -> Option<OriginEndpoint> {
+    ) -> Option<&'a OriginEndpoint> {
         if candidates.is_empty() {
             return None;
         }
@@ -92,20 +90,19 @@ impl LoadBalancer for WeightedLatencyBalancer {
 
         let idx = weighted_random_select(&weights);
         if weights[idx] > 0.0 {
-            Some(candidates[idx].clone())
+            Some(&candidates[idx])
         } else {
             None
         }
     }
 }
 
-#[async_trait]
 impl LoadBalancer for WeightedMetricsBalancer {
-    async fn select_origin(
+    fn select_origin<'a>(
         &self,
-        candidates: &[OriginEndpoint],
+        candidates: &'a [OriginEndpoint],
         origin_states: &DashMap<String, OriginState>,
-    ) -> Option<OriginEndpoint> {
+    ) -> Option<&'a OriginEndpoint> {
         if candidates.is_empty() {
             return None;
         }
@@ -147,7 +144,7 @@ impl LoadBalancer for WeightedMetricsBalancer {
 
         let idx = weighted_random_select(&weights);
         if weights[idx] > 0.0 {
-            Some(candidates[idx].clone())
+            Some(&candidates[idx])
         } else {
             None
         }

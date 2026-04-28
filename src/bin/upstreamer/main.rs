@@ -22,7 +22,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?;
 
     rt.block_on(async {
         let metrics_handle = upstreamer::middleware::metrics::init();
@@ -71,13 +74,8 @@ fn main() -> Result<()> {
             });
         }
 
-        // Spawn self-metrics collection
-        {
-            let state_clone = state.clone();
-            tokio::spawn(async move {
-                upstreamer::middleware::metrics::collect_self_metrics(state_clone).await;
-            });
-        }
+        // Spawn self-metrics collection on a dedicated OS thread
+        upstreamer::middleware::metrics::spawn_self_metrics(state.clone());
 
         // Spawn k8s service discovery
         if state.config.load().kubernetes.is_some() {

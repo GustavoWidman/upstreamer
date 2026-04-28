@@ -1,7 +1,6 @@
 mod round_robin;
 mod weighted;
 
-use async_trait::async_trait;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
@@ -93,13 +92,12 @@ impl OriginState {
     }
 }
 
-#[async_trait]
 pub trait LoadBalancer: Send + Sync {
-    async fn select_origin(
+    fn select_origin<'a>(
         &self,
-        candidates: &[OriginEndpoint],
+        candidates: &'a [OriginEndpoint],
         origin_states: &DashMap<String, OriginState>,
-    ) -> Option<OriginEndpoint>;
+    ) -> Option<&'a OriginEndpoint>;
 }
 
 pub use round_robin::RoundRobinBalancer;

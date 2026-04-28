@@ -11,6 +11,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use metrics_exporter_prometheus::PrometheusHandle;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 
 pub struct AppState {
     pub config: ArcSwap<ProxyConfig>,
@@ -21,6 +22,9 @@ pub struct AppState {
     pub route_ratelimiters: DashMap<String, RateLimiter>,
     pub metrics_handle: PrometheusHandle,
     pub error_pages: Option<ErrorPageStore>,
+    pub passive_enabled: AtomicBool,
+    pub passive_failure_threshold: AtomicU32,
+    pub passive_success_threshold: AtomicU32,
 }
 
 impl AppState {
@@ -53,6 +57,10 @@ impl AppState {
             }
         }
 
+        let passive_enabled = AtomicBool::new(config.health.passive.enabled);
+        let passive_failure_threshold = AtomicU32::new(config.health.passive.failure_threshold);
+        let passive_success_threshold = AtomicU32::new(config.health.passive.success_threshold);
+
         Self {
             config: ArcSwap::from_pointee(config),
             router: ArcSwap::from_pointee(router),
@@ -62,6 +70,9 @@ impl AppState {
             route_ratelimiters,
             metrics_handle,
             error_pages,
+            passive_enabled,
+            passive_failure_threshold,
+            passive_success_threshold,
         }
     }
 

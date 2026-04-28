@@ -1,5 +1,4 @@
 use super::{LoadBalancer, OriginEndpoint, OriginState};
-use async_trait::async_trait;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -21,13 +20,12 @@ impl Default for RoundRobinBalancer {
     }
 }
 
-#[async_trait]
 impl LoadBalancer for RoundRobinBalancer {
-    async fn select_origin(
+    fn select_origin<'a>(
         &self,
-        candidates: &[OriginEndpoint],
+        candidates: &'a [OriginEndpoint],
         origin_states: &DashMap<String, OriginState>,
-    ) -> Option<OriginEndpoint> {
+    ) -> Option<&'a OriginEndpoint> {
         if candidates.is_empty() {
             return None;
         }
@@ -41,7 +39,7 @@ impl LoadBalancer for RoundRobinBalancer {
             if let Some(state) = origin_states.get(&origin.url_key)
                 && state.healthy.load(Ordering::Relaxed)
             {
-                return Some(origin.clone());
+                return Some(origin);
             }
         }
 
