@@ -1,12 +1,12 @@
-listen = "127.0.0.1:19080"
-metrics_addr = "127.0.0.1:19091"
+listen = "0.0.0.0:8080"
+metrics_addr = "0.0.0.0:9090"
 
 [[routes]]
 match_path = "/"
 lb_algorithm = "round_robin"
 
 [[routes.pools]]
-name = "bench"
+name = "backend"
 
 [[routes.pools.origins]]
 url = "http://127.0.0.1:18080"
