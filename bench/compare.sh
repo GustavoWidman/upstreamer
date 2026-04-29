@@ -159,7 +159,8 @@ kill_ports $HAPROXY_PORT
 
 # --- Apache ---
 echo -e "${BOLD}Starting apache...${RESET}"
-nix shell nixpkgs#apacheHttpd -c httpd -f "$(pwd)/bench/apache-httpd.conf" -D FOREGROUND 2>/dev/null &
+APACHE_ROOT=$(nix eval --raw nixpkgs#apacheHttpd 2>/dev/null)
+nix shell nixpkgs#apacheHttpd -c httpd -d "$APACHE_ROOT" -f "$(pwd)/bench/apache-httpd.conf" -D FOREGROUND 2>/dev/null &
 APACHE_OK=true
 wait_for $APACHE_PORT "apache" || APACHE_OK=false
 if $APACHE_OK; then
