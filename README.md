@@ -7,7 +7,7 @@ a reverse proxy in rust with kubernetes-native service discovery, hot config rel
 
 > **want the full story on how i built this?** check out my blog post: [https://blog.guswid.com/upstreamer](https://blog.guswid.com/upstreamer)
 
-because the one-hour interview version wasn't good enough.
+because the quick version wasn't good enough.
 
 ## features
 
