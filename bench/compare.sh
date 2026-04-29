@@ -29,7 +29,9 @@ DIM='\033[2m'
 RESET='\033[0m'
 
 cleanup() {
-    jobs -p 2>/dev/null | xargs -r kill 2>/dev/null || true
+    local pids
+    pids=$(jobs -p 2>/dev/null)
+    [ -n "$pids" ] && kill $pids 2>/dev/null || true
     wait 2>/dev/null || true
     rm -f bench/*.pid
 }
@@ -37,9 +39,23 @@ trap cleanup EXIT
 
 kill_ports() {
     for port in "$@"; do
-        fuser -k "${port}/tcp" 2>/dev/null || true
+        if command -v fuser >/dev/null 2>&1; then
+            fuser -k "${port}/tcp" 2>/dev/null || true
+        else
+            local pids
+            pids=$(lsof -ti tcp:"$port" 2>/dev/null || true)
+            [ -n "$pids" ] && kill $pids 2>/dev/null || true
+        fi
     done
     sleep 0.3
+}
+
+cpu_count() {
+    if command -v nproc >/dev/null 2>&1; then
+        nproc
+    else
+        sysctl -n hw.ncpu 2>/dev/null || echo "?"
+    fi
 }
 
 wait_for() {
@@ -159,7 +175,7 @@ kill_ports $APACHE_PORT
 # --- Results ---
 echo ""
 echo -e "${BOLD}=====================================================================${RESET}"
-echo -e "${BOLD}  BENCHMARK RESULTS  (conns=${CONNS}, requests=${REQUESTS}, cores=$(nproc))${RESET}"
+echo -e "${BOLD}  BENCHMARK RESULTS  (conns=${CONNS}, requests=${REQUESTS}, cores=$(cpu_count))${RESET}"
 echo -e "${BOLD}=====================================================================${RESET}"
 echo -e "${DIM}(all times in ms)${RESET}"
 echo ""
