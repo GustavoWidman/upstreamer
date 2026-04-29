@@ -39,7 +39,7 @@ trap cleanup EXIT
 
 kill_ports() {
     for port in "$@"; do
-        if command -v fuser >/dev/null 2>&1; then
+        if [ "$(uname)" = "Linux" ] && command -v fuser >/dev/null 2>&1; then
             fuser -k "${port}/tcp" 2>/dev/null || true
         else
             local pids
