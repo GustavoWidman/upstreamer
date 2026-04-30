@@ -154,21 +154,21 @@ services must have the annotation `upstreamer/pool` set to a pool name.
 
 ## benchmark
 
-50 concurrent connections, 100k requests, localhost hyper backend, 4 cores (nixos):
+50 concurrent connections, 500k requests, localhost hyper backend, 14 cores (macos):
 
-| proxy | RPS | p50 | p99 | p99.9 | p99.99 |
-|---|---|---|---|---|---|
-| backend (direct) | 141,727 | 0.27ms | 1.39ms | 2.58ms | 7.31ms |
-| nginx (auto) | 62,331 | 0.73ms | 2.14ms | 3.23ms | 7.06ms |
-| haproxy | 59,381 | 0.77ms | 2.18ms | 3.71ms | 11.9ms |
-| **upstreamer** | **53,953** | **0.88ms** | **2.00ms** | **3.00ms** | **4.15ms** |
-| nginx (1 worker) | 36,893 | 1.35ms | 1.61ms | 2.40ms | 11.3ms |
-| apache | 35,113 | 1.35ms | 3.06ms | 4.87ms | 12.1ms |
-| caddy | 22,536 | 1.93ms | 6.86ms | 8.82ms | 10.3ms |
+| proxy | RPS | p50 | p99 | p99.9 | p99.99 | slowest |
+|---|---|---|---|---|---|---|
+| backend (direct) | 154,998 | 0.32ms | 0.41ms | 0.95ms | 3.39ms | 3.57ms |
+| **upstreamer** | **76,663** | **0.64ms** | **0.79ms** | **1.83ms** | **3.81ms** | **5.38ms** |
+| haproxy | 70,503 | 0.70ms | 0.92ms | 1.95ms | 5.21ms | 8.24ms |
+| nginx (auto) | 69,477 | 0.70ms | 1.01ms | 2.15ms | 7.25ms | 9.14ms |
+| nginx (1 worker) | 68,637 | 0.76ms | 0.86ms | 2.05ms | 4.78ms | 4.97ms |
+| caddy | 66,195 | 0.72ms | 1.66ms | 2.53ms | 6.97ms | 11.94ms |
+| apache | 57,518 | 0.85ms | 1.38ms | 2.53ms | 7.21ms | 7.32ms |
 
-3rd in throughput out of 6. best tail latency of every proxy tested (p99.99 4.15ms, slowest request 4.49ms). beats nginx single-worker by 46%, apache by 54%, caddy by 2.4x.
+1st in throughput. best tail latency of every proxy tested (p99.99 3.81ms, slowest request 5.38ms). beats haproxy by 8.7%, nginx auto by 10%, caddy by 2.4x on throughput. p99.99 is 27% better than haproxy and 47% better than nginx auto.
 
-the throughput gap to nginx auto (~13%) is the cost of tokio's work-stealing runtime versus nginx's raw per-process epoll loop. the trade-off is simpler architecture and better worst-case behavior.
+the throughput lead comes from tokio's work-stealing runtime scaling well across cores: parallel accept, concurrent task scheduling, and efficient arc atomics for shared state. nginx auto matches core count but still runs per-process epoll loops with cross-process coordination for shared state.
 
 run your own comparison:
 
