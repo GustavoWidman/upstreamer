@@ -270,15 +270,11 @@ class KindCluster:
         wait_for_port_forward(local_port, process)
 
 
-def build_kubernetes_config(rate=100, burst=150):
+def build_kubernetes_config(rate=10, burst=10):
     return "\n".join(
         [
             'listen = "0.0.0.0:8080"',
             'metrics_addr = "0.0.0.0:9090"',
-            "",
-            "[ratelimit]",
-            f"rate = {rate}",
-            f"burst = {burst}",
             "",
             "[health]",
             "[health.active]",
@@ -297,6 +293,10 @@ def build_kubernetes_config(rate=100, burst=150):
             "[[routes]]",
             'match_path = "/"',
             'lb_algorithm = "round_robin"',
+            "",
+            "[routes.ratelimit]",
+            f"rate = {rate}",
+            f"burst = {burst}",
             "",
             "[[routes.pools]]",
             'name = "backend"',

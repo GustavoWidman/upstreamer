@@ -7,10 +7,6 @@ data:
     listen = "0.0.0.0:8080"
     metrics_addr = "0.0.0.0:9090"
 
-    [ratelimit]
-    rate = 100
-    burst = 150
-
     [health]
     [health.active]
     enabled = true
@@ -28,6 +24,10 @@ data:
     [[routes]]
     match_path = "/"
     lb_algorithm = "round_robin"
+
+    [routes.ratelimit]
+    rate = 10
+    burst = 10
 
     [[routes.pools]]
     name = "backend"
