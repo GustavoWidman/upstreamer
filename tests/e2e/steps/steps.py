@@ -241,6 +241,11 @@ def when_wait_for_kubernetes_reload(context, seconds):
     time.sleep(seconds)
 
 
+@then("I wait for Kubernetes self-metrics to be collected")
+def then_wait_for_kubernetes_self_metrics(context):
+    time.sleep(5)
+
+
 # --- Then steps ---
 
 
