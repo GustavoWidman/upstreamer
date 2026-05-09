@@ -77,9 +77,17 @@ pub async fn watch_config(state: Arc<AppState>, config_path: PathBuf) -> Result<
                     // Global ratelimiter changes take effect on next restart (v1 limitation)
 
                     // Update cached passive health atomics
-                    state.passive_enabled.store(new_config.health.passive.enabled, Ordering::Relaxed);
-                    state.passive_failure_threshold.store(new_config.health.passive.failure_threshold, Ordering::Relaxed);
-                    state.passive_success_threshold.store(new_config.health.passive.success_threshold, Ordering::Relaxed);
+                    state
+                        .passive_enabled
+                        .store(new_config.health.passive.enabled, Ordering::Relaxed);
+                    state.passive_failure_threshold.store(
+                        new_config.health.passive.failure_threshold,
+                        Ordering::Relaxed,
+                    );
+                    state.passive_success_threshold.store(
+                        new_config.health.passive.success_threshold,
+                        Ordering::Relaxed,
+                    );
 
                     // Swap the config last (everything else is ready)
                     state.config.swap(Arc::new(new_config));
