@@ -163,8 +163,13 @@ class KindCluster:
         self.cluster_name = cluster_name
         self.assets_dir = Path(assets_dir)
         self.port_forwards = []
+        self.started = False
 
     def start(self):
+        if self.started:
+            self.reset_config()
+            return
+
         self.delete()
         self._kind(
             "create",
@@ -195,8 +200,8 @@ class KindCluster:
         self._kubectl("rollout", "status", "deployment/upstreamer", "--timeout=60s")
         self._start_port_forward("svc/upstreamer", KIND_PROXY_PORT, 8080)
         self._start_port_forward("svc/upstreamer", KIND_METRICS_PORT, 9090)
-        wait_for_http_ok(proxy_url_kubernetes())
-        wait_for_http_status(metrics_url("/healthz", kubernetes=True), 200)
+        self.started = True
+        self.reset_config()
 
     def delete(self):
         self.stop_port_forwards()
@@ -214,25 +219,20 @@ class KindCluster:
             check=False,
             cwd=REPO_ROOT,
         )
+        self.started = False
 
     def cleanup(self):
         self.delete()
 
     def patch_rate_limit(self, rate, burst):
-        payload = {
-            "data": {
-                "upstreamer.toml": build_kubernetes_config(rate=rate, burst=burst)
-            }
-        }
-        self._kubectl(
-            "patch",
-            "configmap",
-            "upstreamer-config",
-            "--type",
-            "merge",
-            "-p",
-            json.dumps(payload),
-        )
+        self._patch_config(build_kubernetes_config(rate=rate, burst=burst))
+
+    def reset_config(self):
+        if not self.started:
+            return
+        self._patch_config(build_kubernetes_config())
+        wait_for_http_ok(proxy_url_kubernetes())
+        wait_for_http_status(metrics_url("/healthz", kubernetes=True), 200)
 
     def stop_port_forwards(self):
         for process in self.port_forwards:
@@ -250,6 +250,18 @@ class KindCluster:
 
     def _kubectl(self, *args):
         run_command(["nix", "run", "nixpkgs#kubectl", "--", *args], cwd=REPO_ROOT)
+
+    def _patch_config(self, config):
+        payload = {"data": {"upstreamer.toml": config}}
+        self._kubectl(
+            "patch",
+            "configmap",
+            "upstreamer-config",
+            "--type",
+            "merge",
+            "-p",
+            json.dumps(payload),
+        )
 
     def _start_port_forward(self, resource, local_port, remote_port):
         process = subprocess.Popen(

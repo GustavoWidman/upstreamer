@@ -6,7 +6,6 @@ import requests
 from behave import given, then, when
 
 from helpers import (
-    KindCluster,
     MockBackend,
     UpstreamerProcess,
     generate_config,
@@ -147,7 +146,7 @@ def given_config_routes_table(context):
 
 @given("a kind cluster running upstreamer from the Kubernetes manifests")
 def given_kind_cluster(context):
-    context.kind_cluster = KindCluster()
+    context.kind_cluster = context.shared_kind_cluster
     context.kind_cluster.start()
 
 
