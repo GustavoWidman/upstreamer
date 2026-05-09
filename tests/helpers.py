@@ -12,9 +12,9 @@ import requests
 PROXY_PORT = 19080
 METRICS_PORT = 19090
 BACKEND_BASE_PORT = 19101
-REPO_ROOT = Path(__file__).resolve().parents[2]
-E2E_ROOT = Path(__file__).resolve().parent
-KUBERNETES_DIR = E2E_ROOT / "kubernetes"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+TESTS_ROOT = Path(__file__).resolve().parent
+KUBERNETES_DIR = TESTS_ROOT / "kubernetes"
 UPSTREAMER_BIN = os.path.join(REPO_ROOT, "target", "release", "upstreamer")
 KIND_CLUSTER = "upstreamer-e2e"
 KIND_PROXY_PORT = 18080

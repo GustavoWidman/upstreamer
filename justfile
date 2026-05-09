@@ -8,4 +8,4 @@ bench-compare *args:
     bash bench/compare.sh {{ args }}
 
 e2e:
-    cd tests/e2e && behave
+    cd tests && behave
