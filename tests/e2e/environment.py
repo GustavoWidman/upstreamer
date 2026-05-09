@@ -1,7 +1,7 @@
 import os
 import time
-import subprocess
-from helpers import UPSTREAMER_BIN
+
+from helpers import KindCluster, UPSTREAMER_BIN
 
 
 def before_all(context):
@@ -13,6 +13,7 @@ def before_all(context):
     context.backends = []
     context.upstreamer = None
     context.config_file = None
+    context.kind_cluster = None
 
 
 def after_scenario(context, scenario):
@@ -23,6 +24,10 @@ def after_scenario(context, scenario):
     if getattr(context, "upstreamer", None):
         context.upstreamer.stop()
         context.upstreamer = None
+
+    if getattr(context, "kind_cluster", None):
+        context.kind_cluster.cleanup()
+        context.kind_cluster = None
 
     if getattr(context, "config_file", None):
         try:

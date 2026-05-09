@@ -3,15 +3,17 @@ import tempfile
 import time
 
 import requests
-from behave import given, when, then
+from behave import given, then, when
 
 from helpers import (
+    KindCluster,
     MockBackend,
     UpstreamerProcess,
     generate_config,
+    http_status_codes,
+    metrics_url,
     proxy_url,
-    reset_handler,
-    PROXY_PORT,
+    proxy_url_kubernetes,
 )
 
 # --- Given steps ---
@@ -133,7 +135,6 @@ def given_config_routes_table(context):
         origins = [o.strip() for o in origins_str.split(",") if o.strip()]
         route["pools"] = [{"name": "backend", "origins": origins}]
 
-        # per-route rate limit from table
         if row.get("rate"):
             route["ratelimit"] = {
                 "rate": int(row["rate"]),
@@ -142,6 +143,12 @@ def given_config_routes_table(context):
 
         routes.append(route)
     _start_upstreamer(context, routes)
+
+
+@given("a kind cluster running upstreamer from the Kubernetes manifests")
+def given_kind_cluster(context):
+    context.kind_cluster = KindCluster()
+    context.kind_cluster.start()
 
 
 # --- When steps ---
@@ -158,7 +165,7 @@ def when_send_n_requests(context, n):
             context.responses.append(e)
 
 
-@when("I send a request to \"{path}\"")
+@when('I send a request to "{path}"')
 def when_send_one_request(context, path):
     context.responses = []
     try:
@@ -178,7 +185,7 @@ def when_send_with_host(context, host, path):
         context.responses.append(e)
 
 
-@when("I send {n:d} requests to \"{path}\"")
+@when('I send {n:d} requests to "{path}"')
 def when_send_n_to_path(context, n, path):
     if not hasattr(context, "responses_by_path"):
         context.responses_by_path = {}
@@ -191,111 +198,6 @@ def when_send_n_to_path(context, n, path):
             context.responses_by_path[path].append(resp)
         except requests.RequestException:
             pass
-
-
-# --- Then steps ---
-
-
-@then("each backend should have received approximately {n:d} requests")
-def then_each_approx_n(context, n):
-    tolerance = n * 0.5  # allow 50% deviation for small counts
-    for i, backend in enumerate(context.backends):
-        actual = backend.request_count
-        assert abs(actual - n) <= tolerance, (
-            f"backend {i} got {actual} requests, expected ~{n} (tolerance ±{tolerance})"
-        )
-
-
-@then("the backend should have received {n:d} requests")
-def then_backend_received_n(context, n):
-    actual = context.backends[0].request_count
-    assert actual >= n, f"backend received {actual} requests, expected at least {n}"
-
-
-@then('the backend should have received requests to "{path}"')
-def then_backend_received_path(context, path):
-    for req in context.backends[0].received_requests:
-        if req == path:
-            return
-    assert False, (
-        f"no request to '{path}' found. got: {context.backends[0].received_requests}"
-    )
-
-
-@then("all responses should have status {status:d}")
-def then_all_status(context, status):
-    for i, resp in enumerate(context.responses):
-        if isinstance(resp, Exception):
-            assert False, f"request {i} failed: {resp}"
-        assert resp.status_code == status, (
-            f"response {i} was {resp.status_code}, expected {status}"
-        )
-
-
-@then("at least one response should have status {status:d}")
-def then_at_least_one_status(context, status):
-    found = any(
-        hasattr(r, "status_code") and r.status_code == status
-        for r in context.responses
-    )
-    statuses = [getattr(r, "status_code", "error") for r in context.responses]
-    assert found, f"no response with status {status}. got: {statuses}"
-
-
-@then('at least one response to "{path}" should have status {status:d}')
-def then_at_least_one_path_status(context, path, status):
-    responses = context.responses_by_path.get(path, [])
-    found = any(
-        hasattr(r, "status_code") and r.status_code == status for r in responses
-    )
-    statuses = [getattr(r, "status_code", "error") for r in responses]
-    assert found, f"no response to {path} with status {status}. got: {statuses}"
-
-
-@then('all responses to "{path}" should have status {status:d}')
-def then_all_path_status(context, path, status):
-    responses = context.responses_by_path.get(path, [])
-    for i, resp in enumerate(responses):
-        if isinstance(resp, Exception):
-            assert False, f"request {i} to {path} failed: {resp}"
-        assert resp.status_code == status, (
-            f"response {i} to {path} was {resp.status_code}, expected {status}"
-        )
-
-
-@then('the response body should contain "{text}"')
-def then_body_contains(context, text):
-    resp = context.responses[0]
-    assert text in resp.text, f"response body '{resp.text}' does not contain '{text}'"
-
-
-@then("the response status should be {status:d}")
-def then_status(context, status):
-    resp = context.responses[0]
-    assert resp.status_code == status, (
-        f"response status was {resp.status_code}, expected {status}"
-    )
-
-
-@then("backend {port:d} should have received most of the requests")
-def then_backend_most(context, port):
-    target = None
-    other_total = 0
-    for backend in context.backends:
-        if backend.port == port:
-            target = backend
-        else:
-            other_total += backend.request_count
-    assert target is not None, f"no backend on port {port}"
-    assert target.request_count > other_total, (
-        f"backend {port} got {target.request_count}, others got {other_total}"
-    )
-
-
-@then("the proxy should still respond with 502")
-def then_proxy_responds_502(context):
-    statuses = [r.status_code for r in context.responses if hasattr(r, "status_code")]
-    assert 502 in statuses, f"expected at least one 502, got statuses: {statuses}"
 
 
 @when("I add backend on port {port:d} to the running config")
@@ -324,14 +226,121 @@ def when_wait_for_reload(context):
     time.sleep(2.5)
 
 
+@when("I send {count:d} rapid requests to the Kubernetes proxy")
+def when_send_rapid_kubernetes_requests(context, count):
+    context.kubernetes_statuses = http_status_codes(proxy_url_kubernetes(), count)
+
+
+@when("I patch the Kubernetes config rate limit to {rate:d} requests/sec burst {burst:d}")
+def when_patch_kubernetes_rate_limit(context, rate, burst):
+    context.kind_cluster.patch_rate_limit(rate, burst)
+
+
+@when("I wait {seconds:d} seconds for the Kubernetes config reload")
+def when_wait_for_kubernetes_reload(context, seconds):
+    time.sleep(seconds)
+
+
+# --- Then steps ---
+
+
+@then("each backend should have received approximately {n:d} requests")
+def then_each_approx_n(context, n):
+    tolerance = n * 0.5
+    for i, backend in enumerate(context.backends):
+        actual = backend.request_count
+        assert abs(actual - n) <= tolerance, (
+            f"backend {i} got {actual} requests, expected ~{n} (tolerance ±{tolerance})"
+        )
+
+
+@then("the backend should have received {n:d} requests")
+def then_backend_received_n(context, n):
+    actual = context.backends[0].request_count
+    assert actual >= n, f"backend received {actual} requests, expected at least {n}"
+
+
+@then('the backend should have received requests to "{path}"')
+def then_backend_received_path(context, path):
+    for req in context.backends[0].received_requests:
+        if req == path:
+            return
+    assert False, f"no request to '{path}' found. got: {context.backends[0].received_requests}"
+
+
+@then("all responses should have status {status:d}")
+def then_all_status(context, status):
+    for i, resp in enumerate(context.responses):
+        if isinstance(resp, Exception):
+            assert False, f"request {i} failed: {resp}"
+        assert resp.status_code == status, f"response {i} was {resp.status_code}, expected {status}"
+
+
+@then("at least one response should have status {status:d}")
+def then_at_least_one_status(context, status):
+    found = any(hasattr(r, "status_code") and r.status_code == status for r in context.responses)
+    statuses = [getattr(r, "status_code", "error") for r in context.responses]
+    assert found, f"no response with status {status}. got: {statuses}"
+
+
+@then('at least one response to "{path}" should have status {status:d}')
+def then_at_least_one_path_status(context, path, status):
+    responses = context.responses_by_path.get(path, [])
+    found = any(hasattr(r, "status_code") and r.status_code == status for r in responses)
+    statuses = [getattr(r, "status_code", "error") for r in responses]
+    assert found, f"no response to {path} with status {status}. got: {statuses}"
+
+
+@then('all responses to "{path}" should have status {status:d}')
+def then_all_path_status(context, path, status):
+    responses = context.responses_by_path.get(path, [])
+    for i, resp in enumerate(responses):
+        if isinstance(resp, Exception):
+            assert False, f"request {i} to {path} failed: {resp}"
+        assert resp.status_code == status, (
+            f"response {i} to {path} was {resp.status_code}, expected {status}"
+        )
+
+
+@then('the response body should contain "{text}"')
+def then_body_contains(context, text):
+    resp = context.responses[0]
+    assert text in resp.text, f"response body '{resp.text}' does not contain '{text}'"
+
+
+@then("the response status should be {status:d}")
+def then_status(context, status):
+    resp = context.responses[0]
+    assert resp.status_code == status, f"response status was {resp.status_code}, expected {status}"
+
+
+@then("backend {port:d} should have received most of the requests")
+def then_backend_most(context, port):
+    target = None
+    other_total = 0
+    for backend in context.backends:
+        if backend.port == port:
+            target = backend
+        else:
+            other_total += backend.request_count
+    assert target is not None, f"no backend on port {port}"
+    assert target.request_count > other_total, (
+        f"backend {port} got {target.request_count}, others got {other_total}"
+    )
+
+
+@then("the proxy should still respond with 502")
+def then_proxy_responds_502(context):
+    statuses = [r.status_code for r in context.responses if hasattr(r, "status_code")]
+    assert 502 in statuses, f"expected at least one 502, got statuses: {statuses}"
+
+
 @then("backend {port:d} should have received at least {n:d} requests")
 def then_backend_at_least_n(context, port, n):
     for backend in context.backends:
         if backend.port == port:
             actual = backend.request_count
-            assert actual >= n, (
-                f"backend {port} got {actual} requests, expected at least {n}"
-            )
+            assert actual >= n, f"backend {port} got {actual} requests, expected at least {n}"
             return
     assert False, f"no backend on port {port}"
 
@@ -341,11 +350,41 @@ def then_backend_at_most_n(context, port, n):
     for backend in context.backends:
         if backend.port == port:
             actual = backend.request_count
-            assert actual <= n, (
-                f"backend {port} got {actual} requests, expected at most {n}"
-            )
+            assert actual <= n, f"backend {port} got {actual} requests, expected at most {n}"
             return
     assert False, f"no backend on port {port}"
+
+
+@then("the Kubernetes proxy should route to the backend")
+def then_kubernetes_proxy_routes(context):
+    response = requests.get(proxy_url_kubernetes(), timeout=5)
+    assert response.status_code == 200, f"expected 200, got {response.status_code}"
+    assert "backend ok" in response.text, f"unexpected response body: {response.text[:100]}"
+
+
+@then("the Kubernetes health endpoint should return status {status:d}")
+def then_kubernetes_health_status(context, status):
+    response = requests.get(metrics_url("/healthz", kubernetes=True), timeout=5)
+    assert response.status_code == status, f"expected {status}, got {response.status_code}"
+
+
+@then('the Kubernetes metrics should contain "{text}"')
+def then_kubernetes_metrics_contains(context, text):
+    response = requests.get(metrics_url(kubernetes=True), timeout=5)
+    assert response.status_code == 200, f"expected 200, got {response.status_code}"
+    assert text in response.text, f"metrics did not contain '{text}'"
+
+
+@then("at least {count:d} Kubernetes responses should have status {status:d}")
+def then_kubernetes_at_least_status(context, count, status):
+    matches = sum(1 for code in context.kubernetes_statuses if code == status)
+    assert matches >= count, f"expected at least {count} responses with {status}, got {matches}"
+
+
+@then("more than {count:d} Kubernetes responses should have status {status:d}")
+def then_kubernetes_more_than_status(context, count, status):
+    matches = sum(1 for code in context.kubernetes_statuses if code == status)
+    assert matches > count, f"expected more than {count} responses with {status}, got {matches}"
 
 
 # --- Helpers ---
@@ -359,6 +398,7 @@ def _start_upstreamer(context, routes, ratelimit=None):
     context.config_file = path
     context.upstreamer = UpstreamerProcess(path)
     context.upstreamer.start()
+
 
 
 def _rewrite_config(context, ports):

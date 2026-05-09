@@ -209,7 +209,7 @@ e2e tests (behave, python bdd):
 just e2e
 ```
 
-19 scenarios across 6 feature files: round-robin distribution, host and path routing, per-ip and per-route rate limiting, passive health failover, weighted-latency balancing, and config hot-reload.
+20 scenarios across 7 feature files: round-robin distribution, host and path routing, per-ip and per-route rate limiting, passive health failover, weighted-latency balancing, config hot-reload, and kind-based Kubernetes smoke coverage.
 
 ## v1 limitations
 
