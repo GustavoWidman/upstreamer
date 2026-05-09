@@ -148,7 +148,7 @@ class UpstreamerProcess:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        wait_for_http_ok(f"http://127.0.0.1:{self.proxy_port}/")
+        wait_for_http_ok(f"http://127.0.0.1:{self.proxy_port}/", accept_5xx=True)
         return True
 
     def stop(self):
@@ -313,21 +313,14 @@ def build_kubernetes_config(rate=100, burst=150):
 
 
 def run_command(command, cwd=None, check=True):
-    return subprocess.run(
-        command,
-        cwd=cwd,
-        check=check,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
+    return subprocess.run(command, cwd=cwd, check=check, text=True)
 
 
-def wait_for_http_ok(url, attempts=50, delay=0.2):
+def wait_for_http_ok(url, attempts=50, delay=0.2, accept_5xx=False):
     for _ in range(attempts):
         try:
             response = requests.get(url, timeout=0.2)
-            if response.status_code < 500:
+            if accept_5xx or response.status_code < 500:
                 return response
         except requests.RequestException:
             pass
