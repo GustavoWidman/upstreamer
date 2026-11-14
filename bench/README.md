@@ -154,8 +154,8 @@ A run is valid only without these:
   during the hold.
 - `loadgen_saturated`: the load generator's vCPUs were under 10% idle (closed loop).
 - `loadgen_failed`: the load generator exited non-zero.
-- `foreign_load`: other processes used over 10% of the proxy's vCPUs or over
-  1.5 cores host-wide.
+- `foreign_load`: other processes used over 1.5 cores host-wide, or (closed
+  loop) over 10% of the proxy's vCPUs.
 - `steal`: hypervisor steal over 5% of the proxy's vCPUs.
 
 Informational: `proxy_below_saturation` (proxy vCPUs over 10% idle in closed

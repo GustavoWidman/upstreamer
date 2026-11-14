@@ -375,7 +375,8 @@ class Runner:
             usage[role] = {
                 "cpu_s": cpu_s,
                 "util": cpu_s / capacity,
-                "idle_frac": (b["idle"] + b["iowait"]) / capacity,
+                # Tickless idle accounting can overshoot the window slightly.
+                "idle_frac": min(1.0, (b["idle"] + b["iowait"]) / capacity),
                 "softirq_frac": (b["softirq"] + b["irq"]) / capacity,
                 "steal_frac": b["steal"] / capacity,
                 "foreign_frac": max(0.0, task - cpu_s) / capacity,
@@ -443,7 +444,9 @@ class Runner:
         if spec.server.launches:
             if spec.mode == "closed" and usage["proxy"]["idle_frac"] > PROXY_IDLE_MAX:
                 flags.append("proxy_below_saturation")
-            if usage["proxy"]["foreign_frac"] > PROXY_FOREIGN_MAX:
+            # In open loop the proxy's vCPUs are mostly idle, and other tasks
+            # using that idle time do not displace the proxy.
+            if spec.mode == "closed" and usage["proxy"]["foreign_frac"] > PROXY_FOREIGN_MAX:
                 flags.append("foreign_load")
             if usage["proxy"]["steal_frac"] > PROXY_STEAL_MAX:
                 flags.append("steal")
