@@ -22,6 +22,11 @@ impl Deadline {
         self.at = after.map(|d| Instant::now() + d);
     }
 
+    /// Arms the deadline at `at`, or disarms it.
+    pub fn set_at(&mut self, at: Option<Instant>) {
+        self.at = at;
+    }
+
     /// Ready once the deadline has passed; pending while disarmed. The caller polls it from
     /// the same task that polls the guarded IO, after that IO returned pending.
     pub fn poll_expired(&mut self, cx: &mut Context<'_>) -> Poll<()> {

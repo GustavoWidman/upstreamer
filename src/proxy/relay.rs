@@ -385,7 +385,7 @@ fn chunk_size(len: usize, line: &mut [u8; 18]) -> &[u8] {
 /// Resolves when the client closes its side or its connection fails. What it sends meanwhile
 /// (a pipelined request) is kept in `buf`, up to 64 KiB; past that the client is no longer
 /// watched.
-async fn closed(client: &mut Transport, buf: &mut BytesMut) {
+pub(crate) async fn closed(client: &mut Transport, buf: &mut BytesMut) {
     while buf.len() < LARGE {
         if !matches!(client.read(buf).await, Ok(n) if n > 0) {
             return;

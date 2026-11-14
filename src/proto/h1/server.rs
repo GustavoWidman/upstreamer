@@ -398,9 +398,12 @@ async fn write_response(
     }
     if body_left == Unread::Short {
         watch.set(Some(snap.plan.server.header_timeout));
-        while state.discard(buf) != Unread::None {
-            if read_some(io, buf, watch).await? == 0 {
-                return Err(Close::Eof);
+        loop {
+            match state.discard(buf) {
+                Unread::None => break,
+                Unread::Short if read_some(io, buf, watch).await? > 0 => {}
+                Unread::Short => return Err(Close::Eof),
+                Unread::Long => return Err(Close::Unread),
             }
         }
     }

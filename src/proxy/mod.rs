@@ -9,9 +9,9 @@
 //! Errors map to statuses that go through the site's error routes: dial failure or reset
 //! before the head -> 502, dial or response-header timeout -> 504.
 //!
-//! A client that goes away is noticed while its request body is being read and while a
-//! response body is being relayed, and closes the origin's connection. It is not noticed
-//! while the origin is still producing its response head.
+//! A client that goes away is noticed while its request body is being read, while a response
+//! body is being relayed, and once the origin has taken a second to start its answer. Each
+//! closes the origin's connection. A client that only closes its sending side counts as gone.
 
 pub(crate) mod conn;
 pub(crate) mod pool;
@@ -169,7 +169,7 @@ async fn attempt(
     mut conn: UpstreamConn,
     upgrade: bool,
 ) -> Result<Response, Failed> {
-    let sent = match body {
+    let sent = match &mut *body {
         RequestBody::H1(body) if !body.state.is_empty() => {
             relay::copy_request(core, &ex.out, body, &mut conn).await
         }
@@ -193,11 +193,16 @@ async fn attempt(
         max_header_fields: MAX_RESPONSE_FIELDS,
     };
     let mut head = ex.response_head(Status::OK);
+    let client = match &mut *body {
+        RequestBody::H1(body) => Some((&mut *body.io, &mut *body.buf)),
+        _ => None,
+    };
     let read = read_head(
         &mut conn,
         &limits,
         ex.req.method,
         plan.response_header_timeout,
+        client,
         &mut head,
     )
     .await;
@@ -205,6 +210,9 @@ async fn attempt(
         Ok(read) => read,
         Err(error) => {
             ex.recycle(head);
+            if let (ProxyError::ClientGone, RequestBody::H1(body)) = (&error, body) {
+                body.state.failed = true;
+            }
             return Err(conn.fail(core, error));
         }
     };
@@ -245,17 +253,33 @@ async fn attempt(
     })
 }
 
+/// How long the origin may take to start its answer before the client is watched: a wait
+/// this long is rare, and watching costs the reactor an entry per wait.
+const WATCH_CLIENT_AFTER: Duration = Duration::from_secs(1);
+
 /// Reads the origin's final response head into `head`, skipping interim (1xx) responses.
 /// The parsed head is cut off the connection's buffer; body bytes that came with it stay.
+///
+/// `client` is the h1 client's connection and read buffer. Once the origin has been silent
+/// for [`WATCH_CLIENT_AFTER`], a client that closes ends the wait, so a hung origin does not
+/// hold its connection for a client that left.
 async fn read_head(
     conn: &mut UpstreamConn,
     limits: &Limits,
     method: Method,
     timeout: Option<Duration>,
+    mut client: Option<(&mut Transport, &mut BytesMut)>,
     head: &mut ResponseHead,
 ) -> Result<(codec::Framing, bool), ProxyError> {
     let UpstreamConn { io, buf, watch, .. } = conn;
-    watch.set(timeout);
+    let now = tokio::time::Instant::now();
+    let limit = timeout.map(|t| now + t);
+    let watch_client = client.as_ref().map(|_| now + WATCH_CLIENT_AFTER);
+    let mut watching = false;
+    watch.set_at(match (limit, watch_client) {
+        (Some(limit), Some(soon)) => Some(limit.min(soon)),
+        (limit, soon) => limit.or(soon),
+    });
     loop {
         if !buf.is_empty() {
             match codec::parse_response(buf, limits, method, head) {
@@ -276,19 +300,50 @@ async fn read_head(
                 Err(_) => return Err(ProxyError::BadResponse),
             }
         }
-        let read = io.read(buf);
-        tokio::pin!(read);
-        let n = poll_fn(|cx| match read.as_mut().poll(cx) {
-            Poll::Ready(read) => Poll::Ready(read.map_err(ProxyError::Upstream)),
-            Poll::Pending => watch
-                .poll_expired(cx)
-                .map(|()| Err(ProxyError::ResponseHeaderTimeout)),
-        })
-        .await?;
-        if n == 0 {
-            return Err(ProxyError::Upstream(io::ErrorKind::UnexpectedEof.into()));
+        let wait = async {
+            let read = io.read(buf);
+            tokio::pin!(read);
+            let gone = async {
+                match &mut client {
+                    Some((client, kept)) if watching => relay::closed(client, kept).await,
+                    _ => std::future::pending().await,
+                }
+            };
+            tokio::pin!(gone);
+            poll_fn(|cx| {
+                if let Poll::Ready(read) = read.as_mut().poll(cx) {
+                    return Poll::Ready(Wait::Read(read));
+                }
+                if gone.as_mut().poll(cx).is_ready() {
+                    return Poll::Ready(Wait::ClientGone);
+                }
+                watch.poll_expired(cx).map(|()| Wait::Expired)
+            })
+            .await
+        };
+        match wait.await {
+            Wait::Read(Ok(0)) => {
+                return Err(ProxyError::Upstream(io::ErrorKind::UnexpectedEof.into()));
+            }
+            Wait::Read(Ok(_)) => {}
+            Wait::Read(Err(e)) => return Err(ProxyError::Upstream(e)),
+            Wait::ClientGone => return Err(ProxyError::ClientGone),
+            Wait::Expired if limit.is_some_and(|l| tokio::time::Instant::now() >= l) => {
+                return Err(ProxyError::ResponseHeaderTimeout);
+            }
+            Wait::Expired => {
+                watching = true;
+                watch.set_at(limit);
+            }
         }
     }
+}
+
+/// How a wait for the origin's response head ended.
+enum Wait {
+    Read(io::Result<usize>),
+    ClientGone,
+    Expired,
 }
 
 /// A request body that arrives as data chunks (h2, h3), sent with a length when the client

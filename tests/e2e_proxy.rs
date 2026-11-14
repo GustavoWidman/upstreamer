@@ -552,6 +552,116 @@ fn a_client_that_leaves_mid_download_closes_the_upstream_connection() {
     );
 }
 
+#[test]
+fn a_client_that_leaves_while_the_origin_is_silent_closes_the_upstream_connection() {
+    let (closed_tx, closed) = mpsc::channel();
+    let closed_tx = Mutex::new(closed_tx);
+    let origin = Origin::start(move |stream, _| {
+        let mut conn = Client::over(stream);
+        conn.request().unwrap();
+        // No answer, ever: only the close of this connection ends the read.
+        closed_tx.lock().unwrap().send(conn.closed()).unwrap();
+    });
+    let proxy = proxy_to(&origin);
+    let mut client = proxy.client();
+    client
+        .send(b"GET /slow HTTP/1.1\r\nHost: test\r\n\r\n")
+        .unwrap();
+    eventually("the origin gets the request", || origin.connections() == 1);
+    drop(client);
+    let left = Instant::now();
+    assert!(
+        closed
+            .recv_timeout(PATIENCE)
+            .expect("the origin's connection ends")
+    );
+    assert!(
+        left.elapsed() < Duration::from_secs(5),
+        "noticed about a second into the origin's silence: {:?}",
+        left.elapsed()
+    );
+}
+
+#[test]
+fn an_idle_upstream_connection_is_closed_after_its_idle_timeout() {
+    let (closed_tx, closed) = mpsc::channel();
+    let closed_tx = Mutex::new(closed_tx);
+    let origin = Origin::start(move |stream, _| {
+        let mut conn = Client::over(stream);
+        while let Some(request) = conn.request() {
+            conn.send(&ok(request.line())).unwrap();
+        }
+        closed_tx.lock().unwrap().send(Instant::now()).unwrap();
+    });
+    let proxy = Proxy::start(site(json!([{
+        "proxy": { "to": origin.url(), "timeouts": { "idle": "1s" } }
+    }])));
+    let mut client = proxy.client();
+    assert_eq!(client.get("/").status, 200);
+    let idle_since = Instant::now();
+    let closed_at = closed
+        .recv_timeout(PATIENCE)
+        .expect("the pooled connection is closed");
+    let idle = closed_at.duration_since(idle_since);
+    assert!(
+        idle >= Duration::from_secs(1) && idle < Duration::from_secs(12),
+        "kept for the 1 s idle timeout, closed by a sweep soon after: {idle:?}"
+    );
+    assert_eq!(
+        client.get("/again").status,
+        200,
+        "the next request dials again"
+    );
+    assert_eq!(origin.connections(), 2);
+}
+
+#[test]
+fn a_reload_keeps_the_pooled_connections_of_origins_that_stay() {
+    let (closed_tx, closed) = mpsc::channel();
+    let closed_tx = Mutex::new(closed_tx);
+    let serve = |name: &'static str, closed: Option<Mutex<mpsc::Sender<()>>>| {
+        Origin::start(move |stream, _| {
+            let mut conn = Client::over(stream);
+            while conn.request().is_some() {
+                conn.send(&ok(name)).unwrap();
+            }
+            if let Some(closed) = &closed {
+                closed.lock().unwrap().send(()).unwrap();
+            }
+        })
+    };
+    let (stays, goes) = (serve("stays", None), serve("goes", Some(closed_tx)));
+    let sites = |other: Option<&Origin>| {
+        let mut routes = vec![json!({ "when": { "path": "/stays" }, "proxy": stays.url() })];
+        if let Some(other) = other {
+            // Listed first, so the origin that stays changes its place in the plan.
+            routes.insert(
+                0,
+                json!({ "when": { "path": "/goes" }, "proxy": other.url() }),
+            );
+        }
+        routes.push(json!({ "respond": { "status": 404, "body": "no route" } }));
+        site(json!(routes))
+    };
+    let proxy = Proxy::start_with(sites(Some(&goes)), json!({ "workers": 1 }));
+    let mut client = proxy.client();
+    assert_eq!(client.get("/stays").text(), "stays");
+    assert_eq!(client.get("/goes").text(), "goes");
+
+    proxy.rewrite(sites(None));
+    proxy.reload();
+    closed
+        .recv_timeout(PATIENCE)
+        .expect("the connection to the origin that left the config is closed");
+    assert_eq!(client.get("/goes").status, 404);
+    assert_eq!(client.get("/stays").text(), "stays");
+    assert_eq!(
+        stays.connections(),
+        1,
+        "the connection to the origin that stayed served the request after the reload"
+    );
+}
+
 /// An origin whose first connection answers one request, then reads the next one and closes
 /// without answering: what a pooled connection looks like when the origin gave up on it just
 /// as the request was sent. Later connections answer everything.
