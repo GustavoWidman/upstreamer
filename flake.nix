@@ -17,9 +17,6 @@
             clippy
             gcc
             gnumake
-            python3
-            python3Packages.behave
-            python3Packages.requests
             oha
           ];
 

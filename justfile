@@ -6,6 +6,3 @@ bench:
 
 bench-compare *args:
     bash bench/compare.sh {{ args }}
-
-e2e:
-    cd tests && behave
