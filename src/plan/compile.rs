@@ -83,6 +83,7 @@ pub(crate) fn compile(
         sites.push(c.site(site, &format!("/sites/{i}")));
     }
     let derived = c.listeners(config, &mut sites);
+    c.limits(&config.limits);
     c.locate_fragment_diagnostics();
     if c.diags.iter().any(Diagnostic::is_error) {
         return Err(c.diags);
@@ -190,6 +191,24 @@ enum Folded {
 }
 
 impl<'s> Compiler<'s> {
+    /// The head parser tokenises into a fixed table of field slots, so a larger limit could
+    /// never be honoured.
+    fn limits(&mut self, limits: &config::Limits) {
+        const MAX_HEADER_FIELDS: u16 = 256;
+        if let Some(n) = limits.max_header_fields.filter(|&n| n > MAX_HEADER_FIELDS) {
+            let at = Where {
+                file: None,
+                ptr: "/limits/maxHeaderFields".to_owned(),
+            };
+            self.error(
+                &at,
+                format!(
+                    "maxHeaderFields is {n}; the largest supported value is {MAX_HEADER_FIELDS}"
+                ),
+            );
+        }
+    }
+
     fn error(&mut self, at: &Where, message: impl Into<String>) {
         self.push(at, message.into(), Severity::Error);
     }
@@ -1428,6 +1447,18 @@ mod tests {
         format!(
             r#"{{"version":1,"sites":[{{"name":"a","hosts":["a.example"],"routes":{routes}}}]}}"#
         )
+    }
+
+    #[test]
+    fn header_field_limit_is_capped_at_the_parser_table() {
+        let config =
+            |n: u32| format!(r#"{{"version":1,"limits":{{"maxHeaderFields":{n}}},"sites":[]}}"#);
+        let (plan, _) = compile_json(&config(256), &[]).expect("256 fields fit the parser");
+        assert_eq!(plan.server.max_header_fields, 256);
+        assert_eq!(
+            errors(&config(257), &[]),
+            ["/limits/maxHeaderFields: maxHeaderFields is 257; the largest supported value is 256"]
+        );
     }
 
     #[test]
