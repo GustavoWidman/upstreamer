@@ -4,7 +4,7 @@
 
 use crate::body::{Body, RequestBody};
 use crate::encode;
-use crate::exchange::{ASpan, ErrorInfo, Exchange, Scheme};
+use crate::exchange::{ASpan, ErrorInfo, Exchange, Proto, Scheme};
 use crate::files;
 use crate::log::debug;
 use crate::msg::{Fields, Known, ResponseHead, Status};
@@ -179,6 +179,8 @@ fn redirect(ex: &mut Exchange, status: Status, location: ASpan) -> Result<Respon
 }
 
 /// Final header edits, one fixed order for every response of a site:
+/// 0. `Alt-Svc` advertising HTTP/3, on h1 and h2 responses of a site that serves it, so a
+///    site header or step op can still change it,
 /// 1. site headers,
 /// 2. pending step ops in step order (main route, then error route),
 /// 3. dynamic compression, decided from the head as the ops left it,
@@ -188,6 +190,11 @@ fn redirect(ex: &mut Exchange, status: Status, location: ASpan) -> Result<Respon
 /// Framing headers are never touched here; the driver writes them.
 pub(crate) fn finalize(site: &SitePlan, ex: &mut Exchange, resp: &mut Response) {
     let fields = &mut resp.head.fields;
+    if let Some(alt_svc) = &site.alt_svc
+        && ex.conn.proto != Proto::H3
+    {
+        fields.set_known(Known::AltSvc, alt_svc);
+    }
     for op in site.headers.iter() {
         match &op.value {
             None => fields.remove(&op.name),
