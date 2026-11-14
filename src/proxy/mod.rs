@@ -140,7 +140,7 @@ pub(crate) async fn forward(
     let upgrade = wants_upgrade(ex);
     client::write_request_head(ex, plan, up_framing(&body), upgrade);
 
-    let mut pooled = core.upstreams.checkout(up.id);
+    let mut pooled = core.upstreams.checkout(up, snap.plan.generation);
     loop {
         let reused = pooled.is_some();
         let mut conn = match pooled.take() {
@@ -418,7 +418,7 @@ pub(crate) async fn dial(
     generation: u64,
     timeout: Duration,
 ) -> Result<UpstreamConn, ProxyError> {
-    let io = tokio::time::timeout(timeout, connect(core, up))
+    let io = tokio::time::timeout(timeout, connect(core, up, generation))
         .await
         .map_err(|_| ProxyError::DialTimeout)??;
     Ok(UpstreamConn {
@@ -432,10 +432,14 @@ pub(crate) async fn dial(
     })
 }
 
-async fn connect(core: &Core, up: &UpstreamPlan) -> Result<UpstreamIo, ProxyError> {
+async fn connect(
+    core: &Core,
+    up: &UpstreamPlan,
+    generation: u64,
+) -> Result<UpstreamIo, ProxyError> {
     let (sock, addr) = match up.addr {
         OriginAddr::Ip(addr) => (Socket::connect(addr).await.map_err(ProxyError::Dial)?, addr),
-        OriginAddr::Name => connect_named(core, up).await?,
+        OriginAddr::Name => connect_named(core, up, generation).await?,
     };
     let Some(tls) = &up.tls else {
         return Ok(UpstreamIo::Plain(Transport::Plain(sock)));
@@ -454,8 +458,12 @@ async fn connect(core: &Core, up: &UpstreamPlan) -> Result<UpstreamIo, ProxyErro
 
 /// Connects to the first address of the origin's name that takes the connection, and keeps
 /// that address first for the next dial.
-async fn connect_named(core: &Core, up: &UpstreamPlan) -> Result<(Socket, SocketAddr), ProxyError> {
-    let addrs = match core.upstreams.resolved(up) {
+async fn connect_named(
+    core: &Core,
+    up: &UpstreamPlan,
+    generation: u64,
+) -> Result<(Socket, SocketAddr), ProxyError> {
+    let addrs = match core.upstreams.resolved(up, generation) {
         Some(addrs) => addrs,
         None => {
             let target = (up.host.to_string(), up.port);
@@ -473,13 +481,13 @@ async fn connect_named(core: &Core, up: &UpstreamPlan) -> Result<(Socket, Socket
             Ok(sock) => {
                 let mut addrs = addrs.clone();
                 addrs.swap(0, i);
-                core.upstreams.remember(up, addrs);
+                core.upstreams.remember(up, generation, Some(addrs));
                 return Ok((sock, addr));
             }
             Err(e) => last = e,
         }
     }
-    core.upstreams.forget(up);
+    core.upstreams.remember(up, generation, None);
     Err(ProxyError::Dial(last))
 }
 
