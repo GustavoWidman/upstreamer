@@ -160,7 +160,7 @@ fn test(plan: &Plan, t: &Test, ex: &mut Exchange, fx: &mut Effects<'_>) -> bool 
 fn is_match(plan: &Plan, fx: &mut Effects<'_>, id: RegexId, hay: &[u8]) -> bool {
     let i = id.0 as usize;
     plan.regexes[i]
-        .search_half_with(&mut fx.regex.caches[i], &Input::new(hay).earliest(true))
+        .search_half_with(fx.regex.get(plan, id), &Input::new(hay).earliest(true))
         .is_some()
 }
 
@@ -172,7 +172,7 @@ fn capture(plan: &Plan, fx: &mut Effects<'_>, id: RegexId, ex: &mut Exchange, ha
     let slots = &mut slots[..2 * groups(plan, id)];
     let input = Input::new(ex.arena.get(hay));
     if plan.regexes[i]
-        .search_slots_with(&mut fx.regex.caches[i], &input, slots)
+        .search_slots_with(fx.regex.get(plan, id), &input, slots)
         .is_none()
     {
         return false;
