@@ -1,0 +1,108 @@
+{
+  "caddyfile": "desktop.Caddyfile",
+  "upstreamer": "desktop.json",
+  "origins": {
+    "NOVNC": "http://127.0.0.1:6080"
+  },
+  "sites": [
+    {
+      "host": "lab",
+      "probes": [
+        {
+          "name": "root redirects to the viewer",
+          "request": "GET /"
+        },
+        {
+          "name": "root with a query",
+          "request": "GET /?x=1"
+        },
+        {
+          "name": "root HEAD",
+          "request": "HEAD /"
+        },
+        {
+          "name": "root POST",
+          "request": "POST /",
+          "body": "x"
+        },
+        {
+          "name": "viewer page",
+          "request": "GET /vnc.html?autoconnect=1&resize=scale"
+        },
+        {
+          "name": "script",
+          "request": "GET /app/ui.js",
+          "headers": [
+            [
+              "Accept-Encoding",
+              "gzip"
+            ]
+          ]
+        },
+        {
+          "name": "websocket",
+          "request": "GET /websockify",
+          "headers": [
+            [
+              "Connection",
+              "Upgrade"
+            ],
+            [
+              "Upgrade",
+              "websocket"
+            ],
+            [
+              "Sec-WebSocket-Version",
+              "13"
+            ],
+            [
+              "Sec-WebSocket-Protocol",
+              "binary"
+            ],
+            [
+              "Sec-WebSocket-Key",
+              "dGhlIHNhbXBsZSBub25jZQ=="
+            ],
+            [
+              "Origin",
+              "http://lab"
+            ]
+          ],
+          "mode": "upgrade"
+        },
+        {
+          "name": "double slash root",
+          "request": "GET //"
+        },
+        {
+          "name": "with spoofed forwarding fields",
+          "request": "GET /vnc.html",
+          "headers": [
+            [
+              "X-Forwarded-For",
+              "203.0.113.9"
+            ]
+          ]
+        },
+        {
+          "name": "no Host field",
+          "request": "GET /",
+          "host": ""
+        }
+      ]
+    },
+    {
+      "host": "100.64.0.7",
+      "probes": [
+        {
+          "name": "by tailnet address",
+          "request": "GET /"
+        },
+        {
+          "name": "viewer by tailnet address",
+          "request": "GET /vnc.html"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "caddyfile": "edge.Caddyfile",
+  "upstreamer": "edge.json",
+  "origins": {
+    "API": "http://127.0.0.1:7979",
+    "NIKS3": "http://127.0.0.1:25915",
+    "STORAGE": "http://storage:9000"
+  },
+  "trees": {
+    "HEIMDALL_WEB": { "dir": "heimdall", "placeholder": "@heimdall-web@" }
+  },
+  "sites": [
+    {
+      "host": "app.example.com",
+      "probes": [
+        { "name": "index", "request": "GET /" },
+        { "name": "index HEAD", "request": "HEAD /" },
+        { "name": "index brotli", "request": "GET /", "headers": [["Accept-Encoding", "gzip, deflate, br, zstd"]] },
+        { "name": "index gzip only", "request": "GET /", "headers": [["Accept-Encoding", "gzip"]] },
+        { "name": "index brotli refused", "request": "GET /", "headers": [["Accept-Encoding", "br;q=0, gzip"]] },
+        { "name": "index revalidated by sidecar etag", "request": "GET /", "headers": [["If-None-Match", "\"index-html-5d41402a\""]] },
+        { "name": "index revalidated by another etag", "request": "GET /", "headers": [["If-None-Match", "\"other\""]] },
+        { "name": "index with If-Modified-Since", "request": "GET /", "headers": [["If-Modified-Since", "Fri, 01 Jan 2100 00:00:00 GMT"]] },
+        { "name": "index.html by name", "request": "GET /index.html" },
+        { "name": "service worker", "request": "GET /sw.js" },
+        { "name": "service worker revalidated", "request": "GET /sw.js", "headers": [["If-None-Match", "\"sw-js-5d41402a\""]] },
+        { "name": "service worker range", "request": "GET /sw.js", "headers": [["Range", "bytes=0-2"]] },
+        { "name": "web manifest", "request": "GET /manifest.webmanifest" },
+        { "name": "app version", "request": "GET /_app/version.json" },
+        { "name": "hashed asset", "request": "GET /_app/immutable/entry/start.abc123.js" },
+        { "name": "hashed asset brotli", "request": "GET /_app/immutable/entry/start.abc123.js", "headers": [["Accept-Encoding", "br"]] },
+        { "name": "hashed asset gzip without a sidecar", "request": "GET /_app/immutable/entry/start.abc123.js", "headers": [["Accept-Encoding", "gzip"]] },
+        { "name": "missing hashed asset", "request": "GET /_app/immutable/entry/gone.js" },
+        { "name": "missing file under _app", "request": "GET /_app/gone.json" },
+        { "name": "client route", "request": "GET /settings" },
+        { "name": "client route with a query", "request": "GET /vault/items?sort=name" },
+        { "name": "client route with a trailing slash", "request": "GET /settings/" },
+        { "name": "client route HEAD", "request": "HEAD /settings" },
+        { "name": "etag sidecar", "request": "GET /index.html.etag" },
+        { "name": "brotli sidecar", "request": "GET /index.html.br" },
+        { "name": "gzip sidecar", "request": "GET /index.html.gz" },
+        { "name": "dot-dot path", "request": "GET /../../etc/passwd" },
+        { "name": "encoded dot-dot path", "request": "GET /%2e%2e/%2e%2e/etc/passwd" },
+        { "name": "POST to the file server", "request": "POST /", "body": "x=1" },
+        { "name": "DELETE to the file server", "request": "DELETE /sw.js" },
+        { "name": "OPTIONS to the file server", "request": "OPTIONS /" },
+        { "name": "api GET with a query", "request": "GET /api/sync?since=5" },
+        { "name": "api HEAD", "request": "HEAD /api/sync" },
+        { "name": "api POST", "request": "POST /api/items", "headers": [["Content-Type", "application/json"]], "body": "{\"name\":\"a\"}" },
+        { "name": "api POST chunked", "request": "POST /api/items", "headers": [["Content-Type", "application/json"]], "body": "{\"name\":\"chunked\"}", "chunked": true },
+        { "name": "api root with a slash", "request": "GET /api/" },
+        { "name": "api without a slash is a client route", "request": "GET /api" },
+        { "name": "api keeps If-Modified-Since", "request": "GET /api/sync", "headers": [["If-Modified-Since", "Fri, 01 Jan 2100 00:00:00 GMT"]] },
+        { "name": "api conditional passes through", "request": "GET /api/sync", "headers": [["If-None-Match", "\"o1\""]] },
+        { "name": "api error status passes through", "request": "GET /api/status/500" },
+        { "name": "api not found passes through", "request": "GET /api/status/404" },
+        { "name": "api response fields the site also sets", "request": "GET /api/origin-headers" },
+        { "name": "api large body is not compressed", "request": "GET /api/large", "headers": [["Accept-Encoding", "gzip, zstd"]] },
+        { "name": "api with spoofed forwarding fields", "request": "GET /api/sync", "headers": [["X-Forwarded-For", "203.0.113.9"], ["X-Forwarded-Host", "evil.example"], ["X-Forwarded-Proto", "https"], ["X-Real-IP", "203.0.113.9"]] },
+        { "name": "api with a cookie and authorization", "request": "GET /api/vault", "headers": [["Cookie", "session=abc"], ["Authorization", "Bearer t"]] },
+        { "name": "api with an encoded slash", "request": "GET /api/items/a%2Fb?q=%20x" },
+        { "name": "api upper case is a client route", "request": "GET /API/sync" },
+        { "name": "api event stream", "request": "GET /api/live", "headers": [["Accept", "text/event-stream"]], "mode": "stream" },
+        { "name": "api websocket upgrade", "request": "GET /api/ws", "headers": [["Connection", "Upgrade"], ["Upgrade", "websocket"], ["Sec-WebSocket-Version", "13"], ["Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="]], "mode": "upgrade" },
+        { "name": "unknown host", "request": "GET /", "host": "unknown.example.com" },
+        { "name": "host with a port", "request": "GET /", "host": "app.example.com:8443" },
+        { "name": "host in upper case", "request": "GET /", "host": "APP.example.com" }
+      ]
+    },
+    {
+      "host": "s3.cache.example.com",
+      "probes": [
+        { "name": "bucket root", "request": "GET /bucket" },
+        { "name": "bucket listing", "request": "GET /bucket/?list-type=2&prefix=nar%2F" },
+        { "name": "signed object GET", "request": "GET /bucket/nar/0a1b.nar.xz?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AK%2F20261114%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Signature=abc", "headers": [["Authorization", "AWS4-HMAC-SHA256 Credential=AK/20261114/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc"], ["X-Amz-Date", "20261114T000000Z"], ["X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD"]] },
+        { "name": "signed object HEAD", "request": "HEAD /bucket/0a1b.narinfo", "headers": [["X-Amz-Date", "20261114T000000Z"]] },
+        { "name": "object PUT", "request": "PUT /bucket/0a1b.narinfo", "headers": [["Content-Type", "text/x-nix-narinfo"], ["X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD"]], "body": "StorePath: /nix/store/0a1b-hello\n" },
+        { "name": "object key with reserved characters", "request": "GET /bucket/a%20b+c%3Dd/%E2%9C%93?x=1&x=2" },
+        { "name": "double slash in a key", "request": "GET /bucket//nar//x" },
+        { "name": "bucket name prefix of another", "request": "GET /bucketx/obj" },
+        { "name": "outside the bucket", "request": "GET /" },
+        { "name": "outside the bucket HEAD", "request": "HEAD /other" },
+        { "name": "bucket in upper case", "request": "GET /BUCKET/obj" },
+        { "name": "dot-dot out of the bucket", "request": "GET /bucket/../secret" }
+      ]
+    },
+    {
+      "host": "cache.example.com",
+      "probes": [
+        { "name": "cache info", "request": "GET /nix-cache-info" },
+        { "name": "narinfo HEAD", "request": "HEAD /0a1b.narinfo" },
+        { "name": "nar GET", "request": "GET /nar/0a1b.nar.xz", "headers": [["Accept-Encoding", "gzip"]] },
+        { "name": "api GET takes the long timeout route", "request": "GET /api/closure/0a1b" },
+        { "name": "api POST", "request": "POST /api/pending_closures", "headers": [["Authorization", "Bearer t"], ["Content-Type", "application/json"]], "body": "{\"closure\":\"0a1b\",\"narinfos\":[]}" },
+        { "name": "narinfo PUT goes to the second route", "request": "PUT /0a1b.narinfo", "body": "StorePath: x\n" },
+        { "name": "DELETE", "request": "DELETE /0a1b.narinfo" },
+        { "name": "read past 15s times out", "request": "GET /slow.narinfo" },
+        { "name": "upload past 15s does not", "request": "POST /api/slow", "body": "x" },
+        { "name": "with spoofed forwarding fields", "request": "GET /nix-cache-info", "headers": [["X-Forwarded-For", "203.0.113.9"]] }
+      ]
+    }
+  ]
+}

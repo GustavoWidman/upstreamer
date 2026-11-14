@@ -1,0 +1,3247 @@
+[
+  {
+    "kind": "finding",
+    "about": "An uncompressed answer that the encode step would compress for another client (a long, compressible body) has no `Vary: Accept-Encoding`; Caddy's encode adds it. A shared cache may keep the identity answer for every client, and the portfolio's `_astro` assets are `public, max-age=31536000, immutable` (RFC 9110 §12.5.5).",
+    "differences": [
+      {
+        "site": "example.org",
+        "probe": "long page",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "long page gzip refused",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "long page HEAD gzip",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "long page range",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "large hashed asset",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "large hashed asset HEAD gzip",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      }
+    ]
+  },
+  {
+    "kind": "finding",
+    "about": "A precompressed sidecar (`.br`, `.gz`) is served with the identity file's strong sidecar ETag and without `Accept-Ranges`; Caddy gives the encoded file an ETag of its own. Two representations then share one strong validator (RFC 9110 §8.8.3), so If-Range or a cache can mix their bytes.",
+    "differences": [
+      {
+        "site": "app.example.com",
+        "probe": "index brotli",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "index brotli",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "\"index-html-5d41402a\""
+      },
+      {
+        "site": "app.example.com",
+        "probe": "index gzip only",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "index gzip only",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "\"index-html-5d41402a\""
+      },
+      {
+        "site": "app.example.com",
+        "probe": "index brotli refused",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "index brotli refused",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "\"index-html-5d41402a\""
+      },
+      {
+        "site": "app.example.com",
+        "probe": "hashed asset brotli",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "home brotli",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "home brotli",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "\"index-html-5d41402a\""
+      }
+    ]
+  },
+  {
+    "kind": "finding",
+    "about": "HEAD of a resource that GET compresses answers as the identity representation (no Content-Encoding, the strong ETag, Accept-Ranges); Caddy's HEAD shows the fields its GET sends (RFC 9110 §9.3.2).",
+    "differences": [
+      {
+        "site": "example.org",
+        "probe": "long page HEAD gzip",
+        "field": "header accept-ranges",
+        "caddy": "(absent)",
+        "upstreamer": "bytes"
+      },
+      {
+        "site": "example.org",
+        "probe": "long page HEAD gzip",
+        "field": "header content-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "long page HEAD gzip",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "\"long-index-html-9e107d9d\""
+      },
+      {
+        "site": "example.org",
+        "probe": "large hashed asset HEAD gzip",
+        "field": "header accept-ranges",
+        "caddy": "(absent)",
+        "upstreamer": "bytes"
+      },
+      {
+        "site": "example.org",
+        "probe": "large hashed asset HEAD gzip",
+        "field": "header content-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      }
+    ]
+  },
+  {
+    "kind": "finding",
+    "about": "A dynamically compressed answer carries the sidecar ETag made weak (`W/\"...\"`); Caddy keeps it strong with a `-gzip` or `-zstd` suffix. Both are valid, and If-None-Match matches either.",
+    "differences": [
+      {
+        "site": "example.org",
+        "probe": "long page gzip",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "W/\"long-index-html-9e107d9d\""
+      },
+      {
+        "site": "example.org",
+        "probe": "long page zstd",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "W/\"long-index-html-9e107d9d\""
+      },
+      {
+        "site": "example.org",
+        "probe": "long page zstd and gzip",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "W/\"long-index-html-9e107d9d\""
+      }
+    ]
+  },
+  {
+    "kind": "finding",
+    "about": "On the portfolio, a 405 keeps the Content-Type that steps before the error set (`text/html` from the `*.html` step) on the plain status text of the catch-all error route; Caddy drops deferred header operations when a handler errors and sends `text/plain`.",
+    "differences": [
+      {
+        "site": "example.org",
+        "probe": "POST",
+        "field": "header content-type",
+        "caddy": "text/plain; charset=utf-8",
+        "upstreamer": "text/html; charset=utf-8"
+      },
+      {
+        "site": "example.org",
+        "probe": "OPTIONS",
+        "field": "header content-type",
+        "caddy": "text/plain; charset=utf-8",
+        "upstreamer": "text/html; charset=utf-8"
+      }
+    ]
+  },
+  {
+    "kind": "finding",
+    "about": "A request-target whose `..` segments climb above the root gets a bare 400 without site headers; Caddy cleans the path and answers as for the cleaned path (heimdall's index.html, the portfolio's 404 page).",
+    "differences": [
+      {
+        "site": "app.example.com",
+        "probe": "dot-dot path",
+        "field": "status",
+        "caddy": "200",
+        "upstreamer": "400"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "dot-dot path",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "dot-dot path",
+        "field": "header cache-control",
+        "caddy": "no-cache",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "dot-dot path",
+        "field": "header content-type",
+        "caddy": "text/html; charset=utf-8",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "dot-dot path",
+        "field": "header cross-origin-opener-policy",
+        "caddy": "same-origin",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "dot-dot path",
+        "field": "header etag",
+        "caddy": "\"index-html-5d41402a\"",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "dot-dot path",
+        "field": "header permissions-policy",
+        "caddy": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "dot-dot path",
+        "field": "header referrer-policy",
+        "caddy": "no-referrer",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "dot-dot path",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "dot-dot path",
+        "field": "header x-content-type-options",
+        "caddy": "nosniff",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "dot-dot path",
+        "field": "header x-frame-options",
+        "caddy": "DENY",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "dot-dot path",
+        "field": "body",
+        "caddy": "11 bytes, sha256 9bf4884b82a5, \"index.html\\n\"",
+        "upstreamer": "(empty)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "encoded dot-dot path",
+        "field": "status",
+        "caddy": "200",
+        "upstreamer": "400"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "encoded dot-dot path",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "encoded dot-dot path",
+        "field": "header cache-control",
+        "caddy": "no-cache",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "encoded dot-dot path",
+        "field": "header content-type",
+        "caddy": "text/html; charset=utf-8",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "encoded dot-dot path",
+        "field": "header cross-origin-opener-policy",
+        "caddy": "same-origin",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "encoded dot-dot path",
+        "field": "header etag",
+        "caddy": "\"index-html-5d41402a\"",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "encoded dot-dot path",
+        "field": "header permissions-policy",
+        "caddy": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "encoded dot-dot path",
+        "field": "header referrer-policy",
+        "caddy": "no-referrer",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "encoded dot-dot path",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "encoded dot-dot path",
+        "field": "header x-content-type-options",
+        "caddy": "nosniff",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "encoded dot-dot path",
+        "field": "header x-frame-options",
+        "caddy": "DENY",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "encoded dot-dot path",
+        "field": "body",
+        "caddy": "11 bytes, sha256 9bf4884b82a5, \"index.html\\n\"",
+        "upstreamer": "(empty)"
+      },
+      {
+        "site": "example.org",
+        "probe": "dot-dot out of the tree",
+        "field": "status",
+        "caddy": "404",
+        "upstreamer": "400"
+      },
+      {
+        "site": "example.org",
+        "probe": "dot-dot out of the tree",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "dot-dot out of the tree",
+        "field": "header cache-control",
+        "caddy": "private, no-cache",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "dot-dot out of the tree",
+        "field": "header content-type",
+        "caddy": "text/html; charset=utf-8",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "dot-dot out of the tree",
+        "field": "header cross-origin-opener-policy",
+        "caddy": "same-origin",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "dot-dot out of the tree",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "dot-dot out of the tree",
+        "field": "header permissions-policy",
+        "caddy": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "dot-dot out of the tree",
+        "field": "header referrer-policy",
+        "caddy": "strict-origin-when-cross-origin",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "dot-dot out of the tree",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "dot-dot out of the tree",
+        "field": "header x-content-type-options",
+        "caddy": "nosniff",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "dot-dot out of the tree",
+        "field": "header x-frame-options",
+        "caddy": "DENY",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "dot-dot out of the tree",
+        "field": "body",
+        "caddy": "25 bytes, sha256 5e367cffef0b, \"site/e0/main/en/404.html\\n\"",
+        "upstreamer": "(empty)"
+      }
+    ]
+  },
+  {
+    "kind": "finding",
+    "about": "A 304 carries Content-Type, from the file server and passed through from origins; Caddy removes it. RFC 9110 §15.4.5 asks a 304 not to carry representation metadata beyond its list.",
+    "differences": [
+      {
+        "site": "app.example.com",
+        "probe": "api conditional passes through",
+        "field": "header content-type",
+        "caddy": "(absent)",
+        "upstreamer": "text/plain; charset=utf-8"
+      },
+      {
+        "site": "example.org",
+        "probe": "home revalidated by sidecar etag",
+        "field": "header content-type",
+        "caddy": "(absent)",
+        "upstreamer": "text/html; charset=utf-8"
+      },
+      {
+        "site": "example.org",
+        "probe": "home revalidated by a weak sidecar etag",
+        "field": "header content-type",
+        "caddy": "(absent)",
+        "upstreamer": "text/html; charset=utf-8"
+      },
+      {
+        "site": "example.org",
+        "probe": "robots.txt revalidated",
+        "field": "header content-type",
+        "caddy": "(absent)",
+        "upstreamer": "text/plain; charset=utf-8"
+      },
+      {
+        "site": "mail.example.net",
+        "probe": "conditional",
+        "field": "header content-type",
+        "caddy": "(absent)",
+        "upstreamer": "text/plain; charset=utf-8"
+      }
+    ]
+  },
+  {
+    "kind": "finding",
+    "about": "Caddy adds `Via: 1.1 Caddy` to every request it forwards and every proxied response; upstreamer adds none. RFC 9110 §7.6.3 requires a gateway to send Via on the requests it forwards.",
+    "differences": [
+      {
+        "site": "app.example.com",
+        "probe": "api GET with a query",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api GET with a query",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api HEAD",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api HEAD",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api POST",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api POST",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api POST chunked",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api POST chunked",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api root with a slash",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api root with a slash",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api keeps If-Modified-Since",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api keeps If-Modified-Since",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api conditional passes through",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api conditional passes through",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api error status passes through",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api error status passes through",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api not found passes through",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api not found passes through",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api response fields the site also sets",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api response fields the site also sets",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api large body is not compressed",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api large body is not compressed",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api with spoofed forwarding fields",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api with spoofed forwarding fields",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api with a cookie and authorization",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api with a cookie and authorization",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api with an encoded slash",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api with an encoded slash",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api event stream",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api event stream",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api websocket upgrade",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "bucket root",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "bucket root",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "bucket listing",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "bucket listing",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "signed object GET",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "signed object GET",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "signed object HEAD",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "signed object HEAD",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "object PUT",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "object PUT",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "object key with reserved characters",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "object key with reserved characters",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "double slash in a key",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "double slash in a key",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "cache info",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "cache info",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "narinfo HEAD",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "narinfo HEAD",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "nar GET",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "nar GET",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "api GET takes the long timeout route",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "api GET takes the long timeout route",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "api POST",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "api POST",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "narinfo PUT goes to the second route",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "narinfo PUT goes to the second route",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "DELETE",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "DELETE",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "read past 15s times out",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "upload past 15s does not",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "upload past 15s does not",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "with spoofed forwarding fields",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "with spoofed forwarding fields",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "dns.example.net",
+        "probe": "DoH GET",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "dns.example.net",
+        "probe": "DoH GET",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "dns.example.net",
+        "probe": "DoH POST",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "dns.example.net",
+        "probe": "DoH POST",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "dns.example.net",
+        "probe": "admin page",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "dns.example.net",
+        "probe": "admin page",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "dns.example.net",
+        "probe": "with spoofed forwarding fields",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "dns.example.net",
+        "probe": "with spoofed forwarding fields",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "admin.example.net",
+        "probe": "page",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "admin.example.net",
+        "probe": "page",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "admin.example.net",
+        "probe": "with spoofed forwarding fields",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "admin.example.net",
+        "probe": "with spoofed forwarding fields",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "relay.example.net",
+        "probe": "DERP upgrade",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "relay.example.net",
+        "probe": "websocket upgrade",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "relay.example.net",
+        "probe": "probe",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "relay.example.net",
+        "probe": "probe",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "relay.example.net",
+        "probe": "no content",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "relay.example.net",
+        "probe": "no content",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "relay.example.net",
+        "probe": "home",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "relay.example.net",
+        "probe": "home",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "panel",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "panel",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "panel API",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "panel API",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "panel websocket",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon root",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon root",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon without a slash goes to the panel",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon without a slash goes to the panel",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon API with a query",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon API with a query",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon path with an encoded slash",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon path with an encoded slash",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon prefix twice",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon prefix twice",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon upload",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon upload",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon websocket",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon look-alike",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon look-alike",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "files.example.net",
+        "probe": "listing",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "files.example.net",
+        "probe": "listing",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "files.example.net",
+        "probe": "download",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "files.example.net",
+        "probe": "download",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "files.example.net",
+        "probe": "upload",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "files.example.net",
+        "probe": "upload",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "files.example.net",
+        "probe": "with a spoofed X-Forwarded-For",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "files.example.net",
+        "probe": "with a spoofed X-Forwarded-For",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "files.example.net",
+        "probe": "origin error passes through",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "files.example.net",
+        "probe": "origin error passes through",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "mail.example.net",
+        "probe": "inbox",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "mail.example.net",
+        "probe": "inbox",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "mail.example.net",
+        "probe": "login",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "mail.example.net",
+        "probe": "login",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "mail.example.net",
+        "probe": "fields the site also sets",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "mail.example.net",
+        "probe": "fields the site also sets",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "mail.example.net",
+        "probe": "origin not found",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "mail.example.net",
+        "probe": "origin not found",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "mail.example.net",
+        "probe": "conditional",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "mail.example.net",
+        "probe": "conditional",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "lab",
+        "probe": "viewer page",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "lab",
+        "probe": "viewer page",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "lab",
+        "probe": "script",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "lab",
+        "probe": "script",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "lab",
+        "probe": "websocket",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "lab",
+        "probe": "with spoofed forwarding fields",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "lab",
+        "probe": "with spoofed forwarding fields",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "100.64.0.7",
+        "probe": "viewer by tailnet address",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "100.64.0.7",
+        "probe": "viewer by tailnet address",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      }
+    ]
+  },
+  {
+    "kind": "finding",
+    "about": "Caddy's upstream client adds `Accept-Encoding: gzip` to a request that had none and decompresses the answer itself; upstreamer forwards the client's fields unchanged, so origins answer uncompressed.",
+    "differences": [
+      {
+        "site": "app.example.com",
+        "probe": "api GET with a query",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api POST",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api POST chunked",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api root with a slash",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api keeps If-Modified-Since",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api conditional passes through",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api error status passes through",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api not found passes through",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api response fields the site also sets",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api with spoofed forwarding fields",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api with a cookie and authorization",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api with an encoded slash",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api event stream",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api websocket upgrade",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "bucket root",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "bucket listing",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "signed object GET",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "object PUT",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "object key with reserved characters",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "double slash in a key",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "cache info",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "api GET takes the long timeout route",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "api POST",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "narinfo PUT goes to the second route",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "DELETE",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "read past 15s times out",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "upload past 15s does not",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "cache.example.com",
+        "probe": "with spoofed forwarding fields",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "dns.example.net",
+        "probe": "DoH GET",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "dns.example.net",
+        "probe": "DoH POST",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "dns.example.net",
+        "probe": "admin page",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "dns.example.net",
+        "probe": "with spoofed forwarding fields",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "admin.example.net",
+        "probe": "page",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "admin.example.net",
+        "probe": "with spoofed forwarding fields",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "relay.example.net",
+        "probe": "DERP upgrade",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "relay.example.net",
+        "probe": "websocket upgrade",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "relay.example.net",
+        "probe": "probe",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "relay.example.net",
+        "probe": "no content",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "relay.example.net",
+        "probe": "home",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "panel",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "panel API",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "panel websocket",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon root",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon without a slash goes to the panel",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon API with a query",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon path with an encoded slash",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon prefix twice",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon upload",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon websocket",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon look-alike",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "files.example.net",
+        "probe": "listing",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "files.example.net",
+        "probe": "upload",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "files.example.net",
+        "probe": "with a spoofed X-Forwarded-For",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "files.example.net",
+        "probe": "origin error passes through",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "mail.example.net",
+        "probe": "inbox",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "mail.example.net",
+        "probe": "login",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "mail.example.net",
+        "probe": "fields the site also sets",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "mail.example.net",
+        "probe": "origin not found",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "mail.example.net",
+        "probe": "conditional",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "lab",
+        "probe": "viewer page",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "lab",
+        "probe": "websocket",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "lab",
+        "probe": "with spoofed forwarding fields",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "100.64.0.7",
+        "probe": "viewer by tailnet address",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      }
+    ]
+  },
+  {
+    "kind": "finding",
+    "about": "Caddy lowercases the Upgrade token in both directions (`derp`); upstreamer forwards the client's and the origin's `DERP` as sent.",
+    "differences": [
+      {
+        "site": "relay.example.net",
+        "probe": "DERP upgrade",
+        "field": "header upgrade",
+        "caddy": "derp",
+        "upstreamer": "DERP"
+      },
+      {
+        "site": "relay.example.net",
+        "probe": "DERP upgrade",
+        "field": "upstream header upgrade",
+        "caddy": "derp",
+        "upstreamer": "DERP"
+      }
+    ]
+  },
+  {
+    "kind": "finding",
+    "about": "Errors raised by the file server (404, 405) or an `error` step carry the site headers and the Cache-Control set before them; Caddy's bare error responses carry none of its `header` fields. upstreamer's answer is the intended one: site headers apply to every response.",
+    "differences": [
+      {
+        "site": "app.example.com",
+        "probe": "missing hashed asset",
+        "field": "header cross-origin-opener-policy",
+        "caddy": "(absent)",
+        "upstreamer": "same-origin"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "missing hashed asset",
+        "field": "header permissions-policy",
+        "caddy": "(absent)",
+        "upstreamer": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "missing hashed asset",
+        "field": "header referrer-policy",
+        "caddy": "(absent)",
+        "upstreamer": "no-referrer"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "missing hashed asset",
+        "field": "header x-content-type-options",
+        "caddy": "(absent)",
+        "upstreamer": "nosniff"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "missing hashed asset",
+        "field": "header x-frame-options",
+        "caddy": "(absent)",
+        "upstreamer": "DENY"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "missing file under _app",
+        "field": "header cache-control",
+        "caddy": "(absent)",
+        "upstreamer": "no-cache"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "missing file under _app",
+        "field": "header cross-origin-opener-policy",
+        "caddy": "(absent)",
+        "upstreamer": "same-origin"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "missing file under _app",
+        "field": "header permissions-policy",
+        "caddy": "(absent)",
+        "upstreamer": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "missing file under _app",
+        "field": "header referrer-policy",
+        "caddy": "(absent)",
+        "upstreamer": "no-referrer"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "missing file under _app",
+        "field": "header x-content-type-options",
+        "caddy": "(absent)",
+        "upstreamer": "nosniff"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "missing file under _app",
+        "field": "header x-frame-options",
+        "caddy": "(absent)",
+        "upstreamer": "DENY"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "etag sidecar",
+        "field": "header cache-control",
+        "caddy": "(absent)",
+        "upstreamer": "no-cache"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "etag sidecar",
+        "field": "header cross-origin-opener-policy",
+        "caddy": "(absent)",
+        "upstreamer": "same-origin"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "etag sidecar",
+        "field": "header permissions-policy",
+        "caddy": "(absent)",
+        "upstreamer": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "etag sidecar",
+        "field": "header referrer-policy",
+        "caddy": "(absent)",
+        "upstreamer": "no-referrer"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "etag sidecar",
+        "field": "header x-content-type-options",
+        "caddy": "(absent)",
+        "upstreamer": "nosniff"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "etag sidecar",
+        "field": "header x-frame-options",
+        "caddy": "(absent)",
+        "upstreamer": "DENY"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "brotli sidecar",
+        "field": "header cache-control",
+        "caddy": "(absent)",
+        "upstreamer": "no-cache"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "brotli sidecar",
+        "field": "header cross-origin-opener-policy",
+        "caddy": "(absent)",
+        "upstreamer": "same-origin"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "brotli sidecar",
+        "field": "header permissions-policy",
+        "caddy": "(absent)",
+        "upstreamer": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "brotli sidecar",
+        "field": "header referrer-policy",
+        "caddy": "(absent)",
+        "upstreamer": "no-referrer"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "brotli sidecar",
+        "field": "header x-content-type-options",
+        "caddy": "(absent)",
+        "upstreamer": "nosniff"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "brotli sidecar",
+        "field": "header x-frame-options",
+        "caddy": "(absent)",
+        "upstreamer": "DENY"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "gzip sidecar",
+        "field": "header cache-control",
+        "caddy": "(absent)",
+        "upstreamer": "no-cache"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "gzip sidecar",
+        "field": "header cross-origin-opener-policy",
+        "caddy": "(absent)",
+        "upstreamer": "same-origin"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "gzip sidecar",
+        "field": "header permissions-policy",
+        "caddy": "(absent)",
+        "upstreamer": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "gzip sidecar",
+        "field": "header referrer-policy",
+        "caddy": "(absent)",
+        "upstreamer": "no-referrer"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "gzip sidecar",
+        "field": "header x-content-type-options",
+        "caddy": "(absent)",
+        "upstreamer": "nosniff"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "gzip sidecar",
+        "field": "header x-frame-options",
+        "caddy": "(absent)",
+        "upstreamer": "DENY"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "POST to the file server",
+        "field": "header cache-control",
+        "caddy": "(absent)",
+        "upstreamer": "no-cache"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "POST to the file server",
+        "field": "header cross-origin-opener-policy",
+        "caddy": "(absent)",
+        "upstreamer": "same-origin"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "POST to the file server",
+        "field": "header permissions-policy",
+        "caddy": "(absent)",
+        "upstreamer": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "POST to the file server",
+        "field": "header referrer-policy",
+        "caddy": "(absent)",
+        "upstreamer": "no-referrer"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "POST to the file server",
+        "field": "header x-content-type-options",
+        "caddy": "(absent)",
+        "upstreamer": "nosniff"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "POST to the file server",
+        "field": "header x-frame-options",
+        "caddy": "(absent)",
+        "upstreamer": "DENY"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "DELETE to the file server",
+        "field": "header cache-control",
+        "caddy": "(absent)",
+        "upstreamer": "no-cache"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "DELETE to the file server",
+        "field": "header cross-origin-opener-policy",
+        "caddy": "(absent)",
+        "upstreamer": "same-origin"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "DELETE to the file server",
+        "field": "header permissions-policy",
+        "caddy": "(absent)",
+        "upstreamer": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "DELETE to the file server",
+        "field": "header referrer-policy",
+        "caddy": "(absent)",
+        "upstreamer": "no-referrer"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "DELETE to the file server",
+        "field": "header x-content-type-options",
+        "caddy": "(absent)",
+        "upstreamer": "nosniff"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "DELETE to the file server",
+        "field": "header x-frame-options",
+        "caddy": "(absent)",
+        "upstreamer": "DENY"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "OPTIONS to the file server",
+        "field": "header cache-control",
+        "caddy": "(absent)",
+        "upstreamer": "no-cache"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "OPTIONS to the file server",
+        "field": "header cross-origin-opener-policy",
+        "caddy": "(absent)",
+        "upstreamer": "same-origin"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "OPTIONS to the file server",
+        "field": "header permissions-policy",
+        "caddy": "(absent)",
+        "upstreamer": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "OPTIONS to the file server",
+        "field": "header referrer-policy",
+        "caddy": "(absent)",
+        "upstreamer": "no-referrer"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "OPTIONS to the file server",
+        "field": "header x-content-type-options",
+        "caddy": "(absent)",
+        "upstreamer": "nosniff"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "OPTIONS to the file server",
+        "field": "header x-frame-options",
+        "caddy": "(absent)",
+        "upstreamer": "DENY"
+      }
+    ]
+  },
+  {
+    "kind": "finding",
+    "about": "A 404 page served by an error route has no ETag and no Accept-Ranges; Caddy's file_server adds its default ETag and Accept-Ranges to the custom-status page.",
+    "differences": [
+      {
+        "site": "example.org",
+        "probe": "index for a browser",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "index for a browser",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "blog post missing in Portuguese",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "blog post missing in Portuguese",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "missing post .mdx",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "missing post .mdx",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "backslash open redirect",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "backslash open redirect",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "tab open redirect",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "tab open redirect",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "CRLF in a redirect",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "CRLF in a redirect",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "internal markdown",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "internal markdown",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "internal markdown directory",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "internal markdown directory",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "internal curl card",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "internal curl card",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "404 page by name",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "404 page by name",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "etag sidecar",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "etag sidecar",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "static etag sidecar",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "static etag sidecar",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "missing hashed asset",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "missing hashed asset",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "missing open graph image",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "missing open graph image",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "not found",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "not found",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "not found in Portuguese",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "not found in Portuguese",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "not found gzip",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "not found gzip",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "not found HEAD",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "not found HEAD",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "blog.example.org",
+        "probe": "not found",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "blog.example.org",
+        "probe": "not found",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "blog.example.org",
+        "probe": "main-only page",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "blog.example.org",
+        "probe": "main-only page",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      }
+    ]
+  },
+  {
+    "kind": "finding",
+    "about": "Caddy adds `Vary: Accept-Encoding` to every answer of a route with encode or precompressed; upstreamer adds it only when the answer can differ by Accept-Encoding (a sidecar exists or the body is long enough to compress). Nothing a client receives depends on the missing token.",
+    "differences": [
+      {
+        "site": "app.example.com",
+        "probe": "service worker",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "service worker revalidated",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "service worker range",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "web manifest",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "app version",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "POST to the file server",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "DELETE to the file server",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "OPTIONS to the file server",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "home in Portuguese by Accept-Language",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "home Accept-Language split over two fields",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "home in Portuguese by cookie",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "home in Portuguese by query",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "home for curl",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "index for curl",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "index for a browser",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "blog index",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "blog index in Portuguese",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "blog post",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "blog post missing in Portuguese",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "blog markdown by query",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "blog markdown by raw",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "post markdown by Accept",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "post markdown by Accept with a wildcard first",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "post markdown by Accept among others",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "post for GPTBot",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "post for ClaudeBot",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "post for Googlebot",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "blog .mdx",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "llms blog",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "llms post",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "post .mdx",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "missing post .mdx",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "rss",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "sitemap",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "backslash open redirect",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "tab open redirect",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "CRLF in a redirect",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "internal markdown",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "internal markdown directory",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "internal curl card",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "404 page by name",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "etag sidecar",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "static etag sidecar",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "hashed asset",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "hashed asset gzip",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "missing hashed asset",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "open graph image",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "missing open graph image",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "robots.txt",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "robots.txt revalidated",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "favicon",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "résumé",
+        "field": "header vary",
+        "caddy": "accept-encoding",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "not found",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "not found in Portuguese",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "not found gzip",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "not found HEAD",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "upper case path",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "example.org",
+        "probe": "POST",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "example.org",
+        "probe": "OPTIONS",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "www.example.org",
+        "probe": "blog post",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "blog.example.org",
+        "probe": "home",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "blog.example.org",
+        "probe": "home in Portuguese",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "blog.example.org",
+        "probe": "post",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "blog.example.org",
+        "probe": "home for curl",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "blog.example.org",
+        "probe": "home markdown by Accept",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "blog.example.org",
+        "probe": "post markdown by query",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "accept, accept-language, cookie, user-agent"
+      },
+      {
+        "site": "blog.example.org",
+        "probe": "post .mdx",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "blog.example.org",
+        "probe": "rss",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "blog.example.org",
+        "probe": "not found",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      },
+      {
+        "site": "blog.example.org",
+        "probe": "main-only page",
+        "field": "header vary",
+        "caddy": "accept-encoding, accept-language, cookie",
+        "upstreamer": "accept-language, cookie"
+      }
+    ]
+  },
+  {
+    "kind": "finding",
+    "about": "A site header replaces the origin's field of the same name; Caddy's immediate `header` operations add to the origin's fields, so its client receives two X-Frame-Options values.",
+    "differences": [
+      {
+        "site": "mail.example.net",
+        "probe": "fields the site also sets",
+        "field": "header x-frame-options",
+        "caddy": "SAMEORIGIN | ALLOWALL",
+        "upstreamer": "SAMEORIGIN"
+      }
+    ]
+  },
+  {
+    "kind": "finding",
+    "about": "A Host no site serves gets 404; Caddy answers 200 with an empty body.",
+    "differences": [
+      {
+        "site": "app.example.com",
+        "probe": "unknown host",
+        "field": "status",
+        "caddy": "200",
+        "upstreamer": "404"
+      },
+      {
+        "site": "unknown.example.org",
+        "probe": "unknown host",
+        "field": "status",
+        "caddy": "200",
+        "upstreamer": "404"
+      }
+    ]
+  },
+  {
+    "kind": "finding",
+    "about": "A request without Host gets 400 from both; Caddy's carries a text body, upstreamer's is empty.",
+    "differences": [
+      {
+        "site": "unknown.example.org",
+        "probe": "no Host field",
+        "field": "header content-type",
+        "caddy": "text/plain; charset=utf-8",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "unknown.example.org",
+        "probe": "no Host field",
+        "field": "body",
+        "caddy": "45 bytes, sha256 d2ea46080e3f, \"400 Bad Request: missing required Host header\"",
+        "upstreamer": "(empty)"
+      },
+      {
+        "site": "lab",
+        "probe": "no Host field",
+        "field": "header content-type",
+        "caddy": "text/plain; charset=utf-8",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "lab",
+        "probe": "no Host field",
+        "field": "body",
+        "caddy": "45 bytes, sha256 d2ea46080e3f, \"400 Bad Request: missing required Host header\"",
+        "upstreamer": "(empty)"
+      }
+    ]
+  },
+  {
+    "kind": "accepted",
+    "about": "Tradeoffs accepted: \"Paths match case-sensitively.\" Caddy's path matchers and handle_path ignore case.",
+    "differences": [
+      {
+        "site": "app.example.com",
+        "probe": "api upper case is a client route",
+        "field": "header accept-ranges",
+        "caddy": "(absent)",
+        "upstreamer": "bytes"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api upper case is a client route",
+        "field": "header cache-control",
+        "caddy": "(absent)",
+        "upstreamer": "no-cache"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api upper case is a client route",
+        "field": "header content-type",
+        "caddy": "text/plain; charset=utf-8",
+        "upstreamer": "text/html; charset=utf-8"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api upper case is a client route",
+        "field": "header etag",
+        "caddy": "\"o1\"",
+        "upstreamer": "\"index-html-5d41402a\""
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api upper case is a client route",
+        "field": "header vary",
+        "caddy": "(absent)",
+        "upstreamer": "accept-encoding"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api upper case is a client route",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api upper case is a client route",
+        "field": "header x-origin",
+        "caddy": "API",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api upper case is a client route",
+        "field": "body",
+        "caddy": "28 bytes, sha256 fbd2326085f8, \"API: GET /API/sync HTTP/1.1\\n\"",
+        "upstreamer": "11 bytes, sha256 9bf4884b82a5, \"index.html\\n\""
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api upper case is a client route",
+        "field": "upstream",
+        "caddy": "API GET /API/sync HTTP/1.1",
+        "upstreamer": "(none)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "bucket in upper case",
+        "field": "status",
+        "caddy": "200",
+        "upstreamer": "404"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "bucket in upper case",
+        "field": "header etag",
+        "caddy": "\"o1\"",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "bucket in upper case",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "bucket in upper case",
+        "field": "header x-origin",
+        "caddy": "STORAGE",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "bucket in upper case",
+        "field": "body",
+        "caddy": "34 bytes, sha256 b532e9535913, \"STORAGE: GET /BUCKET/obj HTTP/1.1\\n\"",
+        "upstreamer": "9 bytes, sha256 e3ebaa16dd9d, \"Not found\""
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "bucket in upper case",
+        "field": "upstream",
+        "caddy": "STORAGE GET /BUCKET/obj HTTP/1.1",
+        "upstreamer": "(none)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon upper case",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon upper case",
+        "field": "header x-origin",
+        "caddy": "DAEMON",
+        "upstreamer": "PANEL"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon upper case",
+        "field": "body",
+        "caddy": "24 bytes, sha256 6972074fd5f4, \"DAEMON: GET /x HTTP/1.1\\n\"",
+        "upstreamer": "30 bytes, sha256 186142e4a280, \"PANEL: GET /DAEMON/x HTTP/1.1\\n\""
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon upper case",
+        "field": "upstream request",
+        "caddy": "DAEMON GET /x HTTP/1.1",
+        "upstreamer": "PANEL GET /DAEMON/x HTTP/1.1"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon upper case",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon upper case",
+        "field": "upstream header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      }
+    ]
+  }
+]

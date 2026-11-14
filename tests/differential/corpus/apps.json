@@ -1,0 +1,1006 @@
+{
+  "caddyfile": "apps.Caddyfile",
+  "upstreamer": "apps.json",
+  "origins": {
+    "ADMIN": "http://127.0.0.1:59553",
+    "DAEMON": "http://127.0.0.1:52930",
+    "DNS": "https://127.0.0.1:3443",
+    "FILES": "http://127.0.0.1:46971",
+    "MAIL": "http://127.0.0.1:37993",
+    "PANEL": "http://127.0.0.1:27613",
+    "RELAY": "http://127.0.0.1:48822"
+  },
+  "trees": {
+    "PORTFOLIO": {
+      "dir": "portfolio",
+      "placeholder": "@portfolio@"
+    }
+  },
+  "sites": [
+    {
+      "host": "example.org",
+      "probes": [
+        {
+          "name": "home",
+          "request": "GET /"
+        },
+        {
+          "name": "home HEAD",
+          "request": "HEAD /"
+        },
+        {
+          "name": "home in Portuguese by Accept-Language",
+          "request": "GET /",
+          "headers": [
+            [
+              "Accept-Language",
+              "pt-BR,pt;q=0.9,en;q=0.8"
+            ]
+          ]
+        },
+        {
+          "name": "home in English when Portuguese comes second",
+          "request": "GET /",
+          "headers": [
+            [
+              "Accept-Language",
+              "en-US, pt"
+            ]
+          ]
+        },
+        {
+          "name": "home Accept-Language split over two fields",
+          "request": "GET /",
+          "headers": [
+            [
+              "Accept-Language",
+              "pt"
+            ],
+            [
+              "Accept-Language",
+              "en"
+            ]
+          ]
+        },
+        {
+          "name": "home in Portuguese by cookie",
+          "request": "GET /",
+          "headers": [
+            [
+              "Cookie",
+              "theme=dark; portfolio_lang=pt"
+            ]
+          ]
+        },
+        {
+          "name": "cookie with an unknown language",
+          "request": "GET /",
+          "headers": [
+            [
+              "Cookie",
+              "portfolio_lang=fr"
+            ]
+          ]
+        },
+        {
+          "name": "query beats cookie",
+          "request": "GET /?lang=en",
+          "headers": [
+            [
+              "Cookie",
+              "portfolio_lang=pt"
+            ]
+          ]
+        },
+        {
+          "name": "home in Portuguese by query",
+          "request": "GET /?lang=pt"
+        },
+        {
+          "name": "query with an unknown language",
+          "request": "GET /?lang=xx"
+        },
+        {
+          "name": "home brotli",
+          "request": "GET /",
+          "headers": [
+            [
+              "Accept-Encoding",
+              "br, gzip"
+            ]
+          ]
+        },
+        {
+          "name": "home zstd without a sidecar",
+          "request": "GET /",
+          "headers": [
+            [
+              "Accept-Encoding",
+              "zstd"
+            ]
+          ]
+        },
+        {
+          "name": "home revalidated by sidecar etag",
+          "request": "GET /",
+          "headers": [
+            [
+              "If-None-Match",
+              "\"index-html-5d41402a\""
+            ]
+          ]
+        },
+        {
+          "name": "home revalidated by a weak sidecar etag",
+          "request": "GET /",
+          "headers": [
+            [
+              "If-None-Match",
+              "W/\"index-html-5d41402a\""
+            ]
+          ]
+        },
+        {
+          "name": "home with If-Modified-Since only",
+          "request": "GET /",
+          "headers": [
+            [
+              "If-Modified-Since",
+              "Fri, 01 Jan 2100 00:00:00 GMT"
+            ]
+          ]
+        },
+        {
+          "name": "home for curl",
+          "request": "GET /",
+          "headers": [
+            [
+              "User-Agent",
+              "curl/8.11.0"
+            ]
+          ]
+        },
+        {
+          "name": "index for curl",
+          "request": "GET /index",
+          "headers": [
+            [
+              "User-Agent",
+              "curl/8.11.0"
+            ]
+          ]
+        },
+        {
+          "name": "index for a browser",
+          "request": "GET /index"
+        },
+        {
+          "name": "blog index",
+          "request": "GET /blog"
+        },
+        {
+          "name": "blog index in Portuguese",
+          "request": "GET /blog?lang=pt"
+        },
+        {
+          "name": "blog post",
+          "request": "GET /blog/hello"
+        },
+        {
+          "name": "blog post missing in Portuguese",
+          "request": "GET /blog/hello?lang=pt"
+        },
+        {
+          "name": "long page",
+          "request": "GET /blog/long"
+        },
+        {
+          "name": "long page gzip",
+          "request": "GET /blog/long",
+          "headers": [
+            [
+              "Accept-Encoding",
+              "gzip"
+            ]
+          ]
+        },
+        {
+          "name": "long page zstd",
+          "request": "GET /blog/long",
+          "headers": [
+            [
+              "Accept-Encoding",
+              "zstd"
+            ]
+          ]
+        },
+        {
+          "name": "long page zstd and gzip",
+          "request": "GET /blog/long",
+          "headers": [
+            [
+              "Accept-Encoding",
+              "gzip, deflate, br, zstd"
+            ]
+          ]
+        },
+        {
+          "name": "long page gzip refused",
+          "request": "GET /blog/long",
+          "headers": [
+            [
+              "Accept-Encoding",
+              "gzip;q=0, identity"
+            ]
+          ]
+        },
+        {
+          "name": "long page HEAD gzip",
+          "request": "HEAD /blog/long",
+          "headers": [
+            [
+              "Accept-Encoding",
+              "gzip"
+            ]
+          ]
+        },
+        {
+          "name": "long page range",
+          "request": "GET /blog/long",
+          "headers": [
+            [
+              "Range",
+              "bytes=0-15"
+            ]
+          ]
+        },
+        {
+          "name": "blog markdown by query",
+          "request": "GET /blog?format=markdown"
+        },
+        {
+          "name": "blog markdown by raw",
+          "request": "GET /blog?raw=true"
+        },
+        {
+          "name": "post markdown by Accept",
+          "request": "GET /blog/hello",
+          "headers": [
+            [
+              "Accept",
+              "text/markdown"
+            ]
+          ]
+        },
+        {
+          "name": "post markdown by Accept with a wildcard first",
+          "request": "GET /blog/hello",
+          "headers": [
+            [
+              "Accept",
+              "text/html, text/markdown, */*"
+            ]
+          ]
+        },
+        {
+          "name": "post markdown by Accept among others",
+          "request": "GET /blog/hello",
+          "headers": [
+            [
+              "Accept",
+              "text/html, text/markdown;q=0.9"
+            ]
+          ]
+        },
+        {
+          "name": "post for GPTBot",
+          "request": "GET /blog/hello",
+          "headers": [
+            [
+              "User-Agent",
+              "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)"
+            ]
+          ]
+        },
+        {
+          "name": "post for ClaudeBot",
+          "request": "GET /blog/hello",
+          "headers": [
+            [
+              "User-Agent",
+              "Mozilla/5.0 (compatible; ClaudeBot/1.0; +claudebot@anthropic.com)"
+            ]
+          ]
+        },
+        {
+          "name": "post for Googlebot",
+          "request": "GET /blog/hello",
+          "headers": [
+            [
+              "User-Agent",
+              "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+            ]
+          ]
+        },
+        {
+          "name": "blog .mdx",
+          "request": "GET /blog.mdx"
+        },
+        {
+          "name": "llms blog",
+          "request": "GET /llms.mdx/blog"
+        },
+        {
+          "name": "llms post",
+          "request": "GET /llms.mdx/blog/hello"
+        },
+        {
+          "name": "post .mdx",
+          "request": "GET /blog/hello.mdx"
+        },
+        {
+          "name": "missing post .mdx",
+          "request": "GET /blog/gone.mdx"
+        },
+        {
+          "name": "rss",
+          "request": "GET /blog/rss.xml"
+        },
+        {
+          "name": "sitemap",
+          "request": "GET /sitemap.xml"
+        },
+        {
+          "name": "trailing slash",
+          "request": "GET /blog/hello/?ref=x"
+        },
+        {
+          "name": "trailing slash on the blog",
+          "request": "GET /blog/"
+        },
+        {
+          "name": "index.html at the root",
+          "request": "GET /index.html"
+        },
+        {
+          "name": "index.html in a directory with a query",
+          "request": "GET /blog/index.html?a=1&b=2"
+        },
+        {
+          "name": "double slash open redirect",
+          "request": "GET //evil.example/"
+        },
+        {
+          "name": "encoded slashes open redirect",
+          "request": "GET /%2F%2Fevil.example/"
+        },
+        {
+          "name": "backslash open redirect",
+          "request": "GET /%5Cevil.example/"
+        },
+        {
+          "name": "tab open redirect",
+          "request": "GET /%09/evil.example/"
+        },
+        {
+          "name": "CRLF in a redirect",
+          "request": "GET /a%0d%0aSet-Cookie:%20x=1/"
+        },
+        {
+          "name": "encoded question mark in a redirect",
+          "request": "GET /a%3Fb/"
+        },
+        {
+          "name": "encoded space in a redirect",
+          "request": "GET /a%20b/"
+        },
+        {
+          "name": "UTF-8 in a redirect",
+          "request": "GET /caf%C3%A9/"
+        },
+        {
+          "name": "internal markdown",
+          "request": "GET /_md/blog.md"
+        },
+        {
+          "name": "internal markdown directory",
+          "request": "GET /_md"
+        },
+        {
+          "name": "internal curl card",
+          "request": "GET /_curl.txt"
+        },
+        {
+          "name": "404 page by name",
+          "request": "GET /404.html"
+        },
+        {
+          "name": "etag sidecar",
+          "request": "GET /index.html.etag"
+        },
+        {
+          "name": "static etag sidecar",
+          "request": "GET /robots.txt.etag"
+        },
+        {
+          "name": "hashed asset",
+          "request": "GET /_astro/app.1a2b.css"
+        },
+        {
+          "name": "hashed asset gzip",
+          "request": "GET /_astro/app.1a2b.css",
+          "headers": [
+            [
+              "Accept-Encoding",
+              "gzip"
+            ]
+          ]
+        },
+        {
+          "name": "large hashed asset",
+          "request": "GET /_astro/large.Bx9e0f.css"
+        },
+        {
+          "name": "large hashed asset gzip",
+          "request": "GET /_astro/large.Bx9e0f.css",
+          "headers": [
+            [
+              "Accept-Encoding",
+              "gzip"
+            ]
+          ]
+        },
+        {
+          "name": "large hashed asset zstd",
+          "request": "GET /_astro/large.Bx9e0f.css",
+          "headers": [
+            [
+              "Accept-Encoding",
+              "zstd, gzip"
+            ]
+          ]
+        },
+        {
+          "name": "large hashed asset HEAD gzip",
+          "request": "HEAD /_astro/large.Bx9e0f.css",
+          "headers": [
+            [
+              "Accept-Encoding",
+              "gzip"
+            ]
+          ]
+        },
+        {
+          "name": "missing hashed asset",
+          "request": "GET /_astro/gone.css"
+        },
+        {
+          "name": "open graph image",
+          "request": "GET /og/hello.png"
+        },
+        {
+          "name": "missing open graph image",
+          "request": "GET /og/gone.png"
+        },
+        {
+          "name": "robots.txt",
+          "request": "GET /robots.txt"
+        },
+        {
+          "name": "robots.txt revalidated",
+          "request": "GET /robots.txt",
+          "headers": [
+            [
+              "If-None-Match",
+              "\"robots-txt-5d41402a\""
+            ]
+          ]
+        },
+        {
+          "name": "favicon",
+          "request": "GET /favicon.ico"
+        },
+        {
+          "name": "résumé",
+          "request": "GET /cv.pdf"
+        },
+        {
+          "name": "not found",
+          "request": "GET /nope"
+        },
+        {
+          "name": "not found in Portuguese",
+          "request": "GET /nope",
+          "headers": [
+            [
+              "Cookie",
+              "portfolio_lang=pt"
+            ]
+          ]
+        },
+        {
+          "name": "not found gzip",
+          "request": "GET /nope",
+          "headers": [
+            [
+              "Accept-Encoding",
+              "gzip"
+            ]
+          ]
+        },
+        {
+          "name": "not found HEAD",
+          "request": "HEAD /nope"
+        },
+        {
+          "name": "directory without an index",
+          "request": "GET /blog/hello/../"
+        },
+        {
+          "name": "dot-dot out of the tree",
+          "request": "GET /../../../etc/passwd"
+        },
+        {
+          "name": "upper case path",
+          "request": "GET /BLOG"
+        },
+        {
+          "name": "POST",
+          "request": "POST /",
+          "body": "a=1"
+        },
+        {
+          "name": "OPTIONS",
+          "request": "OPTIONS /blog"
+        }
+      ]
+    },
+    {
+      "host": "www.example.org",
+      "probes": [
+        {
+          "name": "home",
+          "request": "GET /"
+        },
+        {
+          "name": "blog post",
+          "request": "GET /blog/hello"
+        }
+      ]
+    },
+    {
+      "host": "blog.example.org",
+      "probes": [
+        {
+          "name": "home",
+          "request": "GET /"
+        },
+        {
+          "name": "home in Portuguese",
+          "request": "GET /",
+          "headers": [
+            [
+              "Accept-Language",
+              "pt"
+            ]
+          ]
+        },
+        {
+          "name": "post",
+          "request": "GET /hello"
+        },
+        {
+          "name": "post with a trailing slash",
+          "request": "GET /hello/"
+        },
+        {
+          "name": "blog prefix",
+          "request": "GET /blog"
+        },
+        {
+          "name": "blog prefix with a slash and a query",
+          "request": "GET /blog/?page=2"
+        },
+        {
+          "name": "blog prefix on a post",
+          "request": "GET /blog/hello?ref=x"
+        },
+        {
+          "name": "blog prefix on a post with a slash",
+          "request": "GET /blog/hello/"
+        },
+        {
+          "name": "blog prefix on a nested path",
+          "request": "GET /blog/a/b/"
+        },
+        {
+          "name": "home for curl",
+          "request": "GET /",
+          "headers": [
+            [
+              "User-Agent",
+              "curl/8.11.0"
+            ]
+          ]
+        },
+        {
+          "name": "home markdown by Accept",
+          "request": "GET /",
+          "headers": [
+            [
+              "Accept",
+              "text/plain"
+            ]
+          ]
+        },
+        {
+          "name": "post markdown by query",
+          "request": "GET /hello?format=markdown"
+        },
+        {
+          "name": "post .mdx",
+          "request": "GET /hello.mdx"
+        },
+        {
+          "name": "rss",
+          "request": "GET /rss.xml"
+        },
+        {
+          "name": "not found",
+          "request": "GET /nope"
+        },
+        {
+          "name": "main-only page",
+          "request": "GET /sitemap.xml"
+        }
+      ]
+    },
+    {
+      "host": "dns.example.net",
+      "probes": [
+        {
+          "name": "DoH GET",
+          "request": "GET /dns-query?dns=AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE",
+          "headers": [
+            [
+              "Accept",
+              "application/dns-message"
+            ]
+          ]
+        },
+        {
+          "name": "DoH POST",
+          "request": "POST /dns-query",
+          "headers": [
+            [
+              "Content-Type",
+              "application/dns-message"
+            ]
+          ],
+          "body": "\u0000\u0000\u0001\u0000"
+        },
+        {
+          "name": "admin page",
+          "request": "GET /control/status",
+          "headers": [
+            [
+              "Cookie",
+              "agh_session=abc"
+            ]
+          ]
+        },
+        {
+          "name": "with spoofed forwarding fields",
+          "request": "GET /",
+          "headers": [
+            [
+              "X-Forwarded-For",
+              "203.0.113.9"
+            ],
+            [
+              "X-Real-IP",
+              "203.0.113.9"
+            ],
+            [
+              "CF-Connecting-IP",
+              "203.0.113.9"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "host": "admin.example.net",
+      "probes": [
+        {
+          "name": "page",
+          "request": "GET /admin?x=1"
+        },
+        {
+          "name": "with spoofed forwarding fields",
+          "request": "GET /",
+          "headers": [
+            [
+              "X-Forwarded-For",
+              "203.0.113.9"
+            ],
+            [
+              "X-Original-IP",
+              "203.0.113.9"
+            ],
+            [
+              "X-Forwarded-Proto",
+              "https"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "host": "relay.example.net",
+      "probes": [
+        {
+          "name": "DERP upgrade",
+          "request": "GET /derp",
+          "headers": [
+            [
+              "Connection",
+              "Upgrade"
+            ],
+            [
+              "Upgrade",
+              "DERP"
+            ],
+            [
+              "Derp-Fast-Start",
+              "1"
+            ]
+          ],
+          "mode": "upgrade"
+        },
+        {
+          "name": "websocket upgrade",
+          "request": "GET /derp",
+          "headers": [
+            [
+              "Connection",
+              "Upgrade"
+            ],
+            [
+              "Upgrade",
+              "websocket"
+            ],
+            [
+              "Sec-WebSocket-Version",
+              "13"
+            ],
+            [
+              "Sec-WebSocket-Protocol",
+              "derp"
+            ],
+            [
+              "Sec-WebSocket-Key",
+              "dGhlIHNhbXBsZSBub25jZQ=="
+            ]
+          ],
+          "mode": "upgrade"
+        },
+        {
+          "name": "probe",
+          "request": "GET /derp/probe"
+        },
+        {
+          "name": "no content",
+          "request": "GET /generate_204"
+        },
+        {
+          "name": "home",
+          "request": "GET /"
+        }
+      ]
+    },
+    {
+      "host": "play.example.net",
+      "probes": [
+        {
+          "name": "panel",
+          "request": "GET /"
+        },
+        {
+          "name": "panel API",
+          "request": "POST /api/auth/login",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"username\":\"a\"}"
+        },
+        {
+          "name": "panel websocket",
+          "request": "GET /socket.io/?EIO=4&transport=websocket",
+          "headers": [
+            [
+              "Connection",
+              "Upgrade"
+            ],
+            [
+              "Upgrade",
+              "websocket"
+            ],
+            [
+              "Sec-WebSocket-Version",
+              "13"
+            ],
+            [
+              "Sec-WebSocket-Key",
+              "dGhlIHNhbXBsZSBub25jZQ=="
+            ]
+          ],
+          "mode": "upgrade"
+        },
+        {
+          "name": "daemon root",
+          "request": "GET /daemon/"
+        },
+        {
+          "name": "daemon without a slash goes to the panel",
+          "request": "GET /daemon"
+        },
+        {
+          "name": "daemon API with a query",
+          "request": "GET /daemon/api/instance?uuid=1&daemonId=2"
+        },
+        {
+          "name": "daemon path with an encoded slash",
+          "request": "GET /daemon/files/a%2Fb.txt?path=%2Fa"
+        },
+        {
+          "name": "daemon prefix twice",
+          "request": "GET /daemon/daemon/x"
+        },
+        {
+          "name": "daemon upload",
+          "request": "POST /daemon/upload/abc",
+          "headers": [
+            [
+              "Content-Type",
+              "application/octet-stream"
+            ]
+          ],
+          "body": "0123456789abcdef",
+          "chunked": true
+        },
+        {
+          "name": "daemon websocket",
+          "request": "GET /daemon/socket.io/?EIO=4&transport=websocket",
+          "headers": [
+            [
+              "Connection",
+              "Upgrade"
+            ],
+            [
+              "Upgrade",
+              "websocket"
+            ],
+            [
+              "Sec-WebSocket-Version",
+              "13"
+            ],
+            [
+              "Sec-WebSocket-Key",
+              "dGhlIHNhbXBsZSBub25jZQ=="
+            ]
+          ],
+          "mode": "upgrade"
+        },
+        {
+          "name": "daemon look-alike",
+          "request": "GET /daemonx/y"
+        },
+        {
+          "name": "daemon upper case",
+          "request": "GET /DAEMON/x"
+        }
+      ]
+    },
+    {
+      "host": "files.example.net",
+      "probes": [
+        {
+          "name": "listing",
+          "request": "GET /?ls"
+        },
+        {
+          "name": "download",
+          "request": "GET /music/a%20b.flac",
+          "headers": [
+            [
+              "Range",
+              "bytes=100-"
+            ]
+          ]
+        },
+        {
+          "name": "upload",
+          "request": "PUT /inbox/notes.txt",
+          "headers": [
+            [
+              "Content-Type",
+              "text/plain"
+            ]
+          ],
+          "body": "line one\nline two\n",
+          "chunked": true
+        },
+        {
+          "name": "with a spoofed X-Forwarded-For",
+          "request": "GET /",
+          "headers": [
+            [
+              "X-Forwarded-For",
+              "203.0.113.9"
+            ]
+          ]
+        },
+        {
+          "name": "origin error passes through",
+          "request": "GET /status/403"
+        }
+      ]
+    },
+    {
+      "host": "mail.example.net",
+      "probes": [
+        {
+          "name": "inbox",
+          "request": "GET /inbox"
+        },
+        {
+          "name": "login",
+          "request": "POST /login",
+          "headers": [
+            [
+              "Content-Type",
+              "application/x-www-form-urlencoded"
+            ]
+          ],
+          "body": "user=a&pass=b"
+        },
+        {
+          "name": "fields the site also sets",
+          "request": "GET /origin-headers"
+        },
+        {
+          "name": "origin not found",
+          "request": "GET /status/404"
+        },
+        {
+          "name": "conditional",
+          "request": "GET /inbox",
+          "headers": [
+            [
+              "If-None-Match",
+              "\"o1\""
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "host": "unknown.example.org",
+      "probes": [
+        {
+          "name": "unknown host",
+          "request": "GET /"
+        },
+        {
+          "name": "no Host field",
+          "request": "GET /",
+          "host": ""
+        }
+      ]
+    }
+  ]
+}
