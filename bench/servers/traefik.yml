@@ -1,0 +1,29 @@
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+log:
+  level: WARN
+
+entryPoints:
+  h1:
+    address: "{{host}}:{{h1_port}}"
+    transport:
+      respondingTimeouts:
+        idleTimeout: 75s
+  tls:
+    address: "{{host}}:{{tls_port}}"
+    transport:
+      respondingTimeouts:
+        idleTimeout: 75s
+    http:
+      tls: {}
+    http3: {}
+
+serversTransport:
+  maxIdleConnsPerHost: 256
+
+providers:
+  file:
+    filename: "{{run_dir}}/traefik-dynamic.yml"
+    watch: false
