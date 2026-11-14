@@ -174,7 +174,7 @@ def open_loop_rates(groups: list[dict]) -> dict:
     closed-loop median throughput."""
     rates: dict[str, dict[str, float]] = defaultdict(dict)
     for g in groups:
-        if g["mode"] != "closed":
+        if g["mode"] != "closed" or g["scenario_version"] != _current_version(g["scenario"]):
             continue
         medians = [
             st["median"]
@@ -184,6 +184,11 @@ def open_loop_rates(groups: list[dict]) -> dict:
         if medians:
             rates[g["profile"]][g["scenario"]] = OPEN_LOOP_FRACTION * min(medians)
     return dict(rates)
+
+
+def _current_version(name: str) -> int | None:
+    sc = SCENARIOS.get(name)
+    return sc.version if sc else None
 
 
 def not_applicable() -> dict:

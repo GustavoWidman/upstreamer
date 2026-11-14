@@ -52,6 +52,9 @@ class Scenario:
     close_per_request: bool = False
     idle: bool = False
     client_heavy: bool = False
+    # Overrides the protocol's default load generator (wrk for HTTP/1.1,
+    # h2load for HTTP/2 and HTTP/3).
+    loadgen: str | None = None
 
     @property
     def proxied(self) -> bool:
@@ -125,8 +128,8 @@ SCENARIOS = {
         ),
         Scenario(
             "tls-handshake",
-            1,
-            "HTTP/1.1 over TLS 1.3, full handshake per request (Connection: close)",
+            2,
+            "HTTP/1.1 over TLS 1.3, full handshake per request (new connection each time)",
             Endpoint.TLS,
             Protocol.H1,
             f"/bytes/{SMALL}",
@@ -134,6 +137,9 @@ SCENARIOS = {
             connections=64,
             close_per_request=True,
             client_heavy=True,
+            # wrk's OpenSSL 3 client spends about 2.2 ms of CPU per handshake,
+            # six times oha's rustls client, and saturated before any server.
+            loadgen="oha",
         ),
         Scenario(
             "static-h2",

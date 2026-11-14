@@ -3,7 +3,9 @@ that tool's output into one LoadResult shape.
 
 HTTP/1.1 runs on wrk (closed loop) and wrk2 (open loop, latency corrected for
 coordinated omission); HTTP/2 and HTTP/3 run on h2load, which has no
-percentile output, so its per-request log feeds the percentiles.
+percentile output, so its per-request log feeds the percentiles. A scenario
+may name another tool: oha for full-handshake load, where its rustls client
+is far cheaper than wrk's OpenSSL client.
 """
 
 import math
@@ -107,6 +109,8 @@ class Plan:
             return _parse_wrk(self, text)
         if self.tool == "idle_client":
             return _parse_idle(self, text)
+        if self.tool == "oha":
+            return _parse_oha(self, text)
         return _parse_h2load(self, text)
 
 
@@ -157,6 +161,19 @@ def plan(
             "--hold", str(IDLE_HOLD_S),
         ]
         return Plan("idle_client", argv, output, None)
+    if scenario.loadgen == "oha":
+        argv = [
+            tool("oha").exe("oha"), "-z", f"{duration_s}s", "-c", str(scenario.connections),
+            "--insecure", "--ipv4", "--no-tui", "--output-format", "json", "--redirect", "0",
+        ]
+        if scenario.close_per_request:
+            argv.append("--disable-keepalive")
+        if scenario.method != "GET" or scenario.request_bytes:
+            raise ValueError(f"oha adapter does not implement scenario {scenario.name}")
+        if rate:
+            argv += ["-q", str(max(1, round(rate))), "--latency-correction"]
+        target = url(scenario, port_override, HOST if scenario.endpoint is Endpoint.H1 else SNI)
+        return Plan("oha", [*argv, target], output, None)
     if scenario.protocol is Protocol.H1:
         target = url(scenario, port_override, HOST if scenario.endpoint is Endpoint.H1 else SNI)
         name = "wrk2" if rate else "wrk"
@@ -345,4 +362,51 @@ def _parse_idle(p: Plan, text: str) -> LoadResult:
             read=max(0, r["opened"] - r["alive_after_hold"]),
         ),
         notes=[f"opened {r['opened']} in {r['open_seconds']:.1f}s; {r['alive_after_hold']} answered again after {r['hold_seconds']}s idle"],
+    )
+
+
+def _parse_oha(p: Plan, text: str) -> LoadResult:
+    import json
+
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0:
+        raise RuntimeError(f"oha printed no JSON:\n{text[-2000:]}")
+    d = json.loads(text[start : end + 1])
+    statuses = {int(k): v for k, v in (d.get("statusCodeDistribution") or {}).items()}
+    ok = sum(v for k, v in statuses.items() if 200 <= k < 300)
+    errors = Errors(non_2xx=sum(v for k, v in statuses.items() if not 200 <= k < 300))
+    for kind, n in (d.get("errorDistribution") or {}).items():
+        # Requests still in flight when the window closes are cut, not failed.
+        if kind == "aborted due to deadline":
+            continue
+        low = kind.lower()
+        if "timeout" in low or "timed out" in low:
+            errors.timeout += n
+        elif "connect" in low:
+            errors.connect += n
+        else:
+            errors.read += n
+    pct = d.get("latencyPercentiles") or {}
+    s = d["summary"]
+    ms = lambda v: None if v is None else v * 1e3  # noqa: E731
+    notes = [f"oha errors: {d.get('errorDistribution')}"]
+    if "--latency-correction" in p.argv:
+        notes.append("latency corrected for coordinated omission by oha")
+    return LoadResult(
+        tool="oha",
+        version=tool("oha").version,
+        argv=p.argv,
+        requests=ok,
+        duration_s=s["total"],
+        bytes=s.get("totalData") or 0,
+        body_bytes=s.get("totalData") or 0,
+        latency=Latency(
+            p50_ms=ms(pct.get("p50")),
+            p99_ms=ms(pct.get("p99")),
+            p999_ms=ms(pct.get("p99.9")),
+            max_ms=ms(s.get("slowest")),
+            mean_ms=ms(s.get("average")),
+        ),
+        errors=errors,
+        notes=notes,
     )

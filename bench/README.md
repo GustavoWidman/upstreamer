@@ -69,7 +69,7 @@ numbers changes; the report never mixes versions.
 | `h1-tls` | Same over TLS 1.3 | wrk / wrk2 |
 | `h2-tls` | HTTP/2 over TLS 1.3, 32 connections x 8 streams | h2load |
 | `h3` | HTTP/3, 32 connections x 8 streams | h2load (ngtcp2) |
-| `tls-handshake` | Full TLS 1.3 handshake per request (`Connection: close`), 64 connections | wrk / wrk2 on load generator plus spare vCPUs |
+| `tls-handshake` | Full TLS 1.3 handshake per request (new connection each time), 64 concurrent | oha (rustls) on load generator plus spare vCPUs |
 | `static-h2` | 1 KiB file from the server's own file server over TLS + HTTP/2 | h2load |
 | `large-response` | 1 MiB response over TLS, keep-alive, 32 connections | wrk / wrk2 |
 | `large-upload` | 1 MiB POST body over TLS, keep-alive, 32 connections | wrk / wrk2 |
@@ -82,7 +82,14 @@ the same ECDSA P-256 certificate.
 **Closed loop** (`--mode closed`) measures maximum throughput.
 **Open loop** (`--mode open`) offers a fixed rate, half the slowest
 competitor's closed-loop median for that scenario and profile, and ranks by
-p99. wrk2 corrects latency for coordinated omission. h2load does not.
+p99. wrk2 and oha (`--latency-correction`) correct latency for coordinated
+omission; h2load does not.
+
+wrk's OpenSSL 3 client spends about 2.2 ms of CPU per full handshake, against
+about 0.37 ms for oha's rustls client (measured against nginx on 6 vCPUs: 2.4k
+handshakes/s with wrk on 5.4 busy vCPUs, 3.8k/s with oha on 1.4), so the
+handshake scenario uses oha; wrk stays on keep-alive scenarios, where it
+handshakes once per connection.
 
 ## Servers
 

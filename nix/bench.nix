@@ -58,6 +58,7 @@
         inherit (pkgs)
           wrk
           wrk2
+          oha
           openssl
           perf
           inferno
@@ -118,6 +119,7 @@
           pkgs.curl
           pkgs.wrk
           pkgs.wrk2
+          pkgs.oha
           pkgs.openssl
           pkgs.perf
           pkgs.inferno
