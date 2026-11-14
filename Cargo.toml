@@ -1,10 +1,58 @@
 [package]
 name = "upstreamer"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
+description = "A reverse proxy and static file server for NixOS hosts"
 license = "MIT"
+publish = false
+
+[dependencies]
+# One current-thread tokio runtime per core, epoll through AsyncFd.
+tokio = { version = "1.54", default-features = false, features = ["rt", "net", "time", "sync", "signal", "io-util", "macros"] }
+socket2 = { version = "0.6.5", features = ["all"] }
+libc = "0.2.191"
+
+# HTTP/1.1 is our own codec; httparse only tokenises heads.
+httparse = "1.10.1"
+bytes = "1.12"
+smallvec = { version = "1.16", features = ["union", "const_generics"] }
+memchr = "2.8"
+
+# HTTP/2 and HTTP/3 downstream, adapted into the same heads and pipeline.
+http = "1.5"
+h2 = "0.4.20"
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+
+# TLS: rustls on aws-lc-rs; certificates from PEM files, a self-signed stand-in per name
+# while a pair is missing.
+rustls = { version = "0.23.46", default-features = false, features = ["std", "tls12", "aws_lc_rs", "prefer-post-quantum"] }
+rustls-pki-types = { version = "1.16", features = ["std"] }
+aws-lc-rs = "1.19"
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "crypto"] }
+
+# Config and plan.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+serde_path_to_error = "0.1.20"
+regex-automata = { version = "0.4.18", default-features = false, features = ["std", "syntax", "perf", "unicode", "meta"] }
+rustc-hash = "2.1"
+
+# Dynamic compression.
+zstd = { version = "0.14.4", default-features = false }
+flate2 = { version = "1.1.11", default-features = false, features = ["zlib-rs"] }
 
 [dev-dependencies]
-hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+proptest = "1.12"
+tempfile = "3.27"
+# examples/bench-backend.rs
+hyper = { version = "1.12", features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = "line-tables-only"
