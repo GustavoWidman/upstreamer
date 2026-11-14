@@ -1,13 +1,17 @@
+import os
 import tempfile
 from pathlib import Path
 
+from .. import topology as t
 from ..scenarios import Capability as C
 from ..servers import NO_FILES, Context, Server, exe
 
 
 def _argv(ctx: Context) -> list[str]:
     # The command socket is a unix socket: run_dir paths exceed SUN_LEN (108 bytes).
-    sock = Path(tempfile.mkdtemp(prefix="sozu-")) / "sozu.sock"
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir())
+    sock = runtime / f"bench-sozu-{t.H1_PORT}.sock"
+    sock.unlink(missing_ok=True)
     ctx.config.write_text(f'command_socket = "{sock}"\n' + ctx.config.read_text())
     return [exe("sozu"), "start", "--config", str(ctx.config)]
 
@@ -15,9 +19,8 @@ def _argv(ctx: Context) -> list[str]:
 SERVER = Server(
     name="sozu",
     tool="sozu",
-    capabilities=frozenset({C.H1}),
+    capabilities=frozenset({C.H1, C.TLS}),
     not_applicable={
-        C.TLS: "sozu aborts TLS handshakes that carry no SNI (no fallback certificate); the load generators send none to 127.0.0.1",
         C.H2: "sozu 1.1.1 advertises only http/1.1 in ALPN; its HTTP/2 frontend is compiled out",
         C.H3: "sozu has no QUIC listener",
         C.STATIC: NO_FILES,

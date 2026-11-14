@@ -32,10 +32,16 @@ class Profile:
     origin: tuple[int, ...]
     loadgen: tuple[int, ...]
     description: str
+    # Added to the load generator for client-heavy scenarios (full TLS
+    # handshakes cost the client about as much as the server).
+    spare: tuple[int, ...] = ()
 
     @property
     def workers(self) -> int:
         return len(self.proxy)
+
+    def loadgen_for(self, client_heavy: bool) -> tuple[int, ...]:
+        return self.loadgen + self.spare if client_heavy else self.loadgen
 
 
 PROFILES = {
@@ -47,6 +53,7 @@ PROFILES = {
             origin=(4, 5, 6),
             loadgen=(7, 8, 9, 10),
             description="proxy on 2 vCPUs, like the 2-core production hosts",
+            spare=(11, 12),
         ),
         Profile(
             "wide",
@@ -54,6 +61,7 @@ PROFILES = {
             origin=(5, 6, 7),
             loadgen=(8, 9, 10, 11),
             description="proxy on 3 vCPUs, the most this VM gives before hypervisor steal reaches the proxy",
+            spare=(12, 13, 14),
         ),
         Profile(
             "single",
@@ -61,6 +69,7 @@ PROFILES = {
             origin=(4, 5, 6),
             loadgen=(7, 8, 9, 10),
             description="proxy on 1 vCPU; used by the sensitivity check only",
+            spare=(11, 12),
         ),
     )
 }

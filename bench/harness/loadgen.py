@@ -15,14 +15,33 @@ from .scenarios import Endpoint, Protocol, Scenario
 from .tools import tool
 from .topology import H1_PORT, HOST, STATIC_PORT, TLS_PORT
 
-IDLE_DELAY_MS = 3_600_000
+# Every TLS client sends this SNI, as real clients do; the certificate covers it.
+# wrk takes SNI from the URL host, so its URLs name it and wrk falls back from
+# ::1 to 127.0.0.1; h2load connects to the IP and gets the name via --sni.
+SNI = "localhost"
+IDLE_HOLD_S = 10
 
 
-def url(scenario: Scenario, port_override: int | None = None) -> str:
-    if scenario.endpoint is Endpoint.H1:
-        return f"http://{HOST}:{port_override or H1_PORT}{scenario.path}"
-    port = STATIC_PORT if scenario.endpoint is Endpoint.STATIC else TLS_PORT
-    return f"https://{HOST}:{port_override or port}{scenario.path}"
+def port(scenario: Scenario, port_override: int | None = None) -> int:
+    if port_override:
+        return port_override
+    return {Endpoint.H1: H1_PORT, Endpoint.TLS: TLS_PORT, Endpoint.STATIC: STATIC_PORT}[scenario.endpoint]
+
+
+def url(scenario: Scenario, port_override: int | None = None, host: str = HOST) -> str:
+    scheme = "http" if scenario.endpoint is Endpoint.H1 else "https"
+    return f"{scheme}://{host}:{port(scenario, port_override)}{scenario.path}"
+
+
+def h2load_flags(scenario: Scenario) -> list[str]:
+    flags = []
+    if scenario.endpoint is not Endpoint.H1:
+        flags.append(f"--sni={SNI}")
+    if scenario.protocol is Protocol.H1:
+        flags.append("--h1")
+    elif scenario.protocol is Protocol.H3:
+        flags.append("--alpn-list=h3")
+    return flags
 
 
 @dataclass
@@ -86,6 +105,8 @@ class Plan:
         text = self.output.read_text(errors="replace")
         if self.tool in ("wrk", "wrk2"):
             return _parse_wrk(self, text)
+        if self.tool == "idle_client":
+            return _parse_idle(self, text)
         return _parse_h2load(self, text)
 
 
@@ -96,8 +117,6 @@ def _wrk_script(scenario: Scenario, path: Path) -> Path:
         lines.append('wrk.headers["Content-Type"] = "application/octet-stream"')
     if scenario.close_per_request:
         lines.append('wrk.headers["Connection"] = "close"')
-    if scenario.idle:
-        lines.append(f"function delay() return {IDLE_DELAY_MS} end")
     lines.append(
         """
 done = function(summary, latency, requests)
@@ -128,10 +147,18 @@ def plan(
 
     `rate` (requests per second, total) switches to open loop.
     """
-    target = url(scenario, port_override)
     threads = max(1, min(len(cpus), scenario.connections))
     output = workdir / f"{tag}.out"
+    if scenario.idle:
+        argv = [
+            tool("python3").exe("python3"), "-m", "harness.idle_client",
+            "--host", HOST, "--port", str(port(scenario, port_override)), "--sni", SNI,
+            "--path", scenario.path, "--connections", str(scenario.connections),
+            "--hold", str(IDLE_HOLD_S),
+        ]
+        return Plan("idle_client", argv, output, None)
     if scenario.protocol is Protocol.H1:
+        target = url(scenario, port_override, HOST if scenario.endpoint is Endpoint.H1 else SNI)
         name = "wrk2" if rate else "wrk"
         script = _wrk_script(scenario, workdir / f"{tag}.lua")
         argv = [
@@ -143,7 +170,7 @@ def plan(
             "-d",
             f"{duration_s}s",
             "--timeout",
-            "30s" if scenario.idle else "10s",
+            "10s",
             "-s",
             str(script),
         ]
@@ -151,8 +178,9 @@ def plan(
             argv += ["-R", str(max(1, round(rate)))]
         return Plan(name, [*argv, target], output, None)
 
-    if scenario.request_bytes or scenario.close_per_request or scenario.idle:
+    if scenario.request_bytes or scenario.close_per_request:
         raise ValueError(f"h2load adapter does not implement scenario {scenario.name}")
+    target = url(scenario, port_override)
     log = workdir / f"{tag}.reqlog"
     argv = [
         tool("h2load").exe("h2load"),
@@ -165,9 +193,8 @@ def plan(
         "-D",
         str(duration_s),
         f"--log-file={log}",
+        *h2load_flags(scenario),
     ]
-    if scenario.protocol is Protocol.H3:
-        argv.append("--alpn-list=h3")
     if rate:
         argv.append(f"--rps={rate / scenario.connections:.3f}")
     return Plan("h2load", [*argv, target], output, log)
@@ -291,4 +318,31 @@ def _parse_h2load(p: Plan, text: str) -> LoadResult:
             stream=errored,
         ),
         notes=notes + [f"h2load done={done} of total={total}"],
+    )
+
+
+def _parse_idle(p: Plan, text: str) -> LoadResult:
+    import json
+
+    m = re.search(r"BENCH_IDLE_RESULT (.*)", text)
+    if not m:
+        raise RuntimeError(f"idle client printed no result:\n{text[-2000:]}")
+    r = json.loads(m.group(1))
+    statuses = {int(k): v for k, v in r["statuses"].items()}
+    ok = statuses.get(200, 0)
+    return LoadResult(
+        tool="idle_client",
+        version="harness",
+        argv=p.argv,
+        requests=ok,
+        duration_s=r["open_seconds"] + r["hold_seconds"],
+        bytes=0,
+        body_bytes=None,
+        latency=Latency(),
+        errors=Errors(
+            connect=sum(r["errors"].values()),
+            non_2xx=sum(v for k, v in statuses.items() if k != 200),
+            read=max(0, r["opened"] - r["alive_after_hold"]),
+        ),
+        notes=[f"opened {r['opened']} in {r['open_seconds']:.1f}s; {r['alive_after_hold']} answered again after {r['hold_seconds']}s idle"],
     )

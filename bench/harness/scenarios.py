@@ -51,6 +51,7 @@ class Scenario:
     request_bytes: int = 0
     close_per_request: bool = False
     idle: bool = False
+    client_heavy: bool = False
 
     @property
     def proxied(self) -> bool:
@@ -132,6 +133,7 @@ SCENARIOS = {
             SMALL,
             connections=64,
             close_per_request=True,
+            client_heavy=True,
         ),
         Scenario(
             "static-h2",

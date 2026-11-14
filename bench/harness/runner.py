@@ -34,7 +34,15 @@ SCHEMA = 1
 LOADGEN_IDLE_MIN = 0.10
 ORIGIN_IDLE_MIN = 0.20
 PROXY_IDLE_MAX = 0.10
-NOISE_FRAC = 0.05
+PROXY_FOREIGN_MAX = 0.10
+PROXY_STEAL_MAX = 0.05
+FOREIGN_CORES_MAX = 1.5
+QUIET_CORES_MAX = 1.0
+QUIET_WAIT_MAX_S = 3600
+# Flags that say the host, not the server, moved the number: such runs are
+# invalid and re-queued at the end of the matrix.
+NOISE = frozenset({"foreign_load", "steal"})
+INVALID = frozenset({"errors", "work_mismatch", "loadgen_saturated", "loadgen_failed"}) | NOISE
 RATE_MISS = 0.95
 READY_TIMEOUT = 45.0
 
@@ -172,11 +180,7 @@ def probe(scenario: Scenario, port_override: int | None, workdir: Path) -> str |
     """Return None when 4 requests on the scenario's protocol and path all
     succeed with the expected body size, else a reason."""
     target = loadgen.url(scenario, port_override)
-    argv = [tool("h2load").exe("h2load"), "-n", "4", "-c", "1", "-T", "5"]
-    if scenario.protocol is Protocol.H1:
-        argv.append("--h1")
-    elif scenario.protocol is Protocol.H3:
-        argv.append("--alpn-list=h3")
+    argv = [tool("h2load").exe("h2load"), "-n", "4", "-c", "1", "-T", "5", *loadgen.h2load_flags(scenario)]
     try:
         out = subprocess.run(
             [*argv, target], capture_output=True, text=True, timeout=15, cwd=workdir
@@ -191,6 +195,27 @@ def probe(scenario: Scenario, port_override: int | None, workdir: Path) -> str |
     if data != 4 * scenario.response_bytes:
         return f"probe body size {data / 4:.0f} != {scenario.response_bytes}"
     return None
+
+
+def wait_quiet(progress=print) -> dict:
+    """Block until the host's task CPU use (everything but steal, irq and
+    idle) stays under QUIET_CORES_MAX for a 2 s sample. lab is shared; this
+    keeps another job's build or test from landing inside a measured window."""
+    start = time.monotonic()
+    announced = False
+    while True:
+        a = CpuSnapshot.take()
+        time.sleep(2)
+        b = CpuSnapshot.take()
+        bd = breakdown(a, b, a.cpus.keys())
+        busy = (bd["user"] + bd["nice"] + bd["system"]) / (b.at - a.at)
+        waited = time.monotonic() - start
+        if busy < QUIET_CORES_MAX or waited > QUIET_WAIT_MAX_S:
+            return {"busy_cores_before": busy, "waited_s": waited, "gave_up": busy >= QUIET_CORES_MAX}
+        if not announced:
+            progress(f"host busy ({busy:.1f} cores of foreign work); waiting for quiet")
+            announced = True
+        time.sleep(8)
 
 
 @dataclass
@@ -209,6 +234,7 @@ class Runner:
     def __init__(self, session: Session):
         self.session = session
         self.origin: Origin | None = None
+        self.quiet: dict | None = None
 
     def start_server(self, spec: RunSpec, run_dir: Path) -> Scope | None:
         server = spec.server
@@ -276,10 +302,15 @@ class Runner:
             "rep": spec.rep,
             "warmup_s": spec.warmup_s,
             "duration_s": spec.duration_s,
-            "cpus": {"proxy": spec.profile.proxy, "origin": spec.profile.origin, "loadgen": spec.profile.loadgen},
+            "cpus": {
+                "proxy": spec.profile.proxy,
+                "origin": spec.profile.origin,
+                "loadgen": spec.profile.loadgen_for(spec.scenario.client_heavy),
+            },
             "bench_git": self.session.bench_git,
             "host": self.session.host,
             "loadavg_before": loadavg(),
+            "quiet": self.quiet,
             "run_dir": str(run_dir),
         }
         if spec.server.name == upstreamer.NAME:
@@ -310,21 +341,22 @@ class Runner:
     def _measure(self, spec: RunSpec, scope: Scope | None, run_dir: Path) -> dict:
         sc, prof = spec.scenario, spec.profile
         port = spec.server.port_override
+        lg_cpus = prof.loadgen_for(sc.client_heavy)
         if spec.warmup_s:
-            warm = loadgen.plan(sc, prof.loadgen, spec.warmup_s, run_dir, "warmup", spec.rate, port)
-            run_pinned(warm.argv, prof.loadgen, warm.output, cwd=run_dir)
+            warm = loadgen.plan(sc, lg_cpus, spec.warmup_s, run_dir, "warmup", spec.rate, port)
+            run_pinned(warm.argv, lg_cpus, warm.output, cwd=run_dir)
         assert self.origin
-        main = loadgen.plan(sc, prof.loadgen, spec.duration_s, run_dir, "measure", spec.rate, port)
+        main = loadgen.plan(sc, lg_cpus, spec.duration_s, run_dir, "measure", spec.rate, port)
         o_before = self.origin.stats()
         o_cpu0 = self.origin.scope.cpu_seconds()
         p_cpu0 = scope.cpu_seconds() if scope else 0.0
         snap0 = CpuSnapshot.take()
         if scope:
             with MemorySampler(scope) as mem:
-                fin = run_pinned(main.argv, prof.loadgen, main.output, cwd=run_dir)
+                fin = run_pinned(main.argv, lg_cpus, main.output, cwd=run_dir)
         else:
             mem = None
-            fin = run_pinned(main.argv, prof.loadgen, main.output, cwd=run_dir)
+            fin = run_pinned(main.argv, lg_cpus, main.output, cwd=run_dir)
         snap1 = CpuSnapshot.take()
         p_cpu1 = scope.cpu_seconds() if scope else 0.0
         o_cpu1 = self.origin.scope.cpu_seconds()
@@ -334,7 +366,7 @@ class Runner:
 
         proxy_cpu = p_cpu1 - p_cpu0
         origin_cpu = o_cpu1 - o_cpu0
-        roles = {"proxy": (prof.proxy, proxy_cpu), "origin": (prof.origin, origin_cpu), "loadgen": (prof.loadgen, fin.cpu_seconds)}
+        roles = {"proxy": (prof.proxy, proxy_cpu), "origin": (prof.origin, origin_cpu), "loadgen": (lg_cpus, fin.cpu_seconds)}
         usage = {}
         for role, (cpus, cpu_s) in roles.items():
             b = breakdown(snap0, snap1, cpus)
@@ -376,7 +408,7 @@ class Runner:
             },
         }
         out["flags"] = flags = self._flags(spec, result, usage, out, fin.returncode)
-        out["valid"] = not ({"errors", "work_mismatch", "loadgen_saturated", "loadgen_failed"} & set(flags))
+        out["valid"] = not (INVALID & set(flags))
         return out
 
     def _flags(self, spec: RunSpec, result: loadgen.LoadResult, usage: dict, out: dict, rc: int) -> list[str]:
@@ -406,12 +438,14 @@ class Runner:
             flags.append("loadgen_saturated")
         if usage["origin"]["idle_frac"] < ORIGIN_IDLE_MIN:
             flags.append("origin_saturated")
+        if out["system"]["foreign_cores"] > FOREIGN_CORES_MAX:
+            flags.append("foreign_load")
         if spec.server.launches:
             if spec.mode == "closed" and usage["proxy"]["idle_frac"] > PROXY_IDLE_MAX:
                 flags.append("proxy_below_saturation")
-            if usage["proxy"]["foreign_frac"] > NOISE_FRAC:
+            if usage["proxy"]["foreign_frac"] > PROXY_FOREIGN_MAX:
                 flags.append("foreign_load")
-            if usage["proxy"]["steal_frac"] > NOISE_FRAC:
+            if usage["proxy"]["steal_frac"] > PROXY_STEAL_MAX:
                 flags.append("steal")
         if spec.rate and result.rps < RATE_MISS * spec.rate:
             flags.append("rate_missed")
@@ -421,25 +455,25 @@ class Runner:
         sc, prof = spec.scenario, spec.profile
         assert scope and self.origin
         time.sleep(1)
-        base = {"pss": scope.pss(), "cgroup": scope.memory_current(), "anon": scope.memory_anon()}
+
+        def memory() -> dict:
+            return {"pss": scope.pss(), "cgroup": scope.memory_current(), "anon": scope.memory_anon()}
+
+        base = memory()
         o_before = self.origin.stats()
-        hold = 25
-        main = loadgen.plan(sc, prof.loadgen, hold, run_dir, "measure", None, spec.server.port_override)
+        lg_cpus = prof.loadgen_for(sc.client_heavy)
+        main = loadgen.plan(sc, lg_cpus, 0, run_dir, "measure", None, spec.server.port_override)
         box: dict = {}
-        th = threading.Thread(target=lambda: box.update(fin=run_pinned(main.argv, prof.loadgen, main.output, cwd=run_dir)))
+        th = threading.Thread(target=lambda: box.update(fin=run_pinned(main.argv, lg_cpus, main.output, cwd=run_dir)))
         th.start()
-        deadline = time.monotonic() + hold - 6
-        connected = 0
-        while time.monotonic() < deadline:
-            connected = self.origin.stats()["requests"] - o_before["requests"]
-            if connected >= sc.connections:
-                break
-            time.sleep(0.25)
+        while th.is_alive() and "BENCH_IDLE_READY" not in main.output.read_text(errors="replace"):
+            time.sleep(0.1)
         time.sleep(2)
         samples = []
         for _ in range(3):
-            samples.append({"pss": scope.pss(), "cgroup": scope.memory_current(), "anon": scope.memory_anon()})
+            samples.append(memory())
             time.sleep(0.5)
+        connected = self.origin.stats()["requests"] - o_before["requests"]
         th.join()
         fin = box["fin"]
         result = main.parse()
@@ -457,7 +491,7 @@ class Runner:
             "cgroup_per_conn_bytes": (held["cgroup"] - base["cgroup"]) / sc.connections,
         }
         flags = []
-        if connected < sc.connections:
+        if result.requests < sc.connections or connected < sc.connections:
             flags.append("work_mismatch")
         if result.errors.total:
             flags.append("errors")
@@ -468,7 +502,7 @@ class Runner:
             "idle": idle,
             "flags": flags,
             "valid": not flags,
-            "usage": {"loadgen": {"cpu_s": fin.cpu_seconds, "util": fin.cpu_seconds / (fin.wall_seconds * len(prof.loadgen))}},
+            "usage": {"loadgen": {"cpu_s": fin.cpu_seconds, "util": fin.cpu_seconds / (fin.wall_seconds * len(lg_cpus))}},
         }
 
 
@@ -490,46 +524,61 @@ def matrix(
     duration_s: int,
     rates: dict | None = None,
     progress=print,
+    retries: int = 2,
 ) -> list[dict]:
     """Interleave servers round-robin within each scenario, rotating the order
-    every repetition, so drift and warm caches favour no server."""
+    every repetition, so drift and warm caches favour no server. Runs the host
+    disturbed (NOISE flags) or that failed are re-queued at the end of their
+    profile, up to `retries` more times; every attempt stays in the JSONL."""
     runner = Runner(session)
     records = []
-    plan = []
+    by_profile: dict[str, list] = {}
     for profile in profiles:
+        items = by_profile.setdefault(profile.name, [])
         for rep in range(reps):
             for sc in scenarios:
                 if mode == "open" and not sc.open_loop:
                     continue
                 eligible = [s for s in servers if s.supports(sc.requires)]
                 for server in rotate(eligible, rep):
-                    plan.append((profile, rep, sc, server))
-    total = len(plan)
-    current_profile = None
+                    items.append((profile, rep, sc, server))
+    total = sum(len(v) for v in by_profile.values())
+    done = 0
     try:
-        for i, (profile, rep, sc, server) in enumerate(plan, 1):
-            if profile is not current_profile:
-                if runner.origin:
-                    runner.origin.stop()
-                wait_port_free(t.ORIGIN_PORT)
-                runner.origin = Origin(profile, session.dir)
-                current_profile = profile
-            rate = None
-            if mode == "open":
-                rate = (rates or {}).get(profile.name, {}).get(sc.name)
-                if not rate:
-                    progress(f"[{i}/{total}] skip {sc.name}/{profile.name}: no open-loop rate stored")
-                    continue
-            spec = RunSpec(server, sc, profile, mode, rate, rep, warmup_s, duration_s)
-            rec = runner.run(spec)
-            records.append(rec)
-            res = rec.get("result", {})
-            progress(
-                f"[{i}/{total}] {profile.name} {sc.name} {server.name} rep{rep} {mode}: "
-                f"{rec['status']} rps={res.get('rps', 0):.0f} p99={(res.get('latency') or {}).get('p99_ms')} "
-                f"flags={','.join(rec.get('flags', []))}"
-                + (f" {rec.get('failure')}" if rec["status"] != "ok" else "")
-            )
+        for profile in profiles:
+            if runner.origin:
+                runner.origin.stop()
+            wait_port_free(t.ORIGIN_PORT)
+            runner.origin = Origin(profile, session.dir)
+            queue = by_profile[profile.name]
+            for attempt in range(retries + 1):
+                again = []
+                for item in queue:
+                    _, rep, sc, server = item
+                    rate = None
+                    if mode == "open":
+                        rate = (rates or {}).get(profile.name, {}).get(sc.name)
+                        if not rate:
+                            progress(f"skip {sc.name}/{profile.name}: no open-loop rate stored")
+                            continue
+                    runner.quiet = wait_quiet(progress)
+                    rec = runner.run(RunSpec(server, sc, profile, mode, rate, rep, warmup_s, duration_s))
+                    rec_retry = rec["status"] != "ok" or bool(NOISE & set(rec.get("flags", [])))
+                    records.append(rec)
+                    if attempt == 0:
+                        done += 1
+                    res = rec.get("result", {})
+                    progress(
+                        f"[{done}/{total}{f' retry {attempt}' if attempt else ''}] {profile.name} {sc.name} {server.name} rep{rep} {mode}: "
+                        f"{rec['status']} rps={res.get('rps', 0):.0f} p99={(res.get('latency') or {}).get('p99_ms')} "
+                        f"flags={','.join(rec.get('flags', []))}"
+                        + (f" {rec.get('failure')}" if rec["status"] != "ok" else "")
+                    )
+                    if rec_retry:
+                        again.append(item)
+                queue = again
+                if not queue:
+                    break
     finally:
         if runner.origin:
             runner.origin.stop()
