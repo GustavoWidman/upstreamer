@@ -26,12 +26,26 @@
 
       h2load = pkgs.nghttp2.override { enableHttp3 = true; };
 
+      # The pinned nixpkgs carries a traefik early-access build; benchmark the
+      # vendor's current stable release binary instead.
+      traefik = pkgs.stdenvNoCC.mkDerivation rec {
+        pname = "traefik-bin";
+        version = "3.7.19";
+        src = pkgs.fetchurl {
+          url = "https://github.com/traefik/traefik/releases/download/v${version}/traefik_v${version}_linux_amd64.tar.gz";
+          sha256 = "1gl95yhsiwhhnpjwfk8i22n1d0kwwgpyrbgjs0vp222s6dl4llwp";
+        };
+        sourceRoot = ".";
+        installPhase = "install -Dm755 traefik $out/bin/traefik";
+        meta.platforms = [ "x86_64-linux" ];
+      };
+
       servers = {
         nginx = pkgs.nginxMainline;
         haproxy = pkgs.haproxy;
         caddy = pkgs.caddy;
         envoy = pkgs.envoy-bin;
-        traefik = pkgs.traefik;
+        inherit traefik;
         h2o = pkgs.h2o;
         httpd = pkgs.apacheHttpd;
         sozu = pkgs.sozu;
@@ -84,7 +98,7 @@
         '';
       };
     in
-    lib.mkIf (lib.hasSuffix "-linux" system) {
+    lib.mkIf (system == "x86_64-linux") {
       packages = {
         bench-origin = origin;
         bench-h2load = h2load;
