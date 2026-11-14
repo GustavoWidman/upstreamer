@@ -26,7 +26,7 @@ from .procs import (
     raise_nofile,
     run_pinned,
 )
-from .scenarios import STATIC_FILE, SMALL, Endpoint, Protocol, Scenario
+from .scenarios import STATIC_FILE, SMALL, Scenario
 from .servers import Context, Server
 from .tools import tool, tools
 

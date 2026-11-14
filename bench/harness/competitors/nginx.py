@@ -1,4 +1,3 @@
-from ..scenarios import Capability as C
 from ..servers import ALL, Server, exe
 
 SERVER = Server(
