@@ -1,0 +1,58 @@
+{
+  "fragment": 1,
+  "headers": {
+    "Server": null,
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin"
+  },
+  "routes": [
+    { "name": "encode", "encode": ["zstd", "gzip"] },
+    { "name": "tree", "set": { "tree": "@out@/pages/r1/blog" } },
+
+    {
+      "name": "blog_prefix",
+      "when": { "pathRegex": "^/blog(?:/(.*?))?/?$" },
+      "redirect": { "to": "/{re.1}{?query}", "status": 301 }
+    },
+    {
+      "name": "trailing_slash",
+      "when": { "pathRegex": "^/(.+)/$" },
+      "redirect": { "to": "/{re.1}{?query}", "status": 301 }
+    },
+    { "name": "internal", "when": { "path": ["/404.html", "*.etag", "*.br", "*.zst", "*.gz"] }, "error": 404 },
+
+    {
+      "name": "legacy",
+      "when": { "method": ["GET", "HEAD"], "query": { "p": ["1", "2"] } },
+      "redirect": { "to": "https://{host}/archive/{query.p}", "status": 308 }
+    },
+
+    {
+      "name": "feeds",
+      "when": { "path": ["/feed.xml", "/atom.xml"] },
+      "routes": [
+        { "headers": { "Content-Type": "application/atom+xml; charset=utf-8", "Cache-Control": "public, max-age=600" } },
+        { "files": { "root": "{vars.tree}" } }
+      ]
+    },
+
+    { "name": "try_files", "tryFiles": { "root": "{vars.tree}", "paths": ["{path}/index.html", "{path}.html", "{path}"] } },
+    { "when": { "path": "*.html" }, "headers": { "Content-Type": "text/html; charset=utf-8" } },
+    {
+      "name": "serve_tree",
+      "files": { "root": "{vars.tree}", "precompressed": ["br", "zstd", "gzip"], "etagSidecar": ".etag", "index": ["index.html"] }
+    }
+  ],
+  "errors": [
+    {
+      "status": [404, 410],
+      "routes": [
+        { "rewrite": "/404.html" },
+        { "files": { "root": "{vars.tree}" } }
+      ]
+    },
+    {
+      "routes": [{ "respond": { "body": "{err.status_code} {err.status_text}" } }]
+    }
+  ]
+}

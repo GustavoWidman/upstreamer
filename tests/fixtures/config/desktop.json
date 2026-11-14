@@ -1,0 +1,41 @@
+{
+  "http3": true,
+  "listen": {
+    "http": [
+      "0.0.0.0:80",
+      "[::]:80"
+    ],
+    "https": [
+      "0.0.0.0:443",
+      "[::]:443"
+    ]
+  },
+  "sites": [
+    {
+      "errors": [],
+      "headers": {},
+      "hosts": [
+        "*"
+      ],
+      "listen": null,
+      "name": "desktop",
+      "routes": [
+        {
+          "redirect": {
+            "status": 302,
+            "to": "/vnc.html?autoconnect=1&resize=scale"
+          },
+          "when": {
+            "path": "/"
+          }
+        },
+        {
+          "proxy": "http://127.0.0.1:6080"
+        }
+      ],
+      "tls": null
+    }
+  ],
+  "version": 1,
+  "workers": null
+}

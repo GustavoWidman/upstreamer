@@ -1,0 +1,205 @@
+{
+  "http3": true,
+  "listen": {
+    "http": [
+      "0.0.0.0:80",
+      "[::]:80"
+    ],
+    "https": [
+      "0.0.0.0:443",
+      "[::]:443"
+    ]
+  },
+  "sites": [
+    {
+      "errors": [],
+      "headers": {},
+      "hosts": [
+        "blog.example.org"
+      ],
+      "listen": null,
+      "name": "blog.example.org",
+      "routes": [
+        {
+          "include": "/nix/store/drd2nn5gazxbmsmjh6x6j6mkgzph5im1-example-site-fragments/blog.json"
+        }
+      ],
+      "tls": {
+        "cert": "/var/lib/acme/example.org/fullchain.pem",
+        "http3": true,
+        "key": "/var/lib/acme/example.org/key.pem",
+        "redirectHttp": true
+      }
+    },
+    {
+      "errors": [],
+      "headers": {},
+      "hosts": [
+        "dns.example.net"
+      ],
+      "listen": null,
+      "name": "dns.example.net",
+      "routes": [
+        {
+          "proxy": {
+            "headers": {
+              "CF-Connecting-IP": "{remote_host}",
+              "X-Real-IP": "{remote_host}"
+            },
+            "tlsSkipVerify": true,
+            "to": "https://127.0.0.1:3443"
+          }
+        }
+      ],
+      "tls": {
+        "cert": "/var/lib/acme/dns.example.net/fullchain.pem",
+        "http3": true,
+        "key": "/var/lib/acme/dns.example.net/key.pem",
+        "redirectHttp": true
+      }
+    },
+    {
+      "errors": [],
+      "headers": {},
+      "hosts": [
+        "example.org"
+      ],
+      "listen": null,
+      "name": "example.org",
+      "routes": [
+        {
+          "include": "/nix/store/drd2nn5gazxbmsmjh6x6j6mkgzph5im1-example-site-fragments/main.json"
+        }
+      ],
+      "tls": {
+        "cert": "/var/lib/acme/example.org/fullchain.pem",
+        "http3": true,
+        "key": "/var/lib/acme/example.org/key.pem",
+        "redirectHttp": true
+      }
+    },
+    {
+      "errors": [],
+      "headers": {},
+      "hosts": [
+        "files.example.net"
+      ],
+      "listen": null,
+      "name": "files.example.net",
+      "routes": [
+        {
+          "proxy": "http://127.0.0.1:46971"
+        }
+      ],
+      "tls": {
+        "cert": "/var/lib/acme/files.example.net/fullchain.pem",
+        "http3": true,
+        "key": "/var/lib/acme/files.example.net/key.pem",
+        "redirectHttp": true
+      }
+    },
+    {
+      "errors": [],
+      "headers": {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "SAMEORIGIN"
+      },
+      "hosts": [
+        "mail.example.net"
+      ],
+      "listen": null,
+      "name": "mail.example.net",
+      "routes": [
+        {
+          "proxy": "http://127.0.0.1:37993"
+        }
+      ],
+      "tls": {
+        "cert": "/var/lib/acme/mail.example.net/fullchain.pem",
+        "http3": true,
+        "key": "/var/lib/acme/mail.example.net/key.pem",
+        "redirectHttp": true
+      }
+    },
+    {
+      "errors": [],
+      "headers": {},
+      "hosts": [
+        "play.example.net"
+      ],
+      "listen": null,
+      "name": "play.example.net",
+      "routes": [
+        {
+          "routes": [
+            {
+              "stripPrefix": "/daemon"
+            },
+            {
+              "proxy": "http://127.0.0.1:52930"
+            }
+          ],
+          "when": {
+            "path": "/daemon/*"
+          }
+        },
+        {
+          "proxy": "http://127.0.0.1:27613"
+        }
+      ],
+      "tls": {
+        "cert": "/var/lib/acme/play.example.net/fullchain.pem",
+        "http3": true,
+        "key": "/var/lib/acme/play.example.net/key.pem",
+        "redirectHttp": true
+      }
+    },
+    {
+      "errors": [],
+      "headers": {},
+      "hosts": [
+        "relay.example.net"
+      ],
+      "listen": null,
+      "name": "relay.example.net",
+      "routes": [
+        {
+          "proxy": {
+            "timeouts": {
+              "tunnelIdle": "1h"
+            },
+            "to": "http://127.0.0.1:48822"
+          }
+        }
+      ],
+      "tls": {
+        "cert": "/var/lib/acme/relay.example.net/fullchain.pem",
+        "http3": true,
+        "key": "/var/lib/acme/relay.example.net/key.pem",
+        "redirectHttp": true
+      }
+    },
+    {
+      "errors": [],
+      "headers": {},
+      "hosts": [
+        "www.example.org"
+      ],
+      "listen": null,
+      "name": "www.example.org",
+      "routes": [
+        {
+          "include": "/nix/store/drd2nn5gazxbmsmjh6x6j6mkgzph5im1-example-site-fragments/main.json"
+        }
+      ],
+      "tls": {
+        "cert": "/var/lib/acme/example.org/fullchain.pem",
+        "http3": true,
+        "key": "/var/lib/acme/example.org/key.pem",
+        "redirectHttp": true
+      }
+    }
+  ],
+  "version": 1,
+  "workers": null
+}
