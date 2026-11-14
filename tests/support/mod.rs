@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::UnixDatagram;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::Arc;
@@ -54,6 +55,7 @@ impl Proxy {
 
         let binary = env!("CARGO_BIN_EXE_upstreamer");
         // `UPSTREAMER_WRAP="strace -f -c -o counts"` runs the proxy under another program.
+        // The proxy gets a process group of its own, so signals reach it through a wrapper.
         let wrap = std::env::var("UPSTREAMER_WRAP").unwrap_or_default();
         let mut words = wrap.split_whitespace().chain([binary]);
         let mut command = Command::new(words.next().unwrap());
@@ -63,6 +65,7 @@ impl Proxy {
             .arg(&config)
             .env("NOTIFY_SOCKET", &notify_path)
             .stdin(Stdio::null())
+            .process_group(0)
             .spawn()
             .expect("the upstreamer binary starts");
         let deadline = Instant::now() + PATIENCE;
@@ -113,8 +116,9 @@ impl Proxy {
     }
 
     pub fn signal(&self, signal: libc::c_int) {
-        // SAFETY: signals the child this test started and has not waited for.
-        assert_eq!(unsafe { libc::kill(self.child.id() as i32, signal) }, 0);
+        // SAFETY: signals the process group of the child this test started and has not
+        // waited for.
+        assert_eq!(unsafe { libc::kill(-(self.child.id() as i32), signal) }, 0);
     }
 
     pub fn client(&self) -> Client {
