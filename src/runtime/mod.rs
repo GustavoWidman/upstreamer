@@ -18,7 +18,7 @@ use crate::log::{debug, warning};
 use crate::net::buf::BufPool;
 use crate::net::listen::{self, Listener};
 use crate::net::{Socket, Transport};
-use crate::plan::{ListenerKey, ListenerKind, Plan, RegexId};
+use crate::plan::{ListenerKey, ListenerKind, Plan, RegexId, ServerParams};
 use crate::proxy::pool::Pools;
 use crate::tls::{self, CertStore, TicketKeys};
 use std::cell::{Cell, RefCell};
@@ -249,7 +249,7 @@ impl Core {
             match bound.iter().find(|b| b.key == spec.key) {
                 Some(b) => {
                     if let (Some(endpoint), Some(config)) = (&b.quic, &snap.quic) {
-                        match quic_config(config.clone()) {
+                        match quic_config(config.clone(), &snap.plan.server) {
                             Ok(config) => endpoint.set_server_config(Some(config)),
                             Err(error) => failures.push(BindFailure {
                                 addr: spec.key.addr,
@@ -287,11 +287,9 @@ impl Core {
                     .quic
                     .clone()
                     .ok_or_else(|| io::Error::other("QUIC listener without a TLS config"))?;
-                let endpoint = listen::quic_endpoint(fd, quic_config(config)?)?;
-                let task = tokio::task::spawn_local(crate::proto::h3::serve_endpoint(
-                    self.clone(),
-                    endpoint.clone(),
-                ));
+                let endpoint = listen::quic_endpoint(fd, quic_config(config, &snap.plan.server)?)?;
+                let task =
+                    tokio::task::spawn_local(quic_accept_loop(self.clone(), key, endpoint.clone()));
                 Ok(Bound {
                     key,
                     task,
@@ -316,7 +314,10 @@ impl Core {
     async fn drain(&self, deadline: Instant) {
         self.draining.set(true);
         self.drain_started.notify_waiters();
-        close(self.listeners.take()).await;
+        let listeners = self.listeners.take();
+        let endpoints: Vec<quinn::Endpoint> =
+            listeners.iter().filter_map(|b| b.quic.clone()).collect();
+        close(listeners).await;
         let deadline = tokio::time::Instant::from_std(deadline);
         while self.conns.get() > 0 {
             if tokio::time::timeout_at(deadline, self.conns_closed.notified())
@@ -331,23 +332,51 @@ impl Core {
                 break;
             }
         }
+        // The connections' closing packets go out while their endpoints still run.
+        for endpoint in endpoints {
+            if tokio::time::timeout_at(deadline, endpoint.wait_idle())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
     }
 }
 
-fn quic_config(config: Arc<rustls::ServerConfig>) -> io::Result<quinn::ServerConfig> {
+fn quic_config(
+    config: Arc<rustls::ServerConfig>,
+    server: &ServerParams,
+) -> io::Result<quinn::ServerConfig> {
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(config)
         .map_err(|e| io::Error::other(e.to_string()))?;
-    Ok(quinn::ServerConfig::with_crypto(Arc::new(crypto)))
+    let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+    config.transport_config(crate::proto::h3::transport(server));
+    Ok(config)
 }
 
-/// Closes listeners: their sockets are closed when this returns.
+/// Closes listeners. A TCP listener's socket is closed when this returns. A QUIC endpoint
+/// stops taking new connections and keeps its socket until its open connections end, since
+/// their packets arrive on it.
 async fn close(listeners: Vec<Bound>) {
     for b in listeners {
         if let Some(endpoint) = &b.quic {
-            endpoint.close(0u32.into(), b"");
+            endpoint.set_server_config(None);
         }
         b.task.abort();
         let _ = b.task.await;
+    }
+}
+
+/// Accept loop of one QUIC endpoint: a local task per incoming connection.
+async fn quic_accept_loop(core: Rc<Core>, key: ListenerKey, endpoint: quinn::Endpoint) {
+    while let Some(incoming) = endpoint.accept().await {
+        let guard = core.track();
+        let core = core.clone();
+        tokio::task::spawn_local(async move {
+            crate::proto::h3::serve(core, incoming, key).await;
+            drop(guard);
+        });
     }
 }
 

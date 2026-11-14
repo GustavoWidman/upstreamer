@@ -110,7 +110,8 @@ impl RequestBody<'_> {
         match self {
             RequestBody::Empty => Some(0),
             RequestBody::H1(body) => body.state.track.remaining(),
-            RequestBody::H2(_) | RequestBody::H3(_) => None,
+            RequestBody::H2(_) => None,
+            RequestBody::H3(body) => body.declared,
         }
     }
 
@@ -129,9 +130,8 @@ impl RequestBody<'_> {
         match self {
             RequestBody::Empty => Ok(None),
             RequestBody::H1(body) => body.next_chunk().await,
-            RequestBody::H2(_) | RequestBody::H3(_) => {
-                todo!("request bodies of the h2 and h3 drivers")
-            }
+            RequestBody::H2(_) => todo!("request bodies of the h2 driver"),
+            RequestBody::H3(body) => body.next_chunk().await,
         }
     }
 }
