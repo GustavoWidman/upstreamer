@@ -264,6 +264,20 @@ impl Known {
         }
     }
 
+    /// The tag of a name in any case. Only for short tokens such as `Connection` options; field
+    /// names are lowercased once when the field is added and tagged with [`Known::from_lowercase`].
+    fn from_lowercase_ci(name: &[u8]) -> Known {
+        let mut lower = [0u8; 24];
+        match lower.get_mut(..name.len()) {
+            Some(l) => {
+                l.copy_from_slice(name);
+                l.make_ascii_lowercase();
+                Known::from_lowercase(l)
+            }
+            None => Known::Other,
+        }
+    }
+
     /// The lowercase name; empty for `Other`.
     pub fn name(self) -> &'static [u8] {
         match self {
@@ -326,7 +340,7 @@ impl Known {
 }
 
 /// RFC 9110 `tchar`.
-fn is_tchar(b: u8) -> bool {
+pub(crate) fn is_tchar(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
 }
 
@@ -507,6 +521,54 @@ impl Fields {
         self.values_known(tag)
             .flat_map(|v| v.split(|&b| b == b','))
             .any(|t| trim_ows(t).eq_ignore_ascii_case(token))
+    }
+
+    /// Removes the fields a received `Connection` names (RFC 9110 §7.6.1), so they never
+    /// cross this hop. Hop-by-hop fields stay for the codec to read (the writers never emit
+    /// them), and so do Host and the framing fields, which the codec has already interpreted.
+    pub fn drop_connection_named(&mut self) {
+        let Fields { buf, table } = self;
+        for c in 0..table.len() {
+            if !(table[c].live && table[c].tag == Known::Connection) {
+                continue;
+            }
+            for token in table[c].value.get(buf).split(|&b| b == b',').map(trim_ows) {
+                if token.is_empty() || Known::from_lowercase_ci(token).hop_by_hop() {
+                    continue;
+                }
+                for f in table.iter_mut().filter(|f| {
+                    f.live
+                        && !f.tag.hop_by_hop()
+                        && !matches!(
+                            f.tag,
+                            Known::Host | Known::ContentLength | Known::TransferEncoding
+                        )
+                        && f.name.get(buf).eq_ignore_ascii_case(token)
+                }) {
+                    f.live = false;
+                }
+            }
+        }
+    }
+
+    /// Appends one field whose value is `values` joined by `sep`, as h2/h3 cookie crumbs are
+    /// joined for HTTP/1.1 (RFC 9113 §8.2.3). Values are copied as given.
+    fn push_joined<'v>(&mut self, name: &[u8], values: impl Iterator<Item = &'v [u8]>, sep: &[u8]) {
+        let name = self.copy(name);
+        let tag = Known::from_lowercase(name.get(&self.buf));
+        let start = self.buf.len();
+        for (i, v) in values.enumerate() {
+            if i > 0 {
+                self.buf.extend_from_slice(sep);
+            }
+            self.buf.extend_from_slice(v);
+        }
+        self.table.push(Field {
+            name,
+            value: Span::new(start, self.buf.len()),
+            tag,
+            live: true,
+        });
     }
 }
 
@@ -802,25 +864,68 @@ impl RequestHead {
             out.extend_from_slice(self.raw_target());
             return;
         }
-        for &b in self.path().as_bytes() {
-            if b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/".contains(&b) {
-                out.push(b);
-            } else {
-                const HEX: &[u8; 16] = b"0123456789ABCDEF";
-                out.extend_from_slice(&[b'%', HEX[(b >> 4) as usize], HEX[(b & 15) as usize]]);
-            }
-        }
+        push_encoded(out, self.path().as_bytes(), b"-._~!$&'()*+,;=:@/");
         if let Some(q) = self.query() {
             out.push(b'?');
-            out.extend_from_slice(q);
+            // A rewritten query may hold bytes a template expanded from decoded input; `%`
+            // stays, so escapes already in the query are not encoded twice.
+            push_encoded(out, q, b"-._~!$&'()*+,;=:@/?%");
         }
     }
 
     /// Fills a head from h2/h3 pseudo-headers and a header map (one copy into the buffer).
+    /// Cookie crumbs are joined into one field. The routing host is `:authority`, else Host;
+    /// a request with neither, or whose Host names another authority than `:authority`, is a
+    /// `BadPath` (400). Without a Host field, one is added from `:authority`, so an HTTP/1.1
+    /// upstream gets it.
     pub fn fill_from_http(&mut self, parts: &http::request::Parts) -> Result<(), BadPath> {
-        todo!(
-            "set_line from :method/:path, push_field per header, set_host from :authority or Host"
-        )
+        self.clear();
+        let version = match parts.version {
+            http::Version::HTTP_3 => Version::H3,
+            _ => Version::H2,
+        };
+        let target = parts.uri.path_and_query().ok_or(BadPath)?.as_str();
+        self.set_line(parts.method.as_str().as_bytes(), target.as_bytes(), version)?;
+        let mut host = None;
+        for (name, value) in &parts.headers {
+            if name == http::header::COOKIE {
+                continue;
+            }
+            if name == http::header::HOST {
+                host.get_or_insert(value.as_bytes());
+            }
+            self.push_field(name.as_str().as_bytes(), value.as_bytes());
+        }
+        let mut cookies = parts
+            .headers
+            .get_all(http::header::COOKIE)
+            .iter()
+            .peekable();
+        if cookies.peek().is_some() {
+            self.fields
+                .push_joined(b"cookie", cookies.map(|v| v.as_bytes()), b"; ");
+        }
+        let authority = parts.uri.authority().map(|a| a.as_str().as_bytes());
+        match (authority, host) {
+            (Some(a), Some(h)) if !a.eq_ignore_ascii_case(h) => return Err(BadPath),
+            (Some(a), None) => self.push_field(b"host", a),
+            (None, None) => return Err(BadPath),
+            _ => {}
+        }
+        self.set_host(authority.or(host).unwrap_or_default());
+        Ok(())
+    }
+}
+
+/// Appends `bytes`, percent-encoding every byte that is not ASCII alphanumeric or in `keep`.
+fn push_encoded(out: &mut Vec<u8>, bytes: &[u8], keep: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for &b in bytes {
+        if b.is_ascii_alphanumeric() || keep.contains(&b) {
+            out.push(b);
+        } else {
+            out.extend_from_slice(&[b'%', HEX[(b >> 4) as usize], HEX[(b & 15) as usize]]);
+        }
     }
 }
 
@@ -867,9 +972,27 @@ impl ResponseHead {
         self.fields.clear();
         self.vary_accept_encoding = false;
     }
-    /// Converts for h2/h3 `send_response` (one HeaderMap build per response).
+    /// Converts for h2/h3 `send_response` (one HeaderMap build per response): the status and
+    /// every live field except hop-by-hop ones and Content-Length. As in h1, framing comes
+    /// from the body, so the driver sets `content-length` when the body's length is known. A
+    /// field the `http` crate rejects (a value with CR, LF or NUL) is left out.
     pub fn to_http(&self) -> http::Response<()> {
-        todo!("status and every live field except hop-by-hop ones")
+        let mut resp = http::Response::new(());
+        *resp.status_mut() =
+            http::StatusCode::from_u16(self.status.code()).expect("Status is in 100..=999");
+        let headers = resp.headers_mut();
+        for (name, value, tag) in self.fields.live() {
+            if tag.hop_by_hop() || tag == Known::ContentLength {
+                continue;
+            }
+            if let (Ok(name), Ok(value)) = (
+                http::HeaderName::from_bytes(name),
+                http::HeaderValue::from_bytes(value),
+            ) {
+                headers.append(name, value);
+            }
+        }
+        resp
     }
 }
 
@@ -1081,6 +1204,124 @@ mod tests {
         out.clear();
         h.write_upstream_target(&mut out);
         assert_eq!(out, b"/caf%C3%A9%20x/?X-Amz-Signature=x");
+    }
+
+    #[test]
+    fn clean_path_traversal_cases() {
+        for raw in [
+            "/%2E%2E/etc/passwd",
+            "/%2e%2E/",
+            "/a/%2e%2e/%2e%2e/b",
+            "/..%2f",
+            "/a/..%2F..%2Fb",
+            "/./../x",
+            "//..//x",
+            "/a/b/../../../c",
+            "/.%2e",
+        ] {
+            assert_eq!(clean(raw), None, "{raw}");
+        }
+        // Escapes decode once: a double-encoded or overlong dot is a name, not a dot segment.
+        assert_eq!(clean("/%252e%252e/x").as_deref(), Some("/%2e%2e/x"));
+        let mut out = Vec::new();
+        let span = clean_path(b"/%c0%ae%c0%ae/x", &mut out).unwrap();
+        assert_eq!(span.get(&out), b"/\xc0\xae\xc0\xae/x");
+        assert_eq!(clean("/..;/x").as_deref(), Some("/..;/x"));
+        assert_eq!(clean("/...").as_deref(), Some("/..."));
+        assert_eq!(
+            clean("/a\\..\\b").as_deref(),
+            Some("/a\\..\\b"),
+            "backslash is a name byte"
+        );
+        assert_eq!(clean("/a/b/%2e/./c/%2E%2E").as_deref(), Some("/a/b/"));
+        let deep = "/a".repeat(40) + &"/..".repeat(40);
+        assert_eq!(
+            clean(&deep).as_deref(),
+            Some("/"),
+            "deeper than the inline stack"
+        );
+        assert_eq!(clean(&(deep + "/..")), None);
+    }
+
+    fn h2_parts(req: http::request::Builder) -> http::request::Parts {
+        req.body(()).unwrap().into_parts().0
+    }
+
+    #[test]
+    fn heads_from_h2_and_h3() {
+        let parts = h2_parts(
+            http::Request::builder()
+                .method("POST")
+                .uri("https://Files.Example:8443/a/../b%20c?x=1")
+                .version(http::Version::HTTP_2)
+                .header("cookie", "a=1")
+                .header("accept", "*/*")
+                .header("cookie", "b=2"),
+        );
+        let mut h = RequestHead::new();
+        h.fill_from_http(&parts).unwrap();
+        assert_eq!(h.method, Method::Post);
+        assert_eq!(h.version, Version::H2);
+        assert_eq!(h.path().as_bytes(), b"/b c");
+        assert_eq!(h.query(), Some(&b"x=1"[..]));
+        assert_eq!(h.raw_target(), b"/a/../b%20c?x=1");
+        assert_eq!(h.host(), b"files.example");
+        let fields: Vec<_> = h
+            .fields
+            .live()
+            .map(|(n, v, _)| (n.to_vec(), v.to_vec()))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                (b"accept".to_vec(), b"*/*".to_vec()),
+                (b"cookie".to_vec(), b"a=1; b=2".to_vec()),
+                (b"host".to_vec(), b"Files.Example:8443".to_vec()),
+            ],
+            "cookie crumbs are joined and Host comes from :authority"
+        );
+
+        let parts = h2_parts(
+            http::Request::builder()
+                .uri("/x")
+                .version(http::Version::HTTP_3)
+                .header("host", "B.example"),
+        );
+        h.fill_from_http(&parts).unwrap();
+        assert_eq!(h.version, Version::H3);
+        assert_eq!(h.host(), b"b.example");
+        assert_eq!(h.fields.get(Known::Host), Some(&b"B.example"[..]));
+
+        let mismatch = h2_parts(
+            http::Request::builder()
+                .uri("https://a.example/")
+                .header("host", "b.example"),
+        );
+        assert_eq!(h.fill_from_http(&mismatch), Err(BadPath));
+        let no_host = h2_parts(http::Request::builder().uri("/"));
+        assert_eq!(h.fill_from_http(&no_host), Err(BadPath));
+        let traversal = h2_parts(http::Request::builder().uri("https://a.example/../x"));
+        assert_eq!(h.fill_from_http(&traversal), Err(BadPath));
+    }
+
+    #[test]
+    fn response_heads_for_h2_and_h3() {
+        let mut head = ResponseHead::new(Status::NOT_FOUND);
+        head.fields.push(b"Content-Type", b"text/html");
+        head.fields.push(b"Connection", b"close");
+        head.fields.push(b"Keep-Alive", b"timeout=5");
+        head.fields.push(b"Transfer-Encoding", b"chunked");
+        head.fields.push(b"Content-Length", b"10");
+        head.fields.push(b"Set-Cookie", b"a=1");
+        head.fields.push(b"Set-Cookie", b"b=2");
+        head.fields.push(b"X-Removed", b"x");
+        head.fields.remove(&HeaderName::new("x-removed").unwrap());
+        let resp = head.to_http();
+        assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
+        let mut names: Vec<_> = resp.headers().keys().map(|k| k.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["content-type", "set-cookie"]);
+        assert_eq!(resp.headers().get_all("set-cookie").iter().count(), 2);
     }
 
     #[test]
