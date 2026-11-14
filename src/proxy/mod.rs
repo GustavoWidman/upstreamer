@@ -427,3 +427,113 @@ async fn connect_named(core: &Core, up: &UpstreamPlan) -> Result<(Socket, Socket
     core.upstreams.forget(up);
     Err(ProxyError::Dial(last))
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::runtime::testing::{connect, free_addr, plan_from, read_response, served};
+    use crate::runtime::{Generation, allowed_cpus, spawn_workers, stop};
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    /// An origin that answers every request head on a connection with `response`.
+    fn origin(response: &'static [u8]) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    let mut pending = Vec::new();
+                    loop {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => pending.extend_from_slice(&buf[..n]),
+                        }
+                        while let Some(end) = memchr::memmem::find(&pending, b"\r\n\r\n") {
+                            pending.drain(..end + 4);
+                            if stream.write_all(response).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    fn proxied(origin: SocketAddr, listen: SocketAddr) -> Arc<Generation> {
+        let plan = plan_from(
+            1,
+            &serde_json::json!({
+                "version": 1,
+                "listen": { "http": [listen], "https": [] },
+                "sites": [{
+                    "name": "proxied",
+                    "hosts": ["*"],
+                    "headers": { "X-Frame-Options": "DENY", "Server": null },
+                    "routes": [{ "proxy": {
+                        "to": format!("http://{origin}"),
+                        "headers": { "X-Real-IP": "{remote_host}" },
+                        "timeouts": { "responseHeader": "15s" },
+                    } }],
+                }],
+            }),
+        );
+        Arc::new(Generation {
+            plan: Arc::new(plan),
+            tls: None,
+        })
+    }
+
+    const REQUEST: &[u8] = b"GET /api/items?limit=20 HTTP/1.1\r\n\
+        Host: app.example.com\r\n\
+        User-Agent: Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/131.0\r\n\
+        Accept: application/json\r\n\
+        Accept-Encoding: gzip, br\r\n\
+        Cookie: session=0123456789abcdef; theme=dark\r\n\
+        CF-Connecting-IP: 203.0.113.7\r\n\
+        X-Forwarded-For: 203.0.113.7\r\n\
+        \r\n";
+
+    #[test]
+    fn zero_allocations_per_proxied_request_after_warm_up() {
+        const RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\n\
+            Content-Type: application/json\r\n\
+            Content-Length: 27\r\n\
+            Cache-Control: no-store\r\n\
+            Server: origin\r\n\
+            \r\n\
+            {\"items\":[1,2,3],\"next\":4}\n";
+        let listen = free_addr();
+        let generation = proxied(origin(RESPONSE), listen);
+        let workers = spawn_workers(&[allowed_cpus()[0]], generation).unwrap();
+        let mut conn = connect(listen);
+        let mut request = || {
+            conn.write_all(REQUEST).unwrap();
+            let (head, body) = read_response(&mut conn).unwrap();
+            assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+            assert!(head.contains("\r\nx-frame-options: DENY\r\n"), "{head}");
+            assert!(!head.contains("server:"), "{head}");
+            assert_eq!(body, b"{\"items\":[1,2,3],\"next\":4}\n");
+        };
+        for _ in 0..2_000 {
+            request();
+        }
+        let before = served(listen.port(), 0).allocations;
+        let requests = 20_000;
+        for _ in 0..requests {
+            request();
+        }
+        let after = served(listen.port(), 0).allocations;
+        stop(workers, Instant::now());
+        println!(
+            "core thread allocations over {requests} proxied keep-alive requests: {}",
+            after - before
+        );
+        assert_eq!(after - before, 0, "allocations on the core thread");
+    }
+}
