@@ -728,6 +728,9 @@ fn send_alert(sock: &Socket, conn: &mut UnbufferedServerConnection, tx: &mut Byt
 }
 
 #[cfg(test)]
+mod transport_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use rustls::{ClientConnection, HandshakeKind, ServerConnection};
