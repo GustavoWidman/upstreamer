@@ -495,6 +495,12 @@ fn poll_shutdown_sends_close_notify() {
             let (mut io, _) = accepted(sock, config).await;
             io.write_all(b"frame").await.unwrap();
             io.shutdown().await.unwrap();
+            let after = io.write_all(b"late").await.map_err(|e| e.kind());
+            assert_eq!(
+                after,
+                Err(io::ErrorKind::BrokenPipe),
+                "nothing after close_notify"
+            );
         },
     );
     assert_eq!((n, &rest[..]), (Ok(5), &b"frame"[..]));
@@ -580,23 +586,135 @@ fn abrupt_close_inside_a_record_is_an_error() {
     assert_eq!(read, Err(io::ErrorKind::UnexpectedEof));
 }
 
+/// What the client reads after its last write: the server's alert, as rustls reports it.
+fn alert_received(tls: &mut StreamOwned<ClientConnection, TcpStream>) -> Option<rustls::Error> {
+    let err = tls.read_to_end(&mut Vec::new()).err()?;
+    err.into_inner()?
+        .downcast::<rustls::Error>()
+        .ok()
+        .map(|e| *e)
+}
+
 #[test]
-fn tampered_record_is_an_error() {
+fn tampered_record_gets_bad_record_mac() {
     let config = server(&store());
-    let (read, ()) = run(
+    let (read, alert) = run(
         |addr| {
             let mut tls = Client::new(&[]).connect(addr, "a.test");
+            round_trip(&mut tls);
             let mut record = sealed_record(&mut tls, b"payload");
             record[8] ^= 1;
             tls.sock.write_all(&record).unwrap();
-            std::thread::sleep(Duration::from_millis(100));
+            alert_received(&mut tls)
         },
         async |sock| {
             let (mut io, _) = accepted(sock, config).await;
-            io.read(&mut BytesMut::new()).await.map_err(|e| e.kind())
+            echo_once(&mut io).await;
+            let read = io.read(&mut BytesMut::new()).await.map_err(|e| e.kind());
+            io.close().await;
+            read
         },
     );
     assert_eq!(read, Err(io::ErrorKind::InvalidData));
+    assert_eq!(
+        alert,
+        Some(rustls::Error::AlertReceived(
+            rustls::AlertDescription::BadRecordMac
+        ))
+    );
+}
+
+#[test]
+fn a_flood_of_records_without_data_ends_the_stream() {
+    let config = server(&store());
+    let (read, alert) = run(
+        |addr| {
+            let mut tls = Client::new(&[]).connect(addr, "a.test");
+            round_trip(&mut tls);
+            // One past the 32 records without data the server tolerates, and no more: records
+            // the server never reads would turn its close into a reset.
+            for _ in 0..33 {
+                tls.conn.refresh_traffic_keys().unwrap();
+                tls.flush().unwrap();
+            }
+            alert_received(&mut tls)
+        },
+        async |sock| {
+            let (mut io, _) = accepted(sock, config).await;
+            echo_once(&mut io).await;
+            let mut buf = BytesMut::new();
+            let read = loop {
+                match io.read(&mut buf).await {
+                    Ok(0) => break Ok(0),
+                    Ok(_) => continue,
+                    Err(e) => break Err(e.kind()),
+                }
+            };
+            io.close().await;
+            read
+        },
+    );
+    assert_eq!(read, Err(io::ErrorKind::InvalidData));
+    assert_eq!(
+        alert,
+        Some(rustls::Error::AlertReceived(
+            rustls::AlertDescription::UnexpectedMessage
+        ))
+    );
+}
+
+#[test]
+fn a_client_hello_split_across_records_and_reads_completes() {
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watched = done.clone();
+    // A handshake loop that spins never yields, so no timeout inside the runtime can end it.
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(20));
+        if !watched.load(Ordering::Relaxed) {
+            eprintln!("the handshake did not finish within 20 s");
+            std::process::exit(101);
+        }
+    });
+    let config = server(&store());
+    let (proto, reply) = run(
+        |addr| {
+            let name = ServerName::try_from("a.test").unwrap();
+            let mut conn = ClientConnection::new(Client::new(&[]).config, name).unwrap();
+            let mut hello = Vec::new();
+            conn.write_tls(&mut hello).unwrap();
+            let body = &hello[5..];
+            let mut wire = Vec::new();
+            for part in [&body[..100], &body[100..300], &body[300..]] {
+                wire.extend_from_slice(&hello[..3]);
+                wire.extend_from_slice(&(part.len() as u16).to_be_bytes());
+                wire.extend_from_slice(part);
+            }
+            let mut tcp = TcpStream::connect(addr).unwrap();
+            tcp.set_nodelay(true).unwrap();
+            for chunk in wire.chunks(64) {
+                tcp.write_all(chunk).unwrap();
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let mut tls = StreamOwned::new(conn, tcp);
+            tls.write_all(b"ping").unwrap();
+            let mut reply = [0u8; 4];
+            tls.read_exact(&mut reply).unwrap();
+            reply
+        },
+        async |sock| {
+            let (mut io, proto) = accept_within(sock, config, Duration::from_secs(5))
+                .await
+                .expect("handshake");
+            let got = read_exactly(&mut io, 4).await;
+            io.write_all_vectored(&mut [IoSlice::new(&got)])
+                .await
+                .unwrap();
+            proto
+        },
+    );
+    done.store(true, Ordering::Relaxed);
+    assert!(matches!(proto, Proto::H1));
+    assert_eq!(&reply, b"ping");
 }
 
 #[test]

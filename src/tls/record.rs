@@ -17,7 +17,7 @@ use rustls::kernel::KernelConnection;
 use rustls::server::ServerConnectionData;
 use rustls::{
     AlertDescription, ConnectionTrafficSecrets, Error, ExtractedSecrets, InvalidMessage,
-    ProtocolVersion, SupportedCipherSuite,
+    PeerMisbehaved, ProtocolVersion, SupportedCipherSuite,
 };
 use std::io::IoSlice;
 use std::ops::Range;
@@ -36,6 +36,10 @@ const KEY_UPDATE: u8 = 24;
 const CLOSE_NOTIFY: u8 = 0;
 const USER_CANCELED: u8 = 90;
 const WARNING: u8 = 1;
+const FATAL: u8 = 2;
+/// Records in a row that carry no data (empty records, key updates, ignorable alerts) before
+/// the peer counts as misbehaving, as rustls counts them during its own record processing.
+const MAX_QUIET_RECORDS: u8 = 32;
 const LEGACY_VERSION: [u8; 2] = [3, 3];
 
 /// The length of the record at the front of `buf`, once all of it has arrived.
@@ -146,6 +150,8 @@ pub(crate) struct Session {
     /// TLS 1.3: our key update goes out before our next record (the peer asked for one, or the
     /// sealing key reached its limit).
     owe_key_update: bool,
+    /// Records opened in a row that carried no data.
+    quiet: u8,
 }
 
 impl Session {
@@ -172,6 +178,7 @@ impl Session {
             kernel,
             seal_limit,
             owe_key_update: false,
+            quiet: 0,
         })
     }
 
@@ -195,6 +202,10 @@ impl Session {
                     .aead
                     .open_in_place(nonce, Aad::from(header), body)
                     .map_err(|_| Error::DecryptError)?;
+                // TLSInnerPlaintext: content, type and padding together (RFC 8446 5.4).
+                if inner.len() > MAX_PLAINTEXT + 1 {
+                    return Err(Error::PeerSentOversizedRecord);
+                }
                 let end = inner
                     .iter()
                     .rposition(|&b| b != 0)
@@ -235,13 +246,22 @@ impl Session {
             return Err(Error::PeerSentOversizedRecord);
         }
         self.open.seq += 1;
-        match typ {
-            APPLICATION_DATA if content.is_empty() => Ok(Opened::Nothing),
-            APPLICATION_DATA => Ok(Opened::Data(content)),
-            ALERT => self.alert(&record[content]),
-            HANDSHAKE => self.post_handshake(&record[content]),
-            _ => Err(Error::InvalidMessage(InvalidMessage::InvalidContentType)),
+        let opened = match typ {
+            APPLICATION_DATA if content.is_empty() => Opened::Nothing,
+            APPLICATION_DATA => Opened::Data(content),
+            ALERT => self.alert(&record[content])?,
+            HANDSHAKE => self.post_handshake(&record[content])?,
+            _ => return Err(Error::InvalidMessage(InvalidMessage::InvalidContentType)),
+        };
+        if opened == Opened::Nothing {
+            self.quiet += 1;
+            if self.quiet > MAX_QUIET_RECORDS {
+                return Err(Error::PeerMisbehaved(PeerMisbehaved::TooManyEmptyFragments));
+            }
+        } else {
+            self.quiet = 0;
         }
+        Ok(opened)
     }
 
     fn alert(&self, alert: &[u8]) -> Result<Opened, Error> {
@@ -306,10 +326,11 @@ impl Session {
         Ok(sealed)
     }
 
-    /// 1 when a key update must precede the next record. TLS 1.2 has no key update, so a
-    /// connection whose key reached its limit ends.
+    /// 1 when a key update must precede the next record: the update itself is the last record
+    /// the old key protects. TLS 1.2 has no key update, so its connection ends one record short
+    /// of the limit, which leaves room for close_notify.
     fn key_update_due(&mut self) -> Result<usize, Error> {
-        if self.seal.seq >= self.seal_limit {
+        if self.seal.seq + 1 >= self.seal_limit {
             if self.framing != Framing::Tls13 {
                 return Err(Error::EncryptError);
             }
@@ -323,6 +344,25 @@ impl Session {
         self.seal_record(tx, ALERT, 2, |tx| {
             tx.extend_from_slice(&[WARNING, CLOSE_NOTIFY])
         })
+    }
+
+    /// Appends the fatal alert that answers `error` from [`Session::open`] (RFC 8446 6.2), if
+    /// it has one: none for an alert the peer sent, after which it is gone. True if appended.
+    pub fn seal_fatal_alert(&mut self, tx: &mut BytesMut, error: &Error) -> bool {
+        let description = match error {
+            Error::AlertReceived(_) => return false,
+            Error::DecryptError => AlertDescription::BadRecordMac,
+            Error::PeerSentOversizedRecord => AlertDescription::RecordOverflow,
+            Error::InvalidMessage(InvalidMessage::InvalidKeyUpdate) => {
+                AlertDescription::IllegalParameter
+            }
+            Error::InvalidMessage(InvalidMessage::MessageTooShort) => AlertDescription::DecodeError,
+            _ => AlertDescription::UnexpectedMessage,
+        };
+        self.seal_record(tx, ALERT, 2, |tx| {
+            tx.extend_from_slice(&[FATAL, u8::from(description)])
+        })
+        .is_ok()
     }
 
     /// Appends one record of type `typ` whose `n` plaintext bytes `fill` appends.

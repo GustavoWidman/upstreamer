@@ -401,10 +401,17 @@ impl TlsStream {
         let Some(rx) = self.rx.as_mut() else {
             return Ok(false);
         };
-        let Some(len) = record_len(rx).map_err(invalid)? else {
-            return Ok(false);
+        let opened = match record_len(rx) {
+            Ok(None) => return Ok(false),
+            Ok(Some(len)) => self
+                .session
+                .open(&mut rx[..len])
+                .map(|opened| (opened, len)),
+            Err(e) => Err(e),
         };
-        match self.session.open(&mut rx[..len]).map_err(invalid)? {
+        let (opened, len) = opened.map_err(|e| self.fail(e))?;
+        let rx = self.rx.as_mut().expect("checked");
+        match opened {
             Opened::Data(range) => {
                 rx.advance(range.start);
                 self.plain = range.len();
@@ -417,6 +424,20 @@ impl TlsStream {
             }
         }
         Ok(true)
+    }
+
+    /// Answers a record-layer error with its fatal alert, in one write that never waits, and
+    /// ends the stream: nothing is sealed after it.
+    fn fail(&mut self, e: rustls::Error) -> io::Error {
+        if !self.closing {
+            self.closing = true;
+            let mut tx = self.tx.take().unwrap_or_else(take_ciphertext);
+            if self.session.seal_fatal_alert(&mut tx, &e) {
+                let _ = self.sock.try_write(&tx);
+            }
+            put_ciphertext(tx);
+        }
+        invalid(e)
     }
 
     /// True when a read returns without waiting for the socket.
@@ -435,8 +456,12 @@ impl TlsStream {
         }
     }
 
-    /// Seals and writes all of `bufs`, a pool buffer of records per writev.
+    /// Seals and writes all of `bufs`, a pool buffer of records per writev. Not cancel-safe:
+    /// records sealed and then dropped unsent leave the peer unable to read what follows.
     async fn write_all_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<()> {
+        if self.closing {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
         std::future::poll_fn(|cx| self.poll_flush_tx(cx)).await?;
         let total = total_len(bufs);
         let mut tx = take_ciphertext();
@@ -463,6 +488,9 @@ impl TlsStream {
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
+        if self.closing {
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
         ready!(self.poll_flush_tx(cx))?;
         let mut tx = self.tx.take().unwrap_or_else(take_ciphertext);
         let sealed = self.session.seal(&mut tx, bufs, 0);
@@ -488,7 +516,7 @@ impl TlsStream {
         Poll::Ready(Ok(()))
     }
 
-    /// Queues close_notify once.
+    /// Queues close_notify once, unless a fatal alert ended the stream.
     fn seal_close_notify(&mut self) -> io::Result<()> {
         if !self.closing {
             self.closing = true;

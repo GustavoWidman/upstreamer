@@ -606,11 +606,24 @@ pub(crate) async fn accept_within(
     timeout: Duration,
 ) -> Result<(Transport, Proto), TlsError> {
     let conn = UnbufferedServerConnection::new(config)?;
-    let mut rx = net::take_ciphertext();
-    let mut tx = net::take_ciphertext();
-    let done = tokio::time::timeout(timeout, handshake(&mut sock, conn, &mut rx, &mut tx)).await;
-    net::put_ciphertext(tx);
-    let (conn, proto) = done.map_err(|_| TlsError::Timeout)??;
+    let handshake = async {
+        // A client that connects and sends nothing holds no buffer.
+        sock.readable().await?;
+        let mut rx = net::take_ciphertext();
+        let mut tx = net::take_ciphertext();
+        let done = handshake(&mut sock, conn, &mut rx, &mut tx).await;
+        net::put_ciphertext(tx);
+        match done {
+            Ok(done) => Ok((done, rx)),
+            Err(e) => {
+                net::put_ciphertext(rx);
+                Err(e)
+            }
+        }
+    };
+    let ((conn, proto), rx) = tokio::time::timeout(timeout, handshake)
+        .await
+        .map_err(|_| TlsError::Timeout)??;
     let (secrets, kernel) = conn.dangerous_into_kernel_connection()?;
     let session = record::Session::new(secrets, kernel)?;
     Ok((
@@ -619,23 +632,22 @@ pub(crate) async fn accept_within(
     ))
 }
 
-/// Drives rustls's unbuffered server through the handshake, one complete record at a time, so
-/// it stops before any application data that arrived with the client's last flight: those
-/// records stay in `rx` for the record layer. On a handshake error the alert rustls produced is
-/// sent before returning.
+/// Drives rustls's unbuffered server through the handshake. On a handshake error the alert
+/// rustls produced is sent before returning.
 async fn handshake(
     sock: &mut Socket,
     mut conn: UnbufferedServerConnection,
     rx: &mut BytesMut,
     tx: &mut BytesMut,
 ) -> Result<(UnbufferedServerConnection, Proto), TlsError> {
+    // The front of `rx` given to rustls. It grows one whole record at a time, only when rustls
+    // is blocked mid-handshake, so rustls never opens the application data that may follow the
+    // client's last flight: those records stay in `rx` for the record layer. A handshake
+    // message split across records stays in this region, joined in place by rustls, until the
+    // record that completes it is given.
+    let mut fed = 0;
     loop {
-        let feed = if conn.is_handshaking() {
-            record::record_len(rx)?.unwrap_or(0)
-        } else {
-            0
-        };
-        let status = conn.process_tls_records(&mut rx[..feed]);
+        let status = conn.process_tls_records(&mut rx[..fed]);
         let discard = status.discard;
         let next = match status.state {
             Ok(ConnectionState::EncodeTlsData(mut data)) => {
@@ -647,11 +659,13 @@ async fn handshake(
                 Next::Transmit
             }
             Ok(ConnectionState::BlockedHandshake) => Next::Receive,
-            Ok(ConnectionState::WriteTraffic(_)) => Next::Done,
+            Ok(ConnectionState::WriteTraffic(_)) => Next::Traffic,
             Ok(ConnectionState::PeerClosed | ConnectionState::Closed) => {
                 return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
             }
-            Ok(_) => return Err(rustls::Error::General("unexpected handshake state".into()).into()),
+            Ok(_) => {
+                return Err(rustls::Error::General("unexpected handshake state".into()).into());
+            }
             Err(e) => {
                 rx.advance(discard);
                 send_alert(sock, &mut conn, tx);
@@ -659,25 +673,28 @@ async fn handshake(
             }
         };
         rx.advance(discard);
+        fed -= discard;
         match next {
             Next::Process => {}
             Next::Transmit => {
                 sock.write_all_vectored(&mut [IoSlice::new(tx)]).await?;
                 tx.clear();
             }
-            Next::Receive if record::record_len(rx)?.is_some() => {}
-            Next::Receive => {
-                if sock.read(rx).await? == 0 {
-                    return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
-                }
-            }
-            Next::Done => {
+            Next::Traffic if !conn.is_handshaking() => {
                 let proto = match conn.alpn_protocol() {
                     Some(b"h2") => Proto::H2,
                     _ => Proto::H1,
                 };
                 return Ok((conn, proto));
             }
+            Next::Receive | Next::Traffic => match record::record_len(&rx[fed..])? {
+                Some(len) => fed += len,
+                None => {
+                    if sock.read(rx).await? == 0 {
+                        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+                    }
+                }
+            },
         }
     }
 }
@@ -686,7 +703,7 @@ enum Next {
     Process,
     Transmit,
     Receive,
-    Done,
+    Traffic,
 }
 
 fn encode(
