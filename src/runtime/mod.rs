@@ -226,6 +226,7 @@ impl Core {
         let new = Rc::new(CoreSnapshot::new(generation));
         if !Arc::ptr_eq(&old.plan, &new.plan) {
             *self.regex.borrow_mut() = RegexCaches::for_plan(&new.plan);
+            self.catalog.borrow_mut().retain_immutable();
             if !(old.plan.upstreams.is_empty() && new.plan.upstreams.is_empty()) {
                 self.upstreams.adopt(&old.plan, &new.plan);
             }
