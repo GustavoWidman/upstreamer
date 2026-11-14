@@ -65,9 +65,17 @@ pub(crate) async fn handle(
         route::run(plan, site, ex, &mut fx)
     };
 
+    let from_files = matches!(outcome, Outcome::Files { .. });
     let mut resp = match answer(core, snap, outcome, ex, body).await {
         Ok(resp) => resp,
-        Err(status) => answer_error(core, snap, site, ex, status).await,
+        Err(status) => {
+            let mut resp = answer_error(core, snap, site, ex, status).await;
+            // The file server's 405 names the methods it does answer (RFC 9110 §15.5.6).
+            if from_files && resp.head.status.code() == 405 {
+                resp.head.fields.push(b"allow", b"GET, HEAD");
+            }
+            resp
+        }
     };
     finalize(site, ex, &mut resp);
     resp

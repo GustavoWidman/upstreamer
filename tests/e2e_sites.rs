@@ -371,6 +371,12 @@ fn heimdall_serves_its_app_shell_assets_and_api() {
         assert_eq!(get(&mut client, sidecar, "").status, 404, "{sidecar}");
     }
 
+    // The file server answers GET and HEAD only, and says so.
+    let post = client
+        .roundtrip("POST /sw.js HTTP/1.1\r\nHost: app.example.com\r\nContent-Length: 2\r\n\r\nhi");
+    assert_eq!(post.status, 405);
+    assert_eq!(post.header("allow"), Some("GET, HEAD"));
+
     // HEAD gets the head of the GET.
     let head = client.roundtrip("HEAD /sw.js HTTP/1.1\r\nHost: app.example.com\r\n\r\n");
     assert_eq!(head.status, 200);
