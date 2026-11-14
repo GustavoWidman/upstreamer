@@ -288,6 +288,7 @@ pub(crate) fn parse_request(
         .map_err(|_| ParseError::BadPath)?;
     copy_fields(req.headers, &mut head.fields)?;
 
+    let origin_form = target.starts_with('/') || target == "*";
     let mut hosts = req
         .headers
         .iter()
@@ -296,16 +297,17 @@ pub(crate) fn parse_request(
         (_, Some(_)) => return Err(ParseError::Malformed),
         (None, None) if version == Version::Http11 => return Err(ParseError::Malformed),
         (None, _) => {}
-        (Some(h), None) => {
-            let authority = trim_ows(h.value);
-            if !valid_authority(authority) {
-                return Err(ParseError::Malformed);
-            }
-            // An absolute-form target already named the host, and wins (RFC 9112 §3.2.2).
-            if target.starts_with('/') || target == "*" {
-                head.set_host(authority);
-            }
+        (Some(h), None) if !valid_authority(trim_ows(h.value)) => {
+            return Err(ParseError::Malformed);
         }
+        (Some(h), None) if origin_form => head.set_host(trim_ows(h.value)),
+        (Some(_), None) => {}
+    }
+    // An absolute-form target names the host, and replaces Host (RFC 9112 §3.2.2), so the
+    // origin sees the host this request was routed by. `set_line` accepted its scheme.
+    if let Some((_, rest)) = target.split_once("://").filter(|_| !origin_form) {
+        let authority = rest.split(['/', '?']).next().unwrap_or_default();
+        head.fields.set_known(Known::Host, authority.as_bytes());
     }
 
     let framing = declared_framing(&head.fields, version)?.unwrap_or(Framing::None);
@@ -651,8 +653,9 @@ pub(crate) fn write_response_head(
 /// Serialises an upstream request head: `method target HTTP/1.1`, live end-to-end fields
 /// except Expect (100-continue is answered here, never forwarded), framing, and for an upgrade
 /// `Connection: upgrade` with the client's Upgrade fields. The target is
-/// [`RequestHead::write_upstream_target`]'s. Callers apply the proxy's header edits to
-/// `head.fields` first.
+/// [`RequestHead::write_upstream_target`]'s. HTTP/1.1 needs a Host, so a head without one
+/// (an HTTP/1.0 client) sends the routing host, which is empty for such a client. Callers
+/// apply the proxy's header edits to `head.fields` first.
 pub(crate) fn write_request_head(
     head: &RequestHead,
     framing: OutFraming,
@@ -663,6 +666,9 @@ pub(crate) fn write_request_head(
     out.push(b' ');
     head.write_upstream_target(out);
     out.extend_from_slice(b" HTTP/1.1\r\n");
+    if head.fields.get(Known::Host).is_none() {
+        push_field(out, b"host", head.host());
+    }
     push_end_to_end(out, &head.fields, Some(Known::Expect));
     if upgrade {
         push_upgrade(out, &head.fields);
@@ -841,11 +847,36 @@ mod tests {
 
     #[test]
     fn an_absolute_form_target_names_the_host() {
-        // RFC 9112 §3.2.2: the target's authority wins over Host.
+        // RFC 9112 §3.2.2: the target's authority replaces Host.
         let (head, ..) =
-            req(b"GET http://Target.example/p?q HTTP/1.1\r\nHost: other.example\r\n\r\n").unwrap();
+            req(b"GET http://Target.example:8080/p?q HTTP/1.1\r\nHost: other.example\r\n\r\n")
+                .unwrap();
         assert_eq!(head.host(), b"target.example");
         assert_eq!(head.path().as_bytes(), b"/p");
+        let mut out = Vec::new();
+        write_request_head(&head, OutFraming::None, false, &mut out);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "GET /p?q HTTP/1.1\r\nhost: Target.example:8080\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn a_url_in_the_query_is_not_a_host() {
+        let (head, ..) = req(b"GET /r?u=http://evil.example/ HTTP/1.1\r\nHost: a\r\n\r\n").unwrap();
+        assert_eq!(head.host(), b"a");
+        assert_eq!(head.fields.get(Known::Host), Some(&b"a"[..]));
+    }
+
+    #[test]
+    fn http10_requests_get_a_host_upstream() {
+        let (head, ..) = req(b"GET /x HTTP/1.0\r\nX-A: 1\r\n\r\n").unwrap();
+        let mut out = Vec::new();
+        write_request_head(&head, OutFraming::None, false, &mut out);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "GET /x HTTP/1.1\r\nhost: \r\nx-a: 1\r\n\r\n"
+        );
     }
 
     #[test]
