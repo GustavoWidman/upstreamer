@@ -16,9 +16,8 @@ use crate::log::{error, info, warning};
 use crate::plan::{Diagnostic, ListenerKind, Plan};
 use crate::tls::{self, CertProblem, TicketKeys};
 use crate::{RunOptions, StartError};
-use std::io;
 use std::os::unix::net::UnixDatagram;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::signal::unix::{SignalKind, signal};
@@ -36,7 +35,7 @@ pub(crate) fn run(opts: RunOptions) -> Result<(), StartError> {
     crate::log::init();
     let path = opts.config;
     serve(
-        &mut |generation| load_plan(&path, generation),
+        &mut |generation| crate::plan::load(&path, generation),
         opts.workers,
         &Notifier::from_env(),
     )
@@ -174,33 +173,6 @@ pub(crate) fn rebuild(
     };
     let plan = Arc::new(plan);
     Ok((Generation { plan, tls }, warnings, problems))
-}
-
-/// Reads, parses and compiles the config file.
-fn load_plan(path: &Path, generation: u64) -> Result<(Plan, Vec<Diagnostic>), Vec<Diagnostic>> {
-    struct Files;
-    impl crate::plan::compile::Sources for Files {
-        fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-            std::fs::read(path)
-        }
-    }
-    let bytes = std::fs::read(path).map_err(|e| {
-        vec![Diagnostic::error(
-            Some(path),
-            "",
-            format!("cannot read: {e}"),
-        )]
-    })?;
-    let config = crate::config::parse_config(&bytes)
-        .map_err(|e| vec![Diagnostic::error(Some(path), e.pointer, e.message)])?;
-    if config.version != 1 {
-        let message = format!(
-            "unsupported config version {}; this upstreamer reads version 1",
-            config.version
-        );
-        return Err(vec![Diagnostic::error(Some(path), "/version", message)]);
-    }
-    crate::plan::compile::compile(&config, &Files, generation)
 }
 
 fn report(warnings: &[Diagnostic], problems: &[CertProblem]) {
