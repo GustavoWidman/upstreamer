@@ -1,0 +1,23 @@
+* {
+    listen_ip "{{host}}"
+    default_http_port #null
+    default_https_port #null
+    protocols "h1" "h2" "h3"
+    tls_min_version "TLSv1.3"
+    ocsp_stapling #false
+    error_log_stderr
+}
+
+*:{{h1_port}} {
+    proxy "http://{{origin}}"
+}
+
+*:{{tls_port}} {
+    tls "{{cert}}" "{{key}}"
+    proxy "http://{{origin}}"
+}
+
+*:{{static_port}} {
+    tls "{{cert}}" "{{key}}"
+    root "{{www}}"
+}

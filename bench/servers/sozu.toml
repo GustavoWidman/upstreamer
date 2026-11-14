@@ -1,0 +1,32 @@
+log_level = "warn"
+log_target = "stdout"
+worker_count = {{workers}}
+disable_cluster_metrics = true
+
+max_connections = 20000
+max_buffers = 40000
+buffer_size = 16393
+
+front_timeout = 60
+back_timeout = 60
+
+[[listeners]]
+protocol = "http"
+address = "{{host}}:{{h1_port}}"
+
+[[listeners]]
+protocol = "https"
+address = "{{host}}:{{tls_port}}"
+tls_versions = ["TLS_V13"]
+certificate = "{{cert}}"
+key = "{{key}}"
+
+[clusters.origin]
+protocol = "http"
+frontends = [
+    { address = "{{host}}:{{h1_port}}", hostname = "*" },
+    { address = "{{host}}:{{tls_port}}", hostname = "*", certificate = "{{cert}}", key = "{{key}}" },
+]
+backends = [
+    { address = "{{origin}}" },
+]
