@@ -677,3 +677,230 @@ impl H1Body<'_> {
         read
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::Socket;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    /// A transport on one end of a socket pair, and the blocking other end as the client.
+    fn pair() -> (Transport, UnixStream) {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        ours.set_nonblocking(true).unwrap();
+        let io = Transport::Plain(Socket::from_fd(ours.into()).unwrap());
+        (io, theirs)
+    }
+
+    fn block_on<T>(test: impl Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(test)
+    }
+
+    /// Everything `raw` hands out until the body ends, each piece consumed whole.
+    async fn drain_raw(body: &mut H1Body<'_>) -> Vec<Vec<u8>> {
+        let mut pieces = Vec::new();
+        while let Some(piece) = body.raw().await.unwrap() {
+            let piece = piece.to_vec();
+            body.consume(piece.len());
+            pieces.push(piece);
+        }
+        pieces
+    }
+
+    #[test]
+    fn a_body_with_a_length_stops_at_its_last_byte() {
+        block_on(async {
+            let (mut io, mut client) = pair();
+            let mut buf = BytesMut::from(&b"hel"[..]);
+            let mut state = BodyState::new(Framing::Length("hello world".len() as u64), false);
+            assert!(!state.is_empty() && !state.is_done());
+            let mut body = H1Body {
+                io: &mut io,
+                buf: &mut buf,
+                state: &mut state,
+            };
+            assert_eq!(body.buffered().unwrap(), b"hel", "what came with the head");
+            assert_eq!(body.raw().await.unwrap(), Some(&b"hel"[..]));
+            assert_eq!(
+                body.raw().await.unwrap(),
+                Some(&b"hel"[..]),
+                "unconsumed bytes are handed out again"
+            );
+            body.consume(3);
+            client.write_all(b"lo worldGET /next HTTP/1.1\r\n").unwrap();
+            assert_eq!(body.raw().await.unwrap(), Some(&b"lo world"[..]));
+            body.consume(7);
+            assert_eq!(body.raw().await.unwrap(), Some(&b"d"[..]));
+            body.consume(1);
+            assert_eq!(body.raw().await.unwrap(), None);
+            assert!(state.is_done());
+            assert_eq!(
+                &buf[..],
+                b"GET /next HTTP/1.1\r\n",
+                "the next request stays in the buffer"
+            );
+        });
+    }
+
+    #[test]
+    fn a_chunked_body_is_followed_across_reads_to_its_last_chunk() {
+        block_on(async {
+            let (mut io, mut client) = pair();
+            let mut buf = BytesMut::from(&b"4\r\nwi"[..]);
+            let mut state = BodyState::new(Framing::Chunked, false);
+            let mut body = H1Body {
+                io: &mut io,
+                buf: &mut buf,
+                state: &mut state,
+            };
+            let writer = std::thread::spawn(move || {
+                for part in [&b"ki\r\n5\r\npedia"[..], b"\r\n0\r\n\r\nGET /next"] {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    client.write_all(part).unwrap();
+                }
+                client
+            });
+            let raw = drain_raw(&mut body).await.concat();
+            assert_eq!(
+                raw, b"4\r\nwiki\r\n5\r\npedia\r\n0\r\n\r\n",
+                "the chunk syntax is handed out as it was sent"
+            );
+            assert!(state.is_done());
+            assert_eq!(&buf[..], b"GET /next");
+            writer.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn next_chunk_yields_the_data_of_a_chunked_body() {
+        block_on(async {
+            let (mut io, mut client) = pair();
+            let mut buf = BytesMut::from(&b"4\r\nwiki\r\n5;x=y\r\npe"[..]);
+            let mut state = BodyState::new(Framing::Chunked, false);
+            let mut body = H1Body {
+                io: &mut io,
+                buf: &mut buf,
+                state: &mut state,
+            };
+            client.write_all(b"dia\r\n0\r\n\r\n").unwrap();
+            let mut data = Vec::new();
+            while let Some(chunk) = body.next_chunk().await.unwrap() {
+                data.extend_from_slice(&chunk);
+            }
+            assert_eq!(data, b"wikipedia");
+            assert!(state.is_done());
+        });
+    }
+
+    #[test]
+    fn continue_is_sent_once_when_the_body_is_first_read_for() {
+        block_on(async {
+            let (mut io, mut client) = pair();
+            let mut buf = BytesMut::new();
+            let mut state = BodyState::new(Framing::Length(4), true);
+            let mut body = H1Body {
+                io: &mut io,
+                buf: &mut buf,
+                state: &mut state,
+            };
+            assert_eq!(body.buffered().unwrap(), b"", "looking sends nothing");
+            let writer = std::thread::spawn(move || {
+                let mut interim = [0u8; 25];
+                client.read_exact(&mut interim).unwrap();
+                assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
+                client.write_all(b"da").unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                client.write_all(b"ta").unwrap();
+                client.shutdown(std::net::Shutdown::Write).unwrap();
+                let mut rest = Vec::new();
+                client.read_to_end(&mut rest).unwrap();
+                rest
+            });
+            assert_eq!(drain_raw(&mut body).await.concat(), b"data");
+            drop(io);
+            assert_eq!(writer.join().unwrap(), b"", "one interim response, not two");
+        });
+    }
+
+    #[test]
+    fn a_client_that_closes_mid_body_fails_the_body() {
+        block_on(async {
+            let (mut io, mut client) = pair();
+            let mut buf = BytesMut::new();
+            let mut state = BodyState::new(Framing::Length(10), false);
+            client.write_all(b"half").unwrap();
+            drop(client);
+            let mut body = H1Body {
+                io: &mut io,
+                buf: &mut buf,
+                state: &mut state,
+            };
+            assert_eq!(body.raw().await.unwrap(), Some(&b"half"[..]));
+            body.consume(4);
+            let end = body.raw().await.unwrap_err();
+            assert_eq!(end.kind(), io::ErrorKind::UnexpectedEof);
+            assert!(state.failed && !state.is_done());
+        });
+    }
+
+    #[test]
+    fn broken_chunk_framing_fails_the_body() {
+        block_on(async {
+            let (mut io, _client) = pair();
+            let mut buf = BytesMut::from(&b"zz\r\nnot hex"[..]);
+            let mut state = BodyState::new(Framing::Chunked, false);
+            let mut body = H1Body {
+                io: &mut io,
+                buf: &mut buf,
+                state: &mut state,
+            };
+            assert_eq!(
+                body.raw().await.unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert!(state.failed);
+        });
+    }
+
+    #[test]
+    fn an_unread_body_is_classified_by_what_is_still_to_come() {
+        let unread = |framing, expect, buffered: &[u8]| {
+            let mut state = BodyState::new(framing, expect);
+            let mut buf = BytesMut::from(buffered);
+            (state.discard(&mut buf), buf)
+        };
+        let (left, buf) = unread(Framing::None, false, b"GET /next");
+        assert_eq!((left, &buf[..]), (Unread::None, &b"GET /next"[..]));
+        let (left, buf) = unread(Framing::Length(4), false, b"bodyGET /next");
+        assert_eq!(
+            (left, &buf[..]),
+            (Unread::None, &b"GET /next"[..]),
+            "a body that arrived with its head is dropped from the buffer"
+        );
+        assert_eq!(unread(Framing::Length(4), false, b"bo").0, Unread::Short);
+        assert_eq!(
+            unread(Framing::Length(MAX_DRAIN), false, b"").0,
+            Unread::Short
+        );
+        assert_eq!(
+            unread(Framing::Length(MAX_DRAIN + 1), false, b"").0,
+            Unread::Long
+        );
+        assert_eq!(
+            unread(Framing::Length(4), true, b"").0,
+            Unread::Long,
+            "a client waiting for 100 Continue may never send the body"
+        );
+        assert_eq!(unread(Framing::Chunked, false, b"4\r\nwi").0, Unread::Long);
+        assert_eq!(
+            unread(Framing::Chunked, false, b"0\r\n\r\n").0,
+            Unread::None
+        );
+        assert_eq!(unread(Framing::Chunked, false, b"zz\r\n").0, Unread::Long);
+    }
+}
