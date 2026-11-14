@@ -1,0 +1,49 @@
+num-threads: {{workers}}
+tcp-reuseport: ON
+max-connections: 65536
+pid-file: {{run_dir}}/h2o.pid
+error-log: /dev/stderr
+temp-buffer-path: {{run_dir}}
+
+http1-request-timeout: 75
+http1-request-io-timeout: 75
+http2-idle-timeout: 75
+
+proxy.timeout.keepalive: 60000
+
+hosts:
+  "h1":
+    listen:
+      host: {{host}}
+      port: {{h1_port}}
+    paths:
+      /:
+        proxy.reverse.url: http://{{origin}}/
+  "tls":
+    listen: &tls
+      host: {{host}}
+      port: {{tls_port}}
+      ssl:
+        certificate-file: {{cert}}
+        key-file: {{key}}
+        minimum-version: TLSv1.3
+        ocsp-update-interval: 0
+    listen:
+      <<: *tls
+      type: quic
+    header.set: 'alt-svc: h3=":{{tls_port}}"; ma=86400'
+    paths:
+      /:
+        proxy.reverse.url: http://{{origin}}/
+  "static":
+    listen:
+      host: {{host}}
+      port: {{static_port}}
+      ssl:
+        certificate-file: {{cert}}
+        key-file: {{key}}
+        minimum-version: TLSv1.3
+        ocsp-update-interval: 0
+    paths:
+      /:
+        file.dir: {{www}}
