@@ -1,0 +1,273 @@
+{
+  "config": "heimdall/config.json",
+  "out": "heimdall/out",
+  "cases": [
+    {
+      "name": "api is proxied",
+      "request": "GET https://app.example.com/api/sync?since=5",
+      "outcome": "proxy http://127.0.0.1:7979",
+      "target": "/api/sync?since=5",
+      "ops": []
+    },
+    {
+      "name": "the live event stream is proxied",
+      "request": "GET https://app.example.com/api/live",
+      "headers": [
+        [
+          "Accept",
+          "text/event-stream"
+        ]
+      ],
+      "outcome": "proxy http://127.0.0.1:7979"
+    },
+    {
+      "name": "api POST",
+      "request": "POST https://app.example.com/api/items",
+      "outcome": "proxy http://127.0.0.1:7979"
+    },
+    {
+      "name": "api root with a slash",
+      "request": "GET https://app.example.com/api/",
+      "outcome": "proxy http://127.0.0.1:7979"
+    },
+    {
+      "name": "/api itself is a client route",
+      "request": "GET https://app.example.com/api",
+      "outcome": "files @out@",
+      "path": "/index.html",
+      "ops": [
+        [
+          "Cache-Control",
+          "no-cache"
+        ],
+        [
+          "Last-Modified",
+          null
+        ]
+      ]
+    },
+    {
+      "name": "api keeps If-Modified-Since for the server",
+      "request": "GET https://app.example.com/api/sync",
+      "headers": [
+        [
+          "If-Modified-Since",
+          "x"
+        ]
+      ],
+      "outcome": "proxy http://127.0.0.1:7979",
+      "requestHeaders": {
+        "If-Modified-Since": "x"
+      }
+    },
+    {
+      "name": "hashed asset",
+      "request": "GET https://app.example.com/_app/immutable/entry/start.abc123.js",
+      "outcome": "files @out@",
+      "path": "/_app/immutable/entry/start.abc123.js",
+      "ops": [
+        [
+          "Cache-Control",
+          "public, max-age=31536000, immutable"
+        ]
+      ]
+    },
+    {
+      "name": "missing hashed asset stays a 404",
+      "request": "GET https://app.example.com/_app/immutable/gone.js",
+      "outcome": "files @out@",
+      "ops": [
+        [
+          "Cache-Control",
+          "public, max-age=31536000, immutable"
+        ]
+      ],
+      "fail": 404,
+      "then": "bare"
+    },
+    {
+      "name": "/_app/immutable without slash is not the asset prefix",
+      "request": "GET https://app.example.com/_app/immutable",
+      "outcome": "files @out@",
+      "path": "/_app/immutable",
+      "ops": [
+        [
+          "Cache-Control",
+          "no-cache"
+        ],
+        [
+          "Last-Modified",
+          null
+        ]
+      ]
+    },
+    {
+      "name": "index",
+      "request": "GET https://app.example.com/",
+      "outcome": "files @out@",
+      "path": "/",
+      "ops": [
+        [
+          "Cache-Control",
+          "no-cache"
+        ],
+        [
+          "Last-Modified",
+          null
+        ]
+      ]
+    },
+    {
+      "name": "index.html",
+      "request": "GET https://app.example.com/index.html",
+      "outcome": "files @out@",
+      "path": "/index.html",
+      "ops": [
+        [
+          "Cache-Control",
+          "no-cache"
+        ],
+        [
+          "Last-Modified",
+          null
+        ]
+      ]
+    },
+    {
+      "name": "service worker",
+      "request": "GET https://app.example.com/sw.js",
+      "outcome": "files @out@",
+      "path": "/sw.js",
+      "ops": [
+        [
+          "Cache-Control",
+          "no-cache"
+        ],
+        [
+          "Last-Modified",
+          null
+        ]
+      ]
+    },
+    {
+      "name": "manifest",
+      "request": "GET https://app.example.com/manifest.webmanifest",
+      "outcome": "files @out@",
+      "path": "/manifest.webmanifest"
+    },
+    {
+      "name": "an _app file outside immutable",
+      "request": "GET https://app.example.com/_app/version.json",
+      "outcome": "files @out@",
+      "path": "/_app/version.json",
+      "ops": [
+        [
+          "Cache-Control",
+          "no-cache"
+        ],
+        [
+          "Last-Modified",
+          null
+        ]
+      ]
+    },
+    {
+      "name": "a missing _app file stays a 404",
+      "request": "GET https://app.example.com/_app/missing.js",
+      "outcome": "files @out@",
+      "path": "/_app/missing.js",
+      "fail": 404,
+      "then": "bare"
+    },
+    {
+      "name": "client route deep link",
+      "request": "GET https://app.example.com/settings",
+      "outcome": "files @out@",
+      "path": "/index.html",
+      "ops": [
+        [
+          "Cache-Control",
+          "no-cache"
+        ],
+        [
+          "Last-Modified",
+          null
+        ]
+      ]
+    },
+    {
+      "name": "deeper client route",
+      "request": "GET https://app.example.com/feeds/42/items",
+      "outcome": "files @out@",
+      "path": "/index.html"
+    },
+    {
+      "name": "a client route keeps its query upstream of the rewrite",
+      "request": "GET https://app.example.com/search?q=x",
+      "outcome": "files @out@",
+      "path": "/index.html"
+    },
+    {
+      "name": "If-Modified-Since is dropped",
+      "request": "GET https://app.example.com/",
+      "headers": [
+        [
+          "If-Modified-Since",
+          "Thu, 01 Jan 1970 00:00:01 GMT"
+        ]
+      ],
+      "outcome": "files @out@",
+      "requestHeaders": {
+        "If-Modified-Since": null
+      }
+    },
+    {
+      "name": "ETag sidecar",
+      "request": "GET https://app.example.com/index.html.etag",
+      "outcome": "error 404",
+      "ops": [
+        [
+          "Cache-Control",
+          "no-cache"
+        ],
+        [
+          "Last-Modified",
+          null
+        ]
+      ],
+      "then": "bare"
+    },
+    {
+      "name": "br sidecar",
+      "request": "GET https://app.example.com/index.html.br",
+      "outcome": "error 404",
+      "then": "bare"
+    },
+    {
+      "name": "gzip sidecar",
+      "request": "GET https://app.example.com/index.html.gz",
+      "outcome": "error 404"
+    },
+    {
+      "name": "an immutable sidecar is the file server's",
+      "request": "GET https://app.example.com/_app/immutable/entry/start.abc123.js.br",
+      "outcome": "files @out@",
+      "ops": [
+        [
+          "Cache-Control",
+          "public, max-age=31536000, immutable"
+        ]
+      ]
+    },
+    {
+      "name": "plain http redirects",
+      "request": "GET http://app.example.com/settings",
+      "outcome": "redirect 308 https://app.example.com/settings"
+    },
+    {
+      "name": "another host has no site",
+      "request": "GET https://other.example.com/",
+      "outcome": "none"
+    }
+  ]
+}

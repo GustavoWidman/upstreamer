@@ -1,0 +1,95 @@
+{
+  "config": "../config/edge.json",
+  "cases": [
+    {
+      "name": "app api",
+      "request": "GET https://app.example.com/api/v1/x",
+      "outcome": "proxy http://127.0.0.1:7979"
+    },
+    {
+      "name": "app client route (no web root in the sandbox)",
+      "request": "GET https://app.example.com/settings",
+      "outcome": "files /srv/example-app/web",
+      "path": "/index.html",
+      "ops": [
+        [
+          "Cache-Control",
+          "no-cache"
+        ],
+        [
+          "Last-Modified",
+          null
+        ]
+      ]
+    },
+    {
+      "name": "app immutable",
+      "request": "GET https://app.example.com/_app/immutable/a.js",
+      "outcome": "files /srv/example-app/web",
+      "ops": [
+        [
+          "Cache-Control",
+          "public, max-age=31536000, immutable"
+        ]
+      ]
+    },
+    {
+      "name": "app sidecar",
+      "request": "GET https://app.example.com/a.etag",
+      "outcome": "error 404",
+      "then": "bare"
+    },
+    {
+      "name": "cache GET goes to the read timeout",
+      "request": "GET https://cache.example.com/nix-cache-info",
+      "outcome": "proxy http://127.0.0.1:25915 responseHeader=15s",
+      "target": "/nix-cache-info"
+    },
+    {
+      "name": "cache HEAD",
+      "request": "HEAD https://cache.example.com/abc.narinfo",
+      "outcome": "proxy http://127.0.0.1:25915 responseHeader=15s"
+    },
+    {
+      "name": "cache upload",
+      "request": "PUT https://cache.example.com/nar/abc.nar.zst",
+      "outcome": "proxy http://127.0.0.1:25915 responseHeader=60s"
+    },
+    {
+      "name": "cache api GET is not a read",
+      "request": "GET https://cache.example.com/api/multipart",
+      "outcome": "proxy http://127.0.0.1:25915 responseHeader=60s"
+    },
+    {
+      "name": "s3 object keeps its signed target",
+      "request": "GET https://s3.cache.example.com/bucket/nar/a%2Bb?X-Amz-Signature=abc",
+      "outcome": "proxy http://storage:9000 responseHeader=300s",
+      "target": "/bucket/nar/a%2Bb?X-Amz-Signature=abc"
+    },
+    {
+      "name": "s3 bucket",
+      "request": "PUT https://s3.cache.example.com/bucket",
+      "outcome": "proxy http://storage:9000 responseHeader=300s"
+    },
+    {
+      "name": "s3 elsewhere",
+      "request": "GET https://s3.cache.example.com/other",
+      "outcome": "respond 404 Not found"
+    },
+    {
+      "name": "http redirect",
+      "request": "GET http://cache.example.com/x?y=1",
+      "outcome": "redirect 308 https://cache.example.com/x?y=1"
+    },
+    {
+      "name": "unknown TLS host",
+      "request": "GET https://nope.example.com/",
+      "outcome": "none"
+    },
+    {
+      "name": "unknown cleartext host",
+      "request": "GET http://nope.example.com/",
+      "outcome": "none"
+    }
+  ]
+}

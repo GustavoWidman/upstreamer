@@ -669,6 +669,12 @@ pub(crate) mod testing {
     #[global_allocator]
     static GLOBAL: Counting = Counting;
 
+    /// Allocations made so far by the calling thread. The lib test binary has this one
+    /// counting allocator; every allocation test reads its own thread's count from here.
+    pub fn thread_allocations() -> u64 {
+        ALLOCS.with(Cell::get)
+    }
+
     /// Allocations made so far by the core thread with that index, as of its last response.
     pub static CORE_ALLOCS: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
 

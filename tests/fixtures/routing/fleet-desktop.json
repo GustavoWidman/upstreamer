@@ -1,0 +1,41 @@
+{
+  "config": "../config/desktop.json",
+  "cases": [
+    {
+      "name": "root opens the viewer",
+      "request": "GET http://desktop.lan/",
+      "outcome": "redirect 302 /vnc.html?autoconnect=1&resize=scale"
+    },
+    {
+      "name": "websockify",
+      "request": "GET http://192.0.2.5/websockify",
+      "headers": [
+        [
+          "Upgrade",
+          "websocket"
+        ],
+        [
+          "Connection",
+          "Upgrade"
+        ]
+      ],
+      "outcome": "proxy http://127.0.0.1:6080"
+    },
+    {
+      "name": "viewer page",
+      "request": "GET http://desktop.lan/vnc.html?autoconnect=1",
+      "outcome": "proxy http://127.0.0.1:6080",
+      "target": "/vnc.html?autoconnect=1"
+    },
+    {
+      "name": "no host header value still routes to *",
+      "request": "GET http:///",
+      "outcome": "redirect 302 /vnc.html?autoconnect=1&resize=scale"
+    },
+    {
+      "name": "no https listener",
+      "request": "GET https://desktop.lan/",
+      "outcome": "none"
+    }
+  ]
+}

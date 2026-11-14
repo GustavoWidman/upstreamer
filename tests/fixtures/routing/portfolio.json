@@ -1,0 +1,1428 @@
+{
+  "config": "portfolio/config.json",
+  "out": "portfolio/out",
+  "cases": [
+    {
+      "name": "home page",
+      "request": "GET https://example.org/",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/index.html",
+      "vars": {
+        "epoch": "e0",
+        "lang": "en",
+        "tree": "@out@/site/e0/main/en",
+        "markdown": null
+      },
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language, User-Agent, Accept"
+        ],
+        [
+          "Content-Type",
+          "text/html; charset=utf-8"
+        ]
+      ],
+      "encode": [
+        "zstd",
+        "gzip"
+      ]
+    },
+    {
+      "name": "Accept-Language pt picks the pt tree",
+      "request": "GET https://example.org/",
+      "headers": [
+        [
+          "Accept-Language",
+          "pt-BR,pt;q=0.9,en;q=0.8"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/pt",
+      "path": "/index.html",
+      "vars": {
+        "epoch": "e0",
+        "lang": "pt",
+        "tree": "@out@/site/e0/main/pt",
+        "markdown": null
+      }
+    },
+    {
+      "name": "only the first Accept-Language tag counts",
+      "request": "GET https://example.org/",
+      "headers": [
+        [
+          "Accept-Language",
+          "en-US, pt"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "vars": {
+        "epoch": "e0",
+        "lang": "en",
+        "tree": "@out@/site/e0/main/en",
+        "markdown": null
+      }
+    },
+    {
+      "name": "Accept-Language is matched case-insensitively after spaces",
+      "request": "GET https://example.org/",
+      "headers": [
+        [
+          "Accept-Language",
+          "  PT"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/pt",
+      "vars": {
+        "epoch": "e0",
+        "lang": "pt",
+        "tree": "@out@/site/e0/main/pt",
+        "markdown": null
+      }
+    },
+    {
+      "name": "a tag that only starts with pt is not pt",
+      "request": "GET https://example.org/",
+      "headers": [
+        [
+          "Accept-Language",
+          "ptx"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "vars": {
+        "epoch": "e0",
+        "lang": "en",
+        "tree": "@out@/site/e0/main/en",
+        "markdown": null
+      }
+    },
+    {
+      "name": "Accept-Language with a q-value",
+      "request": "GET https://example.org/",
+      "headers": [
+        [
+          "Accept-Language",
+          "pt;q=0.9"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/pt",
+      "vars": {
+        "epoch": "e0",
+        "lang": "pt",
+        "tree": "@out@/site/e0/main/pt",
+        "markdown": null
+      }
+    },
+    {
+      "name": "repeated Accept-Language fields are joined, first tag counts",
+      "request": "GET https://example.org/",
+      "headers": [
+        [
+          "Accept-Language",
+          "en"
+        ],
+        [
+          "Accept-Language",
+          "pt"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "vars": {
+        "epoch": "e0",
+        "lang": "en",
+        "tree": "@out@/site/e0/main/en",
+        "markdown": null
+      }
+    },
+    {
+      "name": "cookie selects pt",
+      "request": "GET https://example.org/",
+      "headers": [
+        [
+          "Cookie",
+          "portfolio_lang=pt"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/pt",
+      "vars": {
+        "epoch": "e0",
+        "lang": "pt",
+        "tree": "@out@/site/e0/main/pt",
+        "markdown": null
+      }
+    },
+    {
+      "name": "a cookie outside en and pt is ignored",
+      "request": "GET https://example.org/",
+      "headers": [
+        [
+          "Cookie",
+          "portfolio_lang=fr"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "vars": {
+        "epoch": "e0",
+        "lang": "en",
+        "tree": "@out@/site/e0/main/en",
+        "markdown": null
+      }
+    },
+    {
+      "name": "the cookie overrides Accept-Language",
+      "request": "GET https://example.org/",
+      "headers": [
+        [
+          "Accept-Language",
+          "pt"
+        ],
+        [
+          "Cookie",
+          "theme=dark; portfolio_lang=en"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "vars": {
+        "epoch": "e0",
+        "lang": "en",
+        "tree": "@out@/site/e0/main/en",
+        "markdown": null
+      }
+    },
+    {
+      "name": "the query overrides the cookie",
+      "request": "GET https://example.org/?lang=en",
+      "headers": [
+        [
+          "Cookie",
+          "portfolio_lang=pt"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "vars": {
+        "epoch": "e0",
+        "lang": "en",
+        "tree": "@out@/site/e0/main/en",
+        "markdown": null
+      }
+    },
+    {
+      "name": "query lang=pt",
+      "request": "GET https://example.org/?lang=pt",
+      "outcome": "files @out@/site/e0/main/pt",
+      "path": "/index.html",
+      "vars": {
+        "epoch": "e0",
+        "lang": "pt",
+        "tree": "@out@/site/e0/main/pt",
+        "markdown": null
+      }
+    },
+    {
+      "name": "query values are case-sensitive",
+      "request": "GET https://example.org/?lang=PT",
+      "outcome": "files @out@/site/e0/main/en",
+      "vars": {
+        "epoch": "e0",
+        "lang": "en",
+        "tree": "@out@/site/e0/main/en",
+        "markdown": null
+      }
+    },
+    {
+      "name": "www shares the main site",
+      "request": "GET https://www.example.org/",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/index.html"
+    },
+    {
+      "name": "the Host is matched without case or port",
+      "request": "GET https://EXAMPLE.org:443/",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/index.html"
+    },
+    {
+      "name": "If-Modified-Since never reaches the file server",
+      "request": "GET https://example.org/",
+      "headers": [
+        [
+          "If-Modified-Since",
+          "Tue, 10 Nov 2026 01:09:53 GMT"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "requestHeaders": {
+        "If-Modified-Since": null,
+        "Host": "example.org"
+      }
+    },
+    {
+      "name": "HEAD routes like GET",
+      "request": "HEAD https://example.org/blog",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/blog/index.html"
+    },
+    {
+      "name": "blog index",
+      "request": "GET https://example.org/blog",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/blog/index.html",
+      "vars": {
+        "epoch": "e0",
+        "lang": "en",
+        "tree": "@out@/site/e0/main/en",
+        "markdown": null
+      },
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language, User-Agent, Accept"
+        ],
+        [
+          "Content-Type",
+          "text/html; charset=utf-8"
+        ]
+      ]
+    },
+    {
+      "name": "blog post",
+      "request": "GET https://example.org/blog/hello",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/blog/hello/index.html",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language, User-Agent, Accept"
+        ],
+        [
+          "Content-Type",
+          "text/html; charset=utf-8"
+        ]
+      ]
+    },
+    {
+      "name": "blog post in pt has no pt page, served from the pt tree",
+      "request": "GET https://example.org/blog/hello",
+      "headers": [
+        [
+          "Cookie",
+          "portfolio_lang=pt"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/pt",
+      "path": "/404.html",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language, User-Agent, Accept"
+        ],
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Content-Type",
+          "text/html; charset=utf-8"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ]
+      ],
+      "fail": 404,
+      "then": "files @out@/site/e0/main/pt"
+    },
+    {
+      "name": "index without curl is not a file",
+      "request": "GET https://example.org/index",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/404.html",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language, User-Agent, Accept"
+        ],
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Content-Type",
+          "text/html; charset=utf-8"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ]
+      ],
+      "fail": 404,
+      "then": "files @out@/site/e0/main/en"
+    },
+    {
+      "name": "a missing page gets the tree's 404 page",
+      "request": "GET https://example.org/nowhere",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/404.html",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Content-Type",
+          "text/html; charset=utf-8"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ]
+      ],
+      "encode": [
+        "zstd",
+        "gzip"
+      ],
+      "fail": 404,
+      "then": "files @out@/site/e0/main/en"
+    },
+    {
+      "name": "a deeper missing path",
+      "request": "GET https://example.org/blog/hello/world",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/blog/hello/world",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ]
+      ]
+    },
+    {
+      "name": "rss feed",
+      "request": "GET https://example.org/blog/rss.xml",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/blog/rss.xml",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Content-Type",
+          "application/rss+xml; charset=utf-8"
+        ]
+      ]
+    },
+    {
+      "name": "sitemap",
+      "request": "GET https://example.org/sitemap.xml",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/sitemap.xml",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Content-Type",
+          "application/xml; charset=utf-8"
+        ]
+      ]
+    },
+    {
+      "name": "merged slashes",
+      "request": "GET https://example.org//blog",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/blog/index.html"
+    },
+    {
+      "name": "another failure answers with its status text",
+      "request": "GET https://example.org/",
+      "outcome": "files @out@/site/e0/main/en",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language, User-Agent, Accept"
+        ],
+        [
+          "Content-Type",
+          "text/html; charset=utf-8"
+        ],
+        [
+          "Cache-Control",
+          "no-store"
+        ]
+      ],
+      "fail": 416,
+      "then": "respond 416 416 Range Not Satisfiable"
+    },
+    {
+      "name": "a decoded name in a post path",
+      "request": "GET https://example.org/blog/h%C3%A9llo.mdx",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/_md/blog/héllo.md",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Content-Type",
+          "text/markdown; charset=utf-8"
+        ]
+      ]
+    },
+    {
+      "name": "curl gets the text card",
+      "request": "GET https://example.org/",
+      "headers": [
+        [
+          "User-Agent",
+          "curl/8.5.0"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/_curl.txt",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language, User-Agent, Accept"
+        ],
+        [
+          "Content-Type",
+          "text/plain; charset=utf-8"
+        ]
+      ]
+    },
+    {
+      "name": "curl on /index",
+      "request": "GET https://example.org/index",
+      "headers": [
+        [
+          "User-Agent",
+          "curl/8.5.0"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/_curl.txt"
+    },
+    {
+      "name": "curl elsewhere gets the page",
+      "request": "GET https://example.org/blog",
+      "headers": [
+        [
+          "User-Agent",
+          "curl/8.5.0"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/blog/index.html"
+    },
+    {
+      "name": "Wget is not curl",
+      "request": "GET https://example.org/",
+      "headers": [
+        [
+          "User-Agent",
+          "Wget/1.21"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/index.html"
+    },
+    {
+      "name": "markdown by Accept",
+      "request": "GET https://example.org/blog",
+      "headers": [
+        [
+          "Accept",
+          "text/markdown"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/_md/blog.md",
+      "vars": {
+        "epoch": "e0",
+        "lang": "en",
+        "tree": "@out@/site/e0/main/en",
+        "markdown": "yes"
+      },
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language, User-Agent, Accept"
+        ],
+        [
+          "Content-Type",
+          "text/markdown; charset=utf-8"
+        ]
+      ]
+    },
+    {
+      "name": "markdown by ?format=markdown",
+      "request": "GET https://example.org/blog?format=markdown",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/_md/blog.md",
+      "vars": {
+        "epoch": "e0",
+        "lang": "en",
+        "tree": "@out@/site/e0/main/en",
+        "markdown": "yes"
+      }
+    },
+    {
+      "name": "markdown by ?raw=true",
+      "request": "GET https://example.org/blog?raw=true",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/_md/blog.md"
+    },
+    {
+      "name": "?raw=1 is not raw=true",
+      "request": "GET https://example.org/blog?raw=1",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/blog/index.html",
+      "vars": {
+        "epoch": "e0",
+        "lang": "en",
+        "tree": "@out@/site/e0/main/en",
+        "markdown": null
+      }
+    },
+    {
+      "name": "Accept text/plain first",
+      "request": "GET https://example.org/blog",
+      "headers": [
+        [
+          "Accept",
+          "text/plain"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/_md/blog.md"
+    },
+    {
+      "name": "text/markdown later without */*",
+      "request": "GET https://example.org/blog",
+      "headers": [
+        [
+          "Accept",
+          "text/html, text/markdown;q=0.9"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/_md/blog.md"
+    },
+    {
+      "name": "a browser Accept with */* keeps html",
+      "request": "GET https://example.org/blog",
+      "headers": [
+        [
+          "Accept",
+          "text/html, text/markdown;q=0.9, */*;q=0.8"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/blog/index.html",
+      "vars": {
+        "epoch": "e0",
+        "lang": "en",
+        "tree": "@out@/site/e0/main/en",
+        "markdown": null
+      }
+    },
+    {
+      "name": "an AI crawler gets markdown",
+      "request": "GET https://example.org/blog",
+      "headers": [
+        [
+          "User-Agent",
+          "Mozilla/5.0 (compatible; GPTBot/1.2)"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/_md/blog.md"
+    },
+    {
+      "name": "ClaudeBot by its lowercase name",
+      "request": "GET https://example.org/blog/hello",
+      "headers": [
+        [
+          "User-Agent",
+          "claudebot"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/_md/blog/hello.md",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language, User-Agent, Accept"
+        ],
+        [
+          "Content-Type",
+          "text/markdown; charset=utf-8"
+        ]
+      ]
+    },
+    {
+      "name": "markdown post",
+      "request": "GET https://example.org/blog/hello",
+      "headers": [
+        [
+          "Accept",
+          "text/markdown"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/_md/blog/hello.md"
+    },
+    {
+      "name": "markdown is not offered for the home page",
+      "request": "GET https://example.org/",
+      "headers": [
+        [
+          "Accept",
+          "text/markdown"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/index.html",
+      "vars": {
+        "epoch": "e0",
+        "lang": "en",
+        "tree": "@out@/site/e0/main/en",
+        "markdown": "yes"
+      }
+    },
+    {
+      "name": "markdown wins over curl on /blog",
+      "request": "GET https://example.org/blog",
+      "headers": [
+        [
+          "Accept",
+          "text/markdown"
+        ],
+        [
+          "User-Agent",
+          "curl/8.5.0"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/_md/blog.md"
+    },
+    {
+      "name": ".mdx post",
+      "request": "GET https://example.org/blog/hello.mdx",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/_md/blog/hello.md",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Content-Type",
+          "text/markdown; charset=utf-8"
+        ]
+      ]
+    },
+    {
+      "name": "blog.mdx",
+      "request": "GET https://example.org/blog.mdx",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/_md/blog.md",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Content-Type",
+          "text/markdown; charset=utf-8"
+        ]
+      ]
+    },
+    {
+      "name": "llms.mdx/blog",
+      "request": "GET https://example.org/llms.mdx/blog",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/_md/blog.md"
+    },
+    {
+      "name": "llms.mdx post",
+      "request": "GET https://example.org/llms.mdx/blog/hello",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/_md/blog/hello.md"
+    },
+    {
+      "name": "llms.mdx deeper path is no post",
+      "request": "GET https://example.org/llms.mdx/blog/a/b",
+      "outcome": "files @out@/site/e0/main/en",
+      "path": "/llms.mdx/blog/a/b",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ]
+      ]
+    },
+    {
+      "name": "trailing slash",
+      "request": "GET https://example.org/blog/",
+      "outcome": "redirect 301 /blog",
+      "ops": [],
+      "encode": [
+        "zstd",
+        "gzip"
+      ]
+    },
+    {
+      "name": "trailing slash keeps the query",
+      "request": "GET https://example.org/blog/hello/?a=1&b=2",
+      "outcome": "redirect 301 /blog/hello?a=1&b=2"
+    },
+    {
+      "name": "an empty query is dropped",
+      "request": "GET https://example.org/blog/?",
+      "outcome": "redirect 301 /blog"
+    },
+    {
+      "name": "index.html at the root",
+      "request": "GET https://example.org/index.html?x=1",
+      "outcome": "redirect 301 /?x=1"
+    },
+    {
+      "name": "index.html in a directory",
+      "request": "GET https://example.org/blog/index.html",
+      "outcome": "redirect 301 /blog"
+    },
+    {
+      "name": "dot segments resolve before matching",
+      "request": "GET https://example.org/blog/../index.html",
+      "outcome": "redirect 301 /"
+    },
+    {
+      "name": "a backslash is refused",
+      "request": "GET https://example.org/a%5Cb",
+      "outcome": "error 404",
+      "path": "/404.html",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Content-Type",
+          "text/html; charset=utf-8"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ]
+      ],
+      "then": "files @out@/site/e0/main/en"
+    },
+    {
+      "name": "a tab is refused",
+      "request": "GET https://example.org/a%09/b",
+      "outcome": "error 404",
+      "then": "files @out@/site/e0/main/en"
+    },
+    {
+      "name": "a DEL is refused",
+      "request": "GET https://example.org/%7F",
+      "outcome": "error 404"
+    },
+    {
+      "name": "the 404 page of the pt tree",
+      "request": "GET https://example.org/a%5Cb",
+      "headers": [
+        [
+          "Cookie",
+          "portfolio_lang=pt"
+        ]
+      ],
+      "outcome": "error 404",
+      "path": "/404.html",
+      "then": "files @out@/site/e0/main/pt"
+    },
+    {
+      "name": "internal /_md",
+      "request": "GET https://example.org/_md",
+      "outcome": "error 404",
+      "path": "/404.html",
+      "then": "files @out@/site/e0/main/en"
+    },
+    {
+      "name": "internal /_md/blog.md",
+      "request": "GET https://example.org/_md/blog.md",
+      "outcome": "error 404",
+      "path": "/404.html",
+      "then": "files @out@/site/e0/main/en"
+    },
+    {
+      "name": "internal /_curl.txt",
+      "request": "GET https://example.org/_curl.txt",
+      "outcome": "error 404",
+      "path": "/404.html",
+      "then": "files @out@/site/e0/main/en"
+    },
+    {
+      "name": "internal /404.html",
+      "request": "GET https://example.org/404.html",
+      "outcome": "error 404",
+      "path": "/404.html",
+      "then": "files @out@/site/e0/main/en"
+    },
+    {
+      "name": "internal /index.html.etag",
+      "request": "GET https://example.org/index.html.etag",
+      "outcome": "error 404",
+      "path": "/404.html",
+      "then": "files @out@/site/e0/main/en"
+    },
+    {
+      "name": "internal /blog/index.html.br",
+      "request": "GET https://example.org/blog/index.html.br",
+      "outcome": "error 404",
+      "path": "/404.html",
+      "then": "files @out@/site/e0/main/en"
+    },
+    {
+      "name": "internal /app.zst",
+      "request": "GET https://example.org/app.zst",
+      "outcome": "error 404",
+      "path": "/404.html",
+      "then": "files @out@/site/e0/main/en"
+    },
+    {
+      "name": "internal /x.gz",
+      "request": "GET https://example.org/x.gz",
+      "outcome": "error 404",
+      "path": "/404.html",
+      "then": "files @out@/site/e0/main/en"
+    },
+    {
+      "name": "hashed asset",
+      "request": "GET https://example.org/_astro/app.1a2b.css",
+      "outcome": "files @out@",
+      "path": "/_astro/app.1a2b.css",
+      "ops": [
+        [
+          "Cache-Control",
+          "public, max-age=31536000, immutable"
+        ]
+      ]
+    },
+    {
+      "name": "missing hashed asset is the file server's 404",
+      "request": "GET https://example.org/_astro/gone.js",
+      "outcome": "files @out@",
+      "ops": [
+        [
+          "Cache-Control",
+          "public, max-age=31536000, immutable"
+        ],
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Content-Type",
+          "text/html; charset=utf-8"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ]
+      ],
+      "fail": 404,
+      "then": "files @out@/site/e0/main/en"
+    },
+    {
+      "name": "og image",
+      "request": "GET https://example.org/og/hello.png",
+      "outcome": "files @out@/site/e0",
+      "path": "/og/hello.png",
+      "ops": [
+        [
+          "Cache-Control",
+          "public, max-age=3600"
+        ]
+      ]
+    },
+    {
+      "name": "favicon from static",
+      "request": "GET https://example.org/favicon.ico",
+      "outcome": "files @out@/static",
+      "path": "/favicon.ico",
+      "ops": [
+        [
+          "Cache-Control",
+          "public, max-age=3600"
+        ]
+      ]
+    },
+    {
+      "name": "robots.txt gets a text type",
+      "request": "GET https://example.org/robots.txt",
+      "outcome": "files @out@/static",
+      "ops": [
+        [
+          "Cache-Control",
+          "public, max-age=3600"
+        ],
+        [
+          "Content-Type",
+          "text/plain; charset=utf-8"
+        ]
+      ]
+    },
+    {
+      "name": "static ETag sidecar is internal",
+      "request": "GET https://example.org/robots.txt.etag",
+      "outcome": "error 404"
+    },
+    {
+      "name": "cv",
+      "request": "GET https://example.org/cv.pdf",
+      "outcome": "files @out@/static",
+      "ops": [
+        [
+          "Cache-Control",
+          "public, max-age=3600"
+        ]
+      ]
+    },
+    {
+      "name": "plain http redirects to https",
+      "request": "GET http://example.org/blog?x=1",
+      "outcome": "redirect 308 https://example.org/blog?x=1"
+    },
+    {
+      "name": "the redirect keeps the raw target",
+      "request": "GET http://www.example.org/a%20b",
+      "outcome": "redirect 308 https://www.example.org/a%20b"
+    },
+    {
+      "name": "an unknown host has no site",
+      "request": "GET https://unknown.example/",
+      "outcome": "none"
+    },
+    {
+      "name": "blog home",
+      "request": "GET https://blog.example.org/",
+      "outcome": "files @out@/site/e0/blog/en",
+      "path": "/index.html",
+      "vars": {
+        "epoch": "e0",
+        "lang": "en",
+        "tree": "@out@/site/e0/blog/en",
+        "markdown": null
+      },
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language, User-Agent, Accept"
+        ],
+        [
+          "Content-Type",
+          "text/html; charset=utf-8"
+        ]
+      ],
+      "encode": [
+        "zstd",
+        "gzip"
+      ]
+    },
+    {
+      "name": "blog post page",
+      "request": "GET https://blog.example.org/hello",
+      "outcome": "files @out@/site/e0/blog/en",
+      "path": "/hello/index.html",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language, User-Agent, Accept"
+        ],
+        [
+          "Content-Type",
+          "text/html; charset=utf-8"
+        ]
+      ]
+    },
+    {
+      "name": "blog in pt",
+      "request": "GET https://blog.example.org/?lang=pt",
+      "outcome": "files @out@/site/e0/blog/pt",
+      "path": "/index.html",
+      "vars": {
+        "epoch": "e0",
+        "lang": "pt",
+        "tree": "@out@/site/e0/blog/pt",
+        "markdown": null
+      }
+    },
+    {
+      "name": "blog curl",
+      "request": "GET https://blog.example.org/",
+      "headers": [
+        [
+          "User-Agent",
+          "curl/8.4.0"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/blog/en",
+      "path": "/_curl.txt",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language, User-Agent, Accept"
+        ],
+        [
+          "Content-Type",
+          "text/plain; charset=utf-8"
+        ]
+      ]
+    },
+    {
+      "name": "blog curl only on /",
+      "request": "GET https://blog.example.org/hello",
+      "headers": [
+        [
+          "User-Agent",
+          "curl/8.4.0"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/blog/en",
+      "path": "/hello/index.html"
+    },
+    {
+      "name": "blog markdown index",
+      "request": "GET https://blog.example.org/",
+      "headers": [
+        [
+          "Accept",
+          "text/markdown"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/blog/en",
+      "path": "/_md/blog.md",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language, User-Agent, Accept"
+        ],
+        [
+          "Content-Type",
+          "text/markdown; charset=utf-8"
+        ]
+      ]
+    },
+    {
+      "name": "blog markdown post",
+      "request": "GET https://blog.example.org/hello",
+      "headers": [
+        [
+          "Accept",
+          "text/markdown"
+        ]
+      ],
+      "outcome": "files @out@/site/e0/blog/en",
+      "path": "/_md/blog/hello.md"
+    },
+    {
+      "name": "blog .mdx post",
+      "request": "GET https://blog.example.org/hello.mdx",
+      "outcome": "files @out@/site/e0/blog/en",
+      "path": "/_md/blog/hello.md",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Content-Type",
+          "text/markdown; charset=utf-8"
+        ]
+      ]
+    },
+    {
+      "name": "blog llms.mdx",
+      "request": "GET https://blog.example.org/llms.mdx/blog",
+      "outcome": "files @out@/site/e0/blog/en",
+      "path": "/_md/blog.md"
+    },
+    {
+      "name": "/blog moves to /",
+      "request": "GET https://blog.example.org/blog",
+      "outcome": "redirect 301 /"
+    },
+    {
+      "name": "/blog/ moves to /",
+      "request": "GET https://blog.example.org/blog/",
+      "outcome": "redirect 301 /"
+    },
+    {
+      "name": "/blog/<post> moves to /<post>",
+      "request": "GET https://blog.example.org/blog/hello?q=1",
+      "outcome": "redirect 301 /hello?q=1"
+    },
+    {
+      "name": "/blog/<post>/ moves to /<post>",
+      "request": "GET https://blog.example.org/blog/hello/",
+      "outcome": "redirect 301 /hello"
+    },
+    {
+      "name": "/blogger is not the blog prefix",
+      "request": "GET https://blog.example.org/blogger",
+      "outcome": "files @out@/site/e0/blog/en",
+      "path": "/blogger",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language, User-Agent, Accept"
+        ]
+      ]
+    },
+    {
+      "name": "blog trailing slash",
+      "request": "GET https://blog.example.org/hello/",
+      "outcome": "redirect 301 /hello"
+    },
+    {
+      "name": "blog index.html",
+      "request": "GET https://blog.example.org/index.html",
+      "outcome": "redirect 301 /"
+    },
+    {
+      "name": "blog rss",
+      "request": "GET https://blog.example.org/rss.xml",
+      "outcome": "files @out@/site/e0/blog/en",
+      "path": "/rss.xml",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Content-Type",
+          "application/rss+xml; charset=utf-8"
+        ]
+      ]
+    },
+    {
+      "name": "blog internal markdown",
+      "request": "GET https://blog.example.org/_md/blog.md",
+      "outcome": "error 404",
+      "path": "/404.html",
+      "then": "files @out@/site/e0/blog/en"
+    },
+    {
+      "name": "blog missing page",
+      "request": "GET https://blog.example.org/missing",
+      "outcome": "files @out@/site/e0/blog/en",
+      "path": "/404.html",
+      "ops": [
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language, User-Agent, Accept"
+        ],
+        [
+          "Cache-Control",
+          "private, no-cache"
+        ],
+        [
+          "Content-Type",
+          "text/html; charset=utf-8"
+        ],
+        [
+          "Vary",
+          "Cookie, Accept-Language"
+        ]
+      ],
+      "fail": 404,
+      "then": "files @out@/site/e0/blog/en"
+    },
+    {
+      "name": "blog hashed asset",
+      "request": "GET https://blog.example.org/_astro/app.1a2b.css",
+      "outcome": "files @out@",
+      "ops": [
+        [
+          "Cache-Control",
+          "public, max-age=31536000, immutable"
+        ]
+      ]
+    },
+    {
+      "name": "blog plain http",
+      "request": "GET http://blog.example.org/hello",
+      "outcome": "redirect 308 https://blog.example.org/hello"
+    }
+  ]
+}

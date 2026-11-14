@@ -1,0 +1,99 @@
+{
+  "config": "../config/apps.json",
+  "sources": {
+    "/nix/store/drd2nn5gazxbmsmjh6x6j6mkgzph5im1-example-site-fragments": "../site/upstreamer"
+  },
+  "cases": [
+    {
+      "name": "dns over https upstream without verification",
+      "request": "GET https://dns.example.net/control/status",
+      "outcome": "proxy https://127.0.0.1:3443 insecure"
+    },
+    {
+      "name": "files",
+      "request": "POST https://files.example.net/upload/a.bin",
+      "outcome": "proxy http://127.0.0.1:46971"
+    },
+    {
+      "name": "mail",
+      "request": "GET https://mail.example.net/",
+      "outcome": "proxy http://127.0.0.1:37993"
+    },
+    {
+      "name": "daemon prefix is stripped",
+      "request": "GET https://play.example.net/daemon/socket.io/?EIO=4",
+      "outcome": "proxy http://127.0.0.1:52930",
+      "path": "/socket.io/",
+      "target": "/socket.io/?EIO=4"
+    },
+    {
+      "name": "daemon root",
+      "request": "GET https://play.example.net/daemon/",
+      "outcome": "proxy http://127.0.0.1:52930",
+      "path": "/",
+      "target": "/"
+    },
+    {
+      "name": "/daemon without slash is the panel",
+      "request": "GET https://play.example.net/daemon",
+      "outcome": "proxy http://127.0.0.1:27613",
+      "path": "/daemon"
+    },
+    {
+      "name": "/daemonx is the panel",
+      "request": "GET https://play.example.net/daemonx",
+      "outcome": "proxy http://127.0.0.1:27613"
+    },
+    {
+      "name": "panel",
+      "request": "GET https://play.example.net/",
+      "outcome": "proxy http://127.0.0.1:27613"
+    },
+    {
+      "name": "relay tunnels idle out after an hour",
+      "request": "GET https://relay.example.net/derp",
+      "headers": [
+        [
+          "Upgrade",
+          "DERP"
+        ],
+        [
+          "Connection",
+          "Upgrade"
+        ]
+      ],
+      "outcome": "proxy http://127.0.0.1:48822 tunnelIdle=3600s"
+    },
+    {
+      "name": "site fragment assets",
+      "request": "GET https://example.org/_assets/app.css",
+      "outcome": "files @out@",
+      "ops": [
+        [
+          "Cache-Control",
+          "public, max-age=31536000, immutable"
+        ]
+      ]
+    },
+    {
+      "name": "site fragment on www",
+      "request": "GET https://www.example.org/_assets/app.css",
+      "outcome": "files @out@"
+    },
+    {
+      "name": "blog fragment prefix",
+      "request": "GET https://blog.example.org/blog/post",
+      "outcome": "redirect 301 /post"
+    },
+    {
+      "name": "blog fragment legacy query",
+      "request": "GET https://blog.example.org/?p=2",
+      "outcome": "redirect 308 https://blog.example.org/archive/2"
+    },
+    {
+      "name": "http redirect",
+      "request": "GET http://files.example.net/a",
+      "outcome": "redirect 308 https://files.example.net/a"
+    }
+  ]
+}
