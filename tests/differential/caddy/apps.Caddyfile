@@ -1,0 +1,88 @@
+# The fleet's Caddy sites that ../fleet/apps.nix replaces, served over plain HTTP on one
+# loopback port. The test sets PORT, each origin's address and the portfolio build
+# (PORTFOLIO).
+{
+	admin off
+	auto_https off
+	persist_config off
+	default_bind 127.0.0.1
+}
+
+http://example.org:{$PORT}, http://www.example.org:{$PORT} {
+	import {$PORTFOLIO}/caddy/portfolio.caddy {$PORTFOLIO} main
+}
+
+http://blog.example.org:{$PORT} {
+	import {$PORTFOLIO}/caddy/portfolio.caddy {$PORTFOLIO} blog
+}
+
+http://dns.example.net:{$PORT} {
+	reverse_proxy /* {
+		to {$DNS}
+
+		transport http {
+			tls_insecure_skip_verify
+		}
+
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+
+		header_up X-Original-IP {remote_host}
+		header_up CF-Connecting-IP {remote_host}
+	}
+}
+
+http://admin.example.net:{$PORT} {
+	reverse_proxy /* {
+		to {$ADMIN}
+
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+
+		header_up X-Original-IP {remote_host}
+		header_up CF-Connecting-IP {remote_host}
+	}
+}
+
+http://relay.example.net:{$PORT} {
+	reverse_proxy {$RELAY} {
+		flush_interval -1
+
+		transport http {
+			read_timeout 3600s
+			write_timeout 3600s
+		}
+	}
+}
+
+http://play.example.net:{$PORT} {
+	handle_path /daemon/* {
+		reverse_proxy {$DAEMON}
+	}
+
+	handle {
+		reverse_proxy /* {
+			to {$PANEL}
+		}
+	}
+}
+
+http://files.example.net:{$PORT} {
+	reverse_proxy /* {
+		to {$FILES}
+	}
+}
+
+http://mail.example.net:{$PORT} {
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy same-origin
+	}
+
+	reverse_proxy {$MAIL}
+}

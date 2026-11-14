@@ -1,0 +1,57 @@
+# The fleet's Caddy sites that ../fleet/edge.nix replaces, served over plain HTTP on one
+# loopback port. The test sets PORT, each origin's address (API, STORAGE, NIKS3) and the web
+# build (HEIMDALL_WEB).
+{
+	admin off
+	auto_https off
+	persist_config off
+	default_bind 127.0.0.1
+}
+
+http://app.example.com:{$PORT} {
+	import heimdall.caddy {$HEIMDALL_WEB} {$API}
+}
+
+http://s3.cache.example.com:{$PORT} {
+	# Preserve the signed Host, path, and query; never strip the bucket prefix.
+	@cacheBucket path /bucket /bucket/*
+	handle @cacheBucket {
+		reverse_proxy {$STORAGE} {
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 300s
+				keepalive 2m
+			}
+		}
+	}
+
+	handle {
+		respond "Not found" 404
+	}
+}
+
+http://cache.example.com:{$PORT} {
+	@reads {
+		method GET HEAD
+		not path /api/*
+	}
+	handle @reads {
+		reverse_proxy {$NIKS3} {
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 15s
+				keepalive 2m
+			}
+		}
+	}
+
+	handle {
+		reverse_proxy {$NIKS3} {
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 60s
+				keepalive 2m
+			}
+		}
+	}
+}

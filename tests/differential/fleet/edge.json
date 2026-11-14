@@ -1,0 +1,205 @@
+{
+  "http3": true,
+  "listen": {
+    "http": [
+      "0.0.0.0:80",
+      "[::]:80"
+    ],
+    "https": [
+      "0.0.0.0:443",
+      "[::]:443"
+    ]
+  },
+  "sites": [
+    {
+      "errors": [],
+      "headers": {
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Permissions-Policy": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
+        "Referrer-Policy": "no-referrer",
+        "Server": null,
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY"
+      },
+      "hosts": [
+        "app.example.com"
+      ],
+      "listen": null,
+      "name": "app.example.com",
+      "routes": [
+        {
+          "name": "api",
+          "proxy": "http://127.0.0.1:7979",
+          "when": {
+            "path": "/api/*"
+          }
+        },
+        {
+          "name": "immutable",
+          "routes": [
+            {
+              "headers": {
+                "Cache-Control": "public, max-age=31536000, immutable"
+              }
+            },
+            {
+              "files": {
+                "precompressed": [
+                  "br",
+                  "gzip"
+                ],
+                "root": "@heimdall-web@"
+              }
+            }
+          ],
+          "when": {
+            "path": "/_app/immutable/*"
+          }
+        },
+        {
+          "headers": {
+            "Cache-Control": "no-cache",
+            "Last-Modified": null
+          }
+        },
+        {
+          "requestHeaders": {
+            "If-Modified-Since": null
+          }
+        },
+        {
+          "error": 404,
+          "name": "sidecar",
+          "when": {
+            "path": [
+              "*.etag",
+              "*.br",
+              "*.gz"
+            ]
+          }
+        },
+        {
+          "name": "client-route",
+          "rewrite": "/index.html",
+          "when": {
+            "none": [
+              {
+                "path": "/_app/*"
+              },
+              {
+                "file": {
+                  "paths": [
+                    "{path}"
+                  ],
+                  "root": "@heimdall-web@"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "files": {
+            "etagSidecar": ".etag",
+            "precompressed": [
+              "br",
+              "gzip"
+            ],
+            "root": "@heimdall-web@"
+          }
+        }
+      ],
+      "tls": {
+        "cert": "/var/lib/acme/app.example.com/fullchain.pem",
+        "http3": true,
+        "key": "/var/lib/acme/app.example.com/key.pem",
+        "redirectHttp": true
+      }
+    },
+    {
+      "errors": [],
+      "headers": {},
+      "hosts": [
+        "cache.example.com"
+      ],
+      "listen": null,
+      "name": "cache.example.com",
+      "routes": [
+        {
+          "proxy": {
+            "timeouts": {
+              "responseHeader": "15s"
+            },
+            "to": "http://127.0.0.1:25915"
+          },
+          "when": {
+            "method": [
+              "GET",
+              "HEAD"
+            ],
+            "none": [
+              {
+                "path": "/api/*"
+              }
+            ]
+          }
+        },
+        {
+          "proxy": {
+            "timeouts": {
+              "responseHeader": "60s"
+            },
+            "to": "http://127.0.0.1:25915"
+          }
+        }
+      ],
+      "tls": {
+        "cert": "/var/lib/acme/cache.example.com/fullchain.pem",
+        "http3": true,
+        "key": "/var/lib/acme/cache.example.com/key.pem",
+        "redirectHttp": true
+      }
+    },
+    {
+      "errors": [],
+      "headers": {},
+      "hosts": [
+        "s3.cache.example.com"
+      ],
+      "listen": null,
+      "name": "s3.cache.example.com",
+      "routes": [
+        {
+          "proxy": {
+            "timeouts": {
+              "responseHeader": "300s"
+            },
+            "to": "http://storage:9000"
+          },
+          "when": {
+            "path": [
+              "/bucket",
+              "/bucket/*"
+            ]
+          }
+        },
+        {
+          "respond": {
+            "body": "Not found",
+            "status": 404
+          }
+        }
+      ],
+      "tls": {
+        "cert": "/var/lib/acme/s3.cache.example.com/fullchain.pem",
+        "http3": true,
+        "key": "/var/lib/acme/s3.cache.example.com/key.pem",
+        "redirectHttp": true
+      }
+    }
+  ],
+  "timeouts": {
+    "shutdown": "10s"
+  },
+  "version": 1,
+  "workers": null
+}

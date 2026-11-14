@@ -1,0 +1,14 @@
+# The fleet's Caddy site that ../fleet/desktop.nix replaces. The test sets PORT and the noVNC
+# origin's address (NOVNC).
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+http://:{$PORT} {
+	bind 127.0.0.1
+	@root path /
+	redir @root /vnc.html?autoconnect=1&resize=scale 302
+	reverse_proxy {$NOVNC}
+}

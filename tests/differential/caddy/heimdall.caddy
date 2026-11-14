@@ -1,0 +1,56 @@
+# heimdall behind Caddy: the web app straight from its build directory, /api proxied to
+# the server. Import it inside a site block with the build directory and the upstream:
+#   import <package>/share/heimdall/heimdall.caddy <web build> <host:port>
+
+header {
+	-Server
+	X-Content-Type-Options nosniff
+	X-Frame-Options DENY
+	Referrer-Policy no-referrer
+	Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+	Cross-Origin-Opener-Policy same-origin
+}
+
+# Caddy keeps Host and sets X-Forwarded-Proto for heimdall's same-origin check, and sends
+# each event of /api/live as it arrives. No encode here: the server compresses
+# /api/sync itself, and a compressor would hold the event stream back.
+handle /api/* {
+	reverse_proxy {args[1]}
+}
+
+# Hashed build assets never change.
+handle /_app/immutable/* {
+	root * {args[0]}
+	header Cache-Control "public, max-age=31536000, immutable"
+	file_server {
+		precompressed br gzip
+	}
+}
+
+# Everything else, index.html and the service worker first of all, is revalidated on
+# every load so a deploy reaches clients. The build writes a content-hash ETag beside each
+# file, since every file in the Nix store has the same mtime; Last-Modified would lie.
+handle {
+	root * {args[0]}
+	header {
+		Cache-Control no-cache
+		-Last-Modified
+	}
+	request_header -If-Modified-Since
+
+	# The sidecars are read in place of a file, never served as one.
+	@sidecar path *.etag *.br *.gz
+	error @sidecar 404
+
+	# Client routes deep-link to the app; a missing asset under /_app stays a 404.
+	@route {
+		not path /_app/*
+		not file
+	}
+	rewrite @route /index.html
+
+	file_server {
+		precompressed br gzip
+		etag_file_extensions .etag
+	}
+}
