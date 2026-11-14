@@ -1,0 +1,203 @@
+{
+  "fragment": 1,
+  "headers": {
+    "Server": null,
+    "Last-Modified": null,
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
+    "Cross-Origin-Opener-Policy": "same-origin"
+  },
+  "routes": [
+    { "name": "no_ims", "requestHeaders": { "If-Modified-Since": null } },
+    { "name": "encode", "encode": ["zstd", "gzip"] },
+
+    { "name": "epoch", "set": { "epoch": "e0" } },
+
+    { "name": "lang_default", "set": { "lang": "en" } },
+    {
+      "name": "lang_accept_pt",
+      "when": { "value": "{header.Accept-Language}", "regex": "(?i)^\\s*pt([-_;,\\s]|$)" },
+      "set": { "lang": "pt" }
+    },
+    {
+      "name": "lang_cookie",
+      "when": { "value": "{cookie.portfolio_lang}", "in": ["en", "pt"] },
+      "set": { "lang": "{cookie.portfolio_lang}" }
+    },
+    {
+      "name": "lang_query",
+      "when": { "value": "{query.lang}", "in": ["en", "pt"] },
+      "set": { "lang": "{query.lang}" }
+    },
+
+    { "name": "tree", "set": { "tree": "@out@/site/{vars.epoch}/main/{vars.lang}" } },
+
+    {
+      "name": "markdown_wanted",
+      "when": {
+        "any": [
+          { "query": { "format": "markdown" } },
+          { "query": { "raw": "true" } },
+          { "headerRegex": { "Accept": "(?i)^text/(markdown|plain)" } },
+          {
+            "headerRegex": { "Accept": "(?i)text/(markdown|plain)" },
+            "none": [{ "headerRegex": { "Accept": "[*]/[*]" } }]
+          },
+          {
+            "headerRegex": {
+              "User-Agent": "(?i)(gptbot|oai-searchbot|chatgpt-user|claudebot|claude-user|claude-searchbot|anthropic-ai|perplexitybot|perplexity-user|ccbot|facebookbot|bytespider|amazonbot|ai2bot|diffbot|imagesiftbot|magpie-crawler|omgili|omgilibot|webzio-extended|youbot)"
+            }
+          }
+        ]
+      },
+      "set": { "markdown": "yes" }
+    },
+
+    { "name": "unsafe_path", "when": { "pathRegex": "[\\\\\\x00-\\x1f\\x7f]" }, "error": 404 },
+
+    {
+      "name": "trailing_slash",
+      "when": { "pathRegex": "^/(.+)/$" },
+      "redirect": { "to": "/{re.1}{?query}", "status": 301 }
+    },
+    {
+      "name": "index_html",
+      "when": { "pathRegex": "^/(?:(.*)/)?index\\.html$" },
+      "redirect": { "to": "/{re.1}{?query}", "status": 301 }
+    },
+
+    {
+      "name": "internal",
+      "when": {
+        "path": ["/_md", "/_md/*", "/_curl.txt", "/404.html", "*.etag", "*.br", "*.zst", "*.gz"]
+      },
+      "error": 404
+    },
+
+    {
+      "name": "astro",
+      "when": { "path": "/_astro/*" },
+      "routes": [
+        { "headers": { "Cache-Control": "public, max-age=31536000, immutable" } },
+        { "files": { "root": "@out@", "precompressed": ["br", "zstd", "gzip"] } }
+      ]
+    },
+
+    {
+      "name": "og",
+      "when": { "path": "/og/*" },
+      "routes": [
+        { "headers": { "Cache-Control": "public, max-age=3600" } },
+        { "files": { "root": "@out@/site/{vars.epoch}", "precompressed": ["br", "zstd", "gzip"] } }
+      ]
+    },
+
+    {
+      "name": "static",
+      "when": {
+        "none": [{ "path": "/" }],
+        "file": { "root": "@out@/static", "paths": ["{path}"] }
+      },
+      "routes": [
+        { "headers": { "Cache-Control": "public, max-age=3600" } },
+        { "when": { "path": "*.txt" }, "headers": { "Content-Type": "text/plain; charset=utf-8" } },
+        {
+          "files": {
+            "root": "@out@/static",
+            "precompressed": ["br", "zstd", "gzip"],
+            "etagSidecar": ".etag"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "tree_caching",
+      "headers": { "Cache-Control": "private, no-cache", "Vary": "Cookie, Accept-Language" }
+    },
+    {
+      "name": "agent_dependent",
+      "when": { "pathRegex": "^/(index|blog(/[^/.]+)?)?$" },
+      "headers": { "Vary": "Cookie, Accept-Language, User-Agent, Accept" }
+    },
+
+    {
+      "name": "rewrites",
+      "firstOf": [
+        { "name": "mdx_index", "when": { "path": ["/blog.mdx", "/llms.mdx/blog"] }, "rewrite": "/_md/blog.md" },
+        {
+          "name": "mdx_llms_post",
+          "when": { "pathRegex": "^/llms\\.mdx/blog/([^/]+)$" },
+          "rewrite": "/_md/blog/{re.1}.md"
+        },
+        {
+          "name": "mdx_post",
+          "when": { "pathRegex": "^/blog/([^/]+)\\.mdx$" },
+          "rewrite": "/_md/blog/{re.1}.md"
+        },
+        {
+          "name": "markdown_index",
+          "when": { "value": "{vars.markdown}", "in": ["yes"], "path": "/blog" },
+          "rewrite": "/_md/blog.md"
+        },
+        {
+          "name": "markdown_post",
+          "when": { "value": "{vars.markdown}", "in": ["yes"], "pathRegex": "^/blog/([^/.]+)$" },
+          "rewrite": "/_md/blog/{re.1}.md"
+        },
+        {
+          "name": "curl",
+          "when": { "path": ["/", "/index"], "header": { "User-Agent": "curl/*" } },
+          "rewrite": "/_curl.txt"
+        },
+        {
+          "name": "try_files",
+          "tryFiles": { "root": "{vars.tree}", "paths": ["{path}/index.html", "{path}"] }
+        }
+      ]
+    },
+
+    { "when": { "path": "*.html" }, "headers": { "Content-Type": "text/html; charset=utf-8" } },
+    { "when": { "path": "*.md" }, "headers": { "Content-Type": "text/markdown; charset=utf-8" } },
+    { "when": { "path": "*.txt" }, "headers": { "Content-Type": "text/plain; charset=utf-8" } },
+    {
+      "when": { "path": ["/blog/rss.xml", "/rss.xml"] },
+      "headers": { "Content-Type": "application/rss+xml; charset=utf-8" }
+    },
+    { "when": { "path": "/sitemap.xml" }, "headers": { "Content-Type": "application/xml; charset=utf-8" } },
+
+    {
+      "name": "serve_tree",
+      "files": {
+        "root": "{vars.tree}",
+        "precompressed": ["br", "zstd", "gzip"],
+        "etagSidecar": ".etag"
+      }
+    }
+  ],
+  "errors": [
+    {
+      "status": [404],
+      "routes": [
+        { "rewrite": "/404.html" },
+        {
+          "headers": {
+            "Cache-Control": "private, no-cache",
+            "Vary": "Cookie, Accept-Language",
+            "Content-Type": "text/html; charset=utf-8"
+          }
+        },
+        { "encode": ["zstd", "gzip"] },
+        { "files": { "root": "{vars.tree}", "precompressed": ["br", "zstd", "gzip"] } }
+      ]
+    },
+    {
+      "routes": [
+        { "headers": { "Cache-Control": "no-store" } },
+        { "respond": { "body": "{err.status_code} {err.status_text}" } }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "sites": [
+    {
+      "name": "example.org",
+      "hosts": ["example.org", "www.example.org"],
+      "tls": { "cert": "/var/lib/acme/example.org/fullchain.pem", "key": "/var/lib/acme/example.org/key.pem" },
+      "routes": [{ "include": "@fixtures@/portfolio/main.json" }]
+    },
+    {
+      "name": "blog.example.org",
+      "hosts": ["blog.example.org"],
+      "tls": { "cert": "/var/lib/acme/example.org/fullchain.pem", "key": "/var/lib/acme/example.org/key.pem" },
+      "routes": [{ "include": "@fixtures@/portfolio/blog.json" }]
+    }
+  ]
+}

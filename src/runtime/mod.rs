@@ -731,6 +731,8 @@ pub(crate) mod testing {
             upstreams: Box::new([]),
             regexes: Box::new([]),
             var_count: 0,
+            var_names: Box::new([]),
+            user_sites: 0,
             certs: Box::new([]),
             server: ServerParams::default(),
         }

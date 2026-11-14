@@ -43,9 +43,14 @@ pub(crate) struct Plan {
     /// (`runtime::RegexCaches`), so matching never contends.
     pub regexes: Box<[regex_automata::meta::Regex]>,
     pub var_count: u16,
+    /// Var names by [`VarId`], for logs and tests.
+    pub var_names: Box<[Box<str>]>,
     /// Certificate files to load, one per TLS site (sites sharing files share an entry).
     pub certs: Box<[CertSource]>,
     pub server: ServerParams,
+    /// `sites[..user_sites]` are the config's sites, in order; the rest are synthetic (the
+    /// HTTP->HTTPS redirect site).
+    pub user_sites: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -287,7 +292,7 @@ impl Diagnostic {
     /// `/sites/3/routes/1/when` names the site and step a person wrote.
     pub(crate) fn locate(mut self, doc: &serde_json::Value) -> Diagnostic {
         let (site, step) = locate(doc, &self.pointer);
-        self.site = site;
+        self.site = site.or(self.site);
         self.step = step;
         self
     }
@@ -357,95 +362,163 @@ impl std::fmt::Display for Diagnostic {
     }
 }
 
-/// `upstreamer check`: parse + compile, never touching certificates, roots or sockets.
-///
-/// Validates the schema of the input file (and its `version`/`fragment` number). Compiling
-/// (templates, matchers, includes, listeners and the expected ports) is [`compile::compile`]'s.
-pub(crate) fn check(input: crate::CheckInput) -> Result<crate::CheckReport, Vec<Diagnostic>> {
-    use crate::config::{self, SchemaError};
-
-    fn read(path: &Path) -> Result<Vec<u8>, Vec<Diagnostic>> {
-        std::fs::read(path).map_err(|e| {
-            vec![Diagnostic::error(
-                Some(path),
-                "",
-                format!("cannot read: {e}"),
-            )]
-        })
-    }
-    fn schema(path: &Path, bytes: &[u8], e: SchemaError) -> Vec<Diagnostic> {
+/// Reads, parses and compiles a config file: what `run` does at startup and reload, and what
+/// `check` does at build time. Every diagnostic names its file and is located (site and step).
+pub(crate) fn load(
+    path: &Path,
+    generation: u64,
+) -> Result<(Plan, Vec<Diagnostic>), Vec<Diagnostic>> {
+    let bytes = std::fs::read(path).map_err(|e| {
+        vec![Diagnostic::error(
+            Some(path),
+            "",
+            format!("cannot read: {e}"),
+        )]
+    })?;
+    let config = crate::config::parse_config(&bytes).map_err(|e| {
         let mut message = e.message;
         if e.line > 0 {
             message.push_str(&format!(" (line {}, column {})", e.line, e.column));
         }
-        let diagnostic = Diagnostic::error(Some(path), e.pointer, message);
-        vec![match serde_json::from_slice(bytes) {
-            Ok(doc) => diagnostic.locate(&doc),
-            Err(_) => diagnostic,
-        }]
+        vec![Diagnostic::error(Some(path), e.pointer, message)]
+    });
+    let doc = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+    let in_config = |diagnostics: Vec<Diagnostic>| -> Vec<Diagnostic> {
+        diagnostics
+            .into_iter()
+            .map(|mut d| {
+                if d.file.is_none() {
+                    d.file = Some(path.to_path_buf());
+                }
+                match &doc {
+                    Some(doc) if d.file.as_deref() == Some(path) => d.locate(doc),
+                    _ => d,
+                }
+            })
+            .collect()
+    };
+    let config = config.map_err(in_config)?;
+    if config.version != 1 {
+        let message = format!(
+            "unsupported config version {}; this upstreamer reads version 1",
+            config.version
+        );
+        return Err(vec![Diagnostic::error(Some(path), "/version", message)]);
     }
+    match compile::compile(&config, &compile::FileSystem, generation) {
+        Ok((plan, warnings)) => Ok((plan, in_config(warnings))),
+        Err(diagnostics) => Err(in_config(diagnostics)),
+    }
+}
 
-    match input {
-        crate::CheckInput::Config { path, expect: _ } => {
-            let bytes = read(&path)?;
-            let config = config::parse_config(&bytes).map_err(|e| schema(&path, &bytes, e))?;
-            if config.version != 1 {
-                let message = format!(
-                    "unsupported config version {}; this upstreamer reads version 1",
-                    config.version
-                );
-                return Err(vec![Diagnostic::error(Some(&path), "/version", message)]);
-            }
-            let steps = config
-                .sites
-                .iter()
-                .map(|site| {
-                    count_steps(&site.routes)
-                        + site
-                            .errors
-                            .iter()
-                            .map(|e| count_steps(&e.routes))
-                            .sum::<usize>()
-                })
-                .sum();
-            Ok(crate::CheckReport {
-                sites: config.sites.len(),
-                steps,
-                warnings: Vec::new(),
+/// `upstreamer check`: parse + compile, never touching certificates, roots or sockets.
+///
+/// A config is compiled exactly as `run` compiles it (includes read and validated), and the
+/// ports its listeners need are compared with the ports the NixOS module opens. A fragment is
+/// compiled as if one site included it.
+pub(crate) fn check(input: crate::CheckInput) -> Result<crate::CheckReport, Vec<Diagnostic>> {
+    let (path, expect, fragment) = match input {
+        crate::CheckInput::Config { path, expect } => (path, expect, false),
+        crate::CheckInput::Fragment(path) => (path, None, true),
+    };
+    let (plan, warnings) = if fragment {
+        let bytes = std::fs::read(&path).map_err(|e| {
+            vec![Diagnostic::error(
+                Some(&path),
+                "",
+                format!("cannot read: {e}"),
+            )]
+        })?;
+        let path = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
+        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "sites": [{ "name": "", "hosts": ["*"], "routes": [{ "include": path }] }],
+        }))
+        .expect("the wrapper fits the schema");
+        compile::compile(&config, &OneFile { path, bytes }, 0)?
+    } else {
+        load(&path, 0)?
+    };
+    if let Some(expect) = expect {
+        ports_match(&plan, &expect)
+            .map_err(|message| vec![Diagnostic::error(Some(&path), "", message)])?;
+    }
+    let sites = &plan.sites[..plan.user_sites as usize];
+    Ok(crate::CheckReport {
+        sites: if fragment { 0 } else { sites.len() },
+        steps: sites
+            .iter()
+            .map(|s| {
+                count_steps(&s.routes)
+                    + s.errors
+                        .iter()
+                        .map(|e| count_steps(&e.routes))
+                        .sum::<usize>()
             })
-        }
-        crate::CheckInput::Fragment(path) => {
-            let bytes = read(&path)?;
-            let fragment = config::parse_fragment(&bytes).map_err(|e| schema(&path, &bytes, e))?;
-            if fragment.fragment != 1 {
-                let message = format!(
-                    "unsupported fragment version {}; this upstreamer reads version 1",
-                    fragment.fragment
-                );
-                return Err(vec![Diagnostic::error(Some(&path), "/fragment", message)]);
-            }
-            let steps = count_steps(&fragment.routes)
-                + fragment
-                    .errors
-                    .iter()
-                    .map(|e| count_steps(&e.routes))
-                    .sum::<usize>();
-            Ok(crate::CheckReport {
-                sites: 0,
-                steps,
-                warnings: Vec::new(),
-            })
+            .sum(),
+        warnings,
+    })
+}
+
+/// One file already read; any other include comes from the file system.
+struct OneFile {
+    path: PathBuf,
+    bytes: Vec<u8>,
+}
+
+impl compile::Sources for OneFile {
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        if path == self.path {
+            Ok(self.bytes.clone())
+        } else {
+            std::fs::read(path)
         }
     }
 }
 
-fn count_steps(steps: &[crate::config::Step]) -> usize {
-    use crate::config::Action;
-    steps
+/// The firewall the NixOS module derived must open exactly the ports the listeners use.
+fn ports_match(plan: &Plan, expect: &crate::ExpectedPorts) -> Result<(), String> {
+    let set = |ports: &mut dyn Iterator<Item = u16>| -> Vec<u16> {
+        let mut v: Vec<u16> = ports.collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let ports = |udp: bool| {
+        set(&mut plan
+            .listeners
+            .iter()
+            .filter(|l| (l.key.kind == ListenerKind::Quic) == udp)
+            .map(|l| l.key.addr.port()))
+    };
+    let (tcp, udp) = (ports(false), ports(true));
+    let (want_tcp, want_udp) = (
+        set(&mut expect.tcp.iter().copied()),
+        set(&mut expect.udp.iter().copied()),
+    );
+    if tcp == want_tcp && udp == want_udp {
+        return Ok(());
+    }
+    let list = |v: &[u16]| match v {
+        [] => "none".to_owned(),
+        v => v.iter().map(u16::to_string).collect::<Vec<_>>().join(", "),
+    };
+    Err(format!(
+        "the firewall opens TCP {} and UDP {}, but the sites listen on TCP {} and UDP {}",
+        list(&want_tcp),
+        list(&want_udp),
+        list(&tcp),
+        list(&udp),
+    ))
+}
+
+fn count_steps(block: &Block) -> usize {
+    block
+        .steps
         .iter()
         .map(|step| {
             1 + match &step.action {
-                Action::Routes(nested) | Action::FirstOf(nested) => count_steps(nested),
+                Action::Block(nested) => count_steps(nested),
                 _ => 0,
             }
         })
@@ -454,8 +527,10 @@ fn count_steps(steps: &[crate::config::Step]) -> usize {
 
 impl Plan {
     /// Host routing for a request on `listener`. `None` -> 421 on TLS listeners, 404 on
-    /// cleartext ones.
+    /// cleartext ones. `host` is lowercase without port (as `RequestHead::host` keeps it).
     pub fn site_for(&self, listener: &ListenerKey, host: &[u8]) -> Option<(SiteId, &SitePlan)> {
-        todo!()
+        let spec = self.listeners.iter().find(|l| l.key == *listener)?;
+        let id = spec.hosts.lookup(host)?;
+        Some((id, &self.sites[id.0 as usize]))
     }
 }

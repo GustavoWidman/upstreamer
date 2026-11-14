@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "sites": [
+    {
+      "name": "app.example.com",
+      "hosts": ["app.example.com"],
+      "tls": { "cert": "/var/lib/acme/app.example.com/fullchain.pem", "key": "/var/lib/acme/app.example.com/key.pem" },
+      "headers": {
+        "Server": null,
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+        "Permissions-Policy": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
+        "Cross-Origin-Opener-Policy": "same-origin"
+      },
+      "routes": [
+        { "name": "api", "when": { "path": "/api/*" }, "proxy": "http://127.0.0.1:7979" },
+        {
+          "name": "immutable",
+          "when": { "path": "/_app/immutable/*" },
+          "routes": [
+            { "headers": { "Cache-Control": "public, max-age=31536000, immutable" } },
+            { "files": { "root": "@out@", "precompressed": ["br", "gzip"] } }
+          ]
+        },
+        { "headers": { "Cache-Control": "no-cache", "Last-Modified": null } },
+        { "requestHeaders": { "If-Modified-Since": null } },
+        { "name": "sidecar", "when": { "path": ["*.etag", "*.br", "*.gz"] }, "error": 404 },
+        {
+          "name": "client-route",
+          "when": { "none": [{ "path": "/_app/*" }, { "file": { "root": "@out@", "paths": ["{path}"] } }] },
+          "rewrite": "/index.html"
+        },
+        { "files": { "root": "@out@", "precompressed": ["br", "gzip"], "etagSidecar": ".etag" } }
+      ]
+    }
+  ]
+}
