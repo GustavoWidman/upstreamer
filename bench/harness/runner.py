@@ -197,7 +197,7 @@ def probe(scenario: Scenario, port_override: int | None, workdir: Path) -> str |
     return None
 
 
-def wait_quiet(progress=print) -> dict:
+def wait_quiet(progress=print, max_wait_s: float = QUIET_WAIT_MAX_S) -> dict:
     """Block until the host's task CPU use (everything but steal, irq and
     idle) stays under QUIET_CORES_MAX for a 2 s sample. lab is shared; this
     keeps another job's build or test from landing inside a measured window."""
@@ -210,7 +210,7 @@ def wait_quiet(progress=print) -> dict:
         bd = breakdown(a, b, a.cpus.keys())
         busy = (bd["user"] + bd["nice"] + bd["system"]) / (b.at - a.at)
         waited = time.monotonic() - start
-        if busy < QUIET_CORES_MAX or waited > QUIET_WAIT_MAX_S:
+        if busy < QUIET_CORES_MAX or waited >= max_wait_s:
             return {"busy_cores_before": busy, "waited_s": waited, "gave_up": busy >= QUIET_CORES_MAX}
         if not announced:
             progress(f"host busy ({busy:.1f} cores of foreign work); waiting for quiet")
@@ -466,7 +466,7 @@ class Runner:
         box: dict = {}
         th = threading.Thread(target=lambda: box.update(fin=run_pinned(main.argv, lg_cpus, main.output, cwd=run_dir)))
         th.start()
-        while th.is_alive() and "BENCH_IDLE_READY" not in main.output.read_text(errors="replace"):
+        while th.is_alive() and not (main.output.exists() and "BENCH_IDLE_READY" in main.output.read_text(errors="replace")):
             time.sleep(0.1)
         time.sleep(2)
         samples = []
@@ -525,6 +525,7 @@ def matrix(
     rates: dict | None = None,
     progress=print,
     retries: int = 2,
+    quiet_wait_s: float = QUIET_WAIT_MAX_S,
 ) -> list[dict]:
     """Interleave servers round-robin within each scenario, rotating the order
     every repetition, so drift and warm caches favour no server. Runs the host
@@ -561,7 +562,7 @@ def matrix(
                         if not rate:
                             progress(f"skip {sc.name}/{profile.name}: no open-loop rate stored")
                             continue
-                    runner.quiet = wait_quiet(progress)
+                    runner.quiet = wait_quiet(progress, quiet_wait_s)
                     rec = runner.run(RunSpec(server, sc, profile, mode, rate, rep, warmup_s, duration_s))
                     rec_retry = rec["status"] != "ok" or bool(NOISE & set(rec.get("flags", [])))
                     records.append(rec)

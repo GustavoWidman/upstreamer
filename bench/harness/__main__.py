@@ -6,6 +6,7 @@
   bench quick    upstreamer only, compared against stored competitor medians
   bench profile  perf flamegraph of one server under one scenario (not a measurement)
   bench serve    start origin + one server, probe each scenario it supports
+  bench tuning   every server's settings, sources and n/a reasons
 """
 
 import argparse
@@ -88,6 +89,8 @@ def cmd_run(a: argparse.Namespace) -> None:
             a.duration,
             rates,
             progress=lambda m: print(m, flush=True),
+            retries=a.retries,
+            quiet_wait_s=a.quiet_wait,
         )
     write_report(root, a.label)
 
@@ -110,6 +113,7 @@ def cmd_quick(a: argparse.Namespace) -> None:
     records = matrix(
         session, pick_profiles(a.profiles), pick_scenarios(a.scenarios), servers, a.reps,
         a.mode, a.warmup, a.duration, against.get("rates"), progress=lambda m: print(m, flush=True),
+        retries=a.retries, quiet_wait_s=a.quiet_wait,
     )
     mine = report.summarize(records)["groups"]
     stored = {(g["profile"], g["scenario"], g["scenario_version"], g["mode"]): g for g in against["groups"]}
@@ -224,6 +228,21 @@ def cmd_profile(a: argparse.Namespace) -> None:
     print(f"wrote {out / 'flamegraph.svg'} and {folded}")
 
 
+def cmd_tuning(a: argparse.Namespace) -> None:
+    """Markdown of every server's version, settings, sources and n/a reasons."""
+    for server in registry().values():
+        if not server.launches:
+            continue
+        print(f"### {server.name} {server.version}\n")
+        for line in server.tuning:
+            print(f"- {line}")
+        for cap, why in sorted(server.not_applicable.items()):
+            print(f"- n/a {cap}: {why}")
+        if server.sources:
+            print("\nSources: " + ", ".join(f"<{u}>" for u in server.sources))
+        print()
+
+
 def main() -> None:
     raise_nofile()
     p = argparse.ArgumentParser(prog="bench", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -242,6 +261,8 @@ def main() -> None:
         sp.add_argument("--duration", type=int, default=10, help="seconds per measured window")
         sp.add_argument("--label", default=label, help="tag stored on every record; report filters by it")
         sp.add_argument("--rates", type=Path, help="JSON {profile: {scenario: req/s}} for open loop")
+        sp.add_argument("--quiet-wait", type=float, default=3600, help="max seconds to wait for a quiet host before each run (0: do not wait)")
+        sp.add_argument("--retries", type=int, default=2, help="re-queue rounds for runs the host disturbed")
 
     sp = sub.add_parser("run", help="run the interleaved matrix")
     matrix_args(sp)
@@ -263,6 +284,8 @@ def main() -> None:
     sp.add_argument("--warmup", type=int, default=3)
     sp.add_argument("--duration", type=int, default=10)
     sp.add_argument("--against", type=Path, required=True, help="summary JSON holding competitor medians")
+    sp.add_argument("--quiet-wait", type=float, default=3600)
+    sp.add_argument("--retries", type=int, default=2)
     sp.set_defaults(func=cmd_quick)
 
     sp = sub.add_parser("profile", help="perf flamegraph of one server under load")
@@ -280,6 +303,9 @@ def main() -> None:
     sp.add_argument("--profile", default="fleet")
     sp.add_argument("--hold", action="store_true", help="keep both running until Ctrl-C")
     sp.set_defaults(func=cmd_serve)
+
+    sp = sub.add_parser("tuning", help="print every server's settings and their sources")
+    sp.set_defaults(func=cmd_tuning)
 
     a = p.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
