@@ -1,5 +1,6 @@
-/target
+target/
 *.swp
 .DS_Store
 .direnv
 result
+bench-results/
