@@ -132,7 +132,9 @@ impl Proxy {
 
 impl Drop for Proxy {
     fn drop(&mut self) {
-        self.signal(libc::SIGTERM);
+        // A test that stopped the proxy itself leaves no process group to signal.
+        // SAFETY: as in `signal`; a failure only means the group is gone.
+        unsafe { libc::kill(-(self.child.id() as i32), libc::SIGTERM) };
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             if matches!(self.child.try_wait(), Ok(Some(_))) {
