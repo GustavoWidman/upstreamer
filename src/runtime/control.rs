@@ -311,7 +311,7 @@ fn monotonic_usec() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::testing::{connect, free_addr, get, plan};
+    use crate::runtime::testing::{connect, free_addr, get, plan, read_response};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -396,8 +396,7 @@ mod tests {
                     let mut conn = connect(b);
                     let mut last = 0;
                     while !stop.load(Ordering::Relaxed) {
-                        let (_, generation) =
-                            get(&mut conn).expect("keep-alive request during reloads");
+                        let generation = get(&mut conn).expect("keep-alive request during reloads");
                         assert!(generation >= last, "generations never go back");
                         last = generation;
                         hammered.fetch_add(1, Ordering::Relaxed);
@@ -407,7 +406,7 @@ mod tests {
             .collect();
 
         let mut keep_alive = connect(a);
-        assert_eq!(get(&mut keep_alive).unwrap().1, 1);
+        assert_eq!(get(&mut keep_alive).unwrap(), 1);
         for generation in 2..=RELOADS {
             signal(libc::SIGHUP);
             let reloading = recv(&notifications);
@@ -422,7 +421,7 @@ mod tests {
                 format!("READY=1\nSTATUS=serving generation {generation}")
             );
             assert_eq!(
-                get(&mut keep_alive).unwrap().1,
+                get(&mut keep_alive).unwrap(),
                 generation,
                 "the next request on the same connection runs under the new generation"
             );
@@ -438,10 +437,12 @@ mod tests {
             std::net::TcpStream::connect(a).is_err(),
             "the listener the reload removed is closed"
         );
-        assert_eq!(
-            get(&mut keep_alive).unwrap().1,
-            RELOADS + 1,
-            "a connection accepted by the removed listener finishes its requests"
+        std::io::Write::write_all(&mut keep_alive, b"GET / HTTP/1.1\r\nHost: test\r\n\r\n")
+            .unwrap();
+        let (head, _) = read_response(&mut keep_alive).unwrap();
+        assert!(
+            head.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "a connection accepted by the removed listener has no site under the new plan: {head}"
         );
 
         signal(libc::SIGHUP);
@@ -453,7 +454,7 @@ mod tests {
                 RELOADS + 1
             )
         );
-        assert_eq!(get(&mut connect(b)).unwrap().1, RELOADS + 1);
+        assert_eq!(get(&mut connect(b)).unwrap(), RELOADS + 1);
 
         stop.store(true, Ordering::Relaxed);
         for hammer in hammers {
@@ -465,12 +466,14 @@ mod tests {
             RELOADS + 1
         );
 
+        let mut idle = connect(b);
+        assert_eq!(get(&mut idle).unwrap(), RELOADS + 1);
         signal(libc::SIGTERM);
         assert_eq!(recv(&notifications), "STOPPING=1");
         control.join().unwrap().unwrap();
         let mut rest = Vec::new();
         assert_eq!(
-            std::io::Read::read_to_end(&mut keep_alive, &mut rest).unwrap(),
+            std::io::Read::read_to_end(&mut idle, &mut rest).unwrap(),
             0,
             "drain closes idle connections"
         );

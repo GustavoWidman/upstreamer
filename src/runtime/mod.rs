@@ -594,7 +594,7 @@ fn out_of_resources(e: &io::Error) -> bool {
 
 async fn connection(core: Rc<Core>, sock: Socket, info: ConnInfo, _guard: ConnGuard) {
     match info.scheme {
-        Scheme::Http => serve_h1(core, Transport::Plain(sock), info).await,
+        Scheme::Http => crate::proto::h1::server::serve(core, Transport::Plain(sock), info).await,
         Scheme::Https => {
             let Some(config) = core.snapshot().tls.clone() else {
                 return;
@@ -607,38 +607,22 @@ async fn connection(core: Rc<Core>, sock: Socket, info: ConnInfo, _guard: ConnGu
                     };
                     crate::proto::h2::serve(core, io, info).await;
                 }
-                Ok((io, _)) => serve_h1(core, io, info).await,
+                Ok((io, _)) => crate::proto::h1::server::serve(core, io, info).await,
                 Err(e) => debug!("core {}: TLS from {}: {e:?}", core.index, info.remote),
             }
         }
     }
 }
 
-#[cfg(not(test))]
-async fn serve_h1(core: Rc<Core>, io: Transport, info: ConnInfo) {
-    crate::proto::h1::server::serve(core, io, info).await;
-}
-
-/// In the runtime's own tests, cleartext connections get a fixed response, so the runtime is
-/// tested apart from the HTTP/1.1 driver.
-#[cfg(test)]
-async fn serve_h1(core: Rc<Core>, io: Transport, info: ConnInfo) {
-    testing::serve_fixed(core, io, info).await;
-}
-
 #[cfg(test)]
 pub(crate) mod testing {
-    //! Test support for the runtime: a fixed-response HTTP/1.1 driver, hand-built plans, a
-    //! blocking client, and a per-thread allocation counter.
+    //! Test support for the runtime: plans compiled from small configs, a blocking client,
+    //! a per-thread allocation counter, and a record of what each core served.
 
     use super::*;
-    use crate::plan::{HostIndex, ListenerSpec, ServerParams};
     use std::alloc::{GlobalAlloc, Layout, System};
-    use std::io::{IoSlice, Read, Write};
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    pub const HEAD: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n";
-    pub const RESPONSE_LEN: usize = 59;
+    use std::io::{Read, Write};
+    use std::sync::Mutex;
 
     struct Counting;
 
@@ -675,72 +659,73 @@ pub(crate) mod testing {
         ALLOCS.with(Cell::get)
     }
 
-    /// Allocations made so far by the core thread with that index, as of its last response.
-    pub static CORE_ALLOCS: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
-
-    /// Answers every request head with `core=NNN gen=NNNNNN\n`, the serving core's index and
-    /// the generation of the snapshot the request ran under. Idle connections hold no buffer.
-    pub async fn serve_fixed(core: Rc<Core>, mut io: Transport, info: ConnInfo) {
-        loop {
-            tokio::select! {
-                ready = io.readable() => if ready.is_err() { break },
-                () = core.until_drain() => break,
-            }
-            let mut buf = core.bufs.take();
-            let complete = loop {
-                match io.read(&mut buf).await {
-                    Ok(0) | Err(_) => break false,
-                    Ok(_) if memchr::memmem::find(&buf, b"\r\n\r\n").is_some() => break true,
-                    Ok(_) => {}
-                }
-            };
-            if !complete {
-                core.bufs.put(buf);
-                break;
-            }
-            let snap = core.snapshot();
-            let mut ex = core.exchanges.take(info, snap.plan.var_count);
-            writeln!(
-                ex.out,
-                "core={:03} gen={:06}",
-                core.index, snap.plan.generation
-            )
-            .unwrap();
-            CORE_ALLOCS[core.index].store(ALLOCS.with(Cell::get), Ordering::Relaxed);
-            let written = io
-                .write_all_vectored(&mut [IoSlice::new(HEAD), IoSlice::new(&ex.out)])
-                .await;
-            core.exchanges.put(ex);
-            core.bufs.put(buf);
-            if written.is_err() || core.draining.get() {
-                break;
-            }
-        }
-        io.close().await;
+    /// What one core has answered on one listening port.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Served {
+        pub requests: u64,
+        /// Allocations the core's thread had made when it answered the latest request.
+        pub allocations: u64,
     }
 
+    /// By listening port and core index. Tests listen on ports of their own, so cores of
+    /// tests that run at the same time never share an entry.
+    static SERVED: Mutex<Vec<(u16, usize, Served)>> = Mutex::new(Vec::new());
+
+    /// Called by the HTTP/1.1 driver for every request it answers, before the response is
+    /// written.
+    pub fn observe(core: &Core, info: &ConnInfo) {
+        let allocations = thread_allocations();
+        let mut all = SERVED.lock().unwrap();
+        let key = (info.local_port, core.index);
+        match all.iter_mut().find(|(port, core, _)| (*port, *core) == key) {
+            Some((_, _, served)) => {
+                served.requests += 1;
+                served.allocations = allocations;
+            }
+            None => all.push((
+                key.0,
+                key.1,
+                Served {
+                    requests: 1,
+                    allocations,
+                },
+            )),
+        }
+    }
+
+    /// What the core with index `core` has answered on `port`.
+    pub fn served(port: u16, core: usize) -> Served {
+        let all = SERVED.lock().unwrap();
+        all.iter()
+            .find(|(p, c, _)| (*p, *c) == (port, core))
+            .map_or_else(Served::default, |(_, _, served)| *served)
+    }
+
+    /// A plan that listens on `addrs` and answers every host with `gen=NNNNNN\n`, its
+    /// generation.
     pub fn plan(generation: u64, addrs: &[SocketAddr]) -> Plan {
-        Plan {
+        plan_from(
             generation,
-            workers: None,
-            listeners: addrs
-                .iter()
-                .map(|&addr| ListenerSpec {
-                    key: ListenerKey {
-                        addr,
-                        kind: ListenerKind::Http,
-                    },
-                    hosts: HostIndex::default(),
-                })
-                .collect(),
-            sites: Box::new([]),
-            upstreams: Box::new([]),
-            regexes: Box::new([]),
-            var_count: 0,
-            var_names: Box::new([]),
-            user_sites: 0,
-            certs: Box::new([]),
-            server: ServerParams::default(),
+            &serde_json::json!({
+                "version": 1,
+                "listen": { "http": addrs, "https": [] },
+                "sites": [{
+                    "name": "test",
+                    "hosts": ["*"],
+                    "routes": [{ "respond": { "body": format!("gen={generation:06}\n") } }],
+                }],
+            }),
+        )
+    }
+
+    /// The plan `config` compiles to.
+    pub fn plan_from(generation: u64, config: &serde_json::Value) -> Plan {
+        let config = crate::config::parse_config(config.to_string().as_bytes())
+            .unwrap_or_else(|e| panic!("{}: {}", e.pointer, e.message));
+        let sources = crate::plan::compile::FileSystem;
+        match crate::plan::compile::compile(&config, &sources, generation) {
+            Ok((plan, _)) => plan,
+            Err(diagnostics) => panic!("{diagnostics:?}"),
         }
     }
 
@@ -759,16 +744,40 @@ pub(crate) mod testing {
             .unwrap()
     }
 
-    /// One request on a keep-alive connection; returns (core index, generation).
-    pub fn get(conn: &mut std::net::TcpStream) -> io::Result<(usize, u64)> {
+    /// One response with a Content-Length, as (head, body). The connection must hold
+    /// nothing after it.
+    pub fn read_response(conn: &mut impl Read) -> io::Result<(String, Vec<u8>)> {
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let head_len = loop {
+            if let Some(i) = memchr::memmem::find(&bytes, b"\r\n\r\n") {
+                break i + 4;
+            }
+            match conn.read(&mut chunk)? {
+                0 => return Err(io::ErrorKind::UnexpectedEof.into()),
+                n => bytes.extend_from_slice(&chunk[..n]),
+            }
+        };
+        let mut body = bytes.split_off(head_len);
+        let head = String::from_utf8(bytes).expect("an ASCII head");
+        let length = head
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length: "))
+            .map_or(0, |v| v.parse().expect("a length"));
+        assert!(body.len() <= length, "bytes after the response: {body:?}");
+        let have = body.len();
+        body.resize(length, 0);
+        conn.read_exact(&mut body[have..])?;
+        Ok((head, body))
+    }
+
+    /// One request on a keep-alive connection; returns the generation that answered it.
+    pub fn get(conn: &mut std::net::TcpStream) -> io::Result<u64> {
         conn.write_all(b"GET / HTTP/1.1\r\nHost: test\r\n\r\n")?;
-        let mut resp = [0u8; RESPONSE_LEN];
-        conn.read_exact(&mut resp)?;
-        assert_eq!(&resp[..HEAD.len()], HEAD, "fixed response head");
-        let body = std::str::from_utf8(&resp[HEAD.len()..]).unwrap();
-        let core = body[5..8].parse().unwrap();
-        let generation = body[13..19].parse().unwrap();
-        Ok((core, generation))
+        let (head, body) = read_response(conn)?;
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+        let body = std::str::from_utf8(&body).unwrap();
+        Ok(body[4..10].parse().unwrap())
     }
 
     pub fn connect(addr: SocketAddr) -> std::net::TcpStream {
@@ -782,7 +791,6 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::*;
     use super::*;
-    use std::sync::atomic::Ordering;
 
     #[test]
     fn imf_fixdate_matches_rfc_examples() {
@@ -815,24 +823,24 @@ mod tests {
         let cores = allowed_cpus().into_iter().take(4).collect::<Vec<_>>();
         let addr = free_addr();
         let workers = spawn_workers(&cores, generation(1, &[addr])).unwrap();
-        let mut served = vec![0usize; cores.len()];
         for _ in 0..400 {
-            let (core, generation) = get(&mut connect(addr)).unwrap();
-            assert_eq!(generation, 1);
-            served[core] += 1;
+            assert_eq!(get(&mut connect(addr)).unwrap(), 1);
         }
         stop(workers, Instant::now());
+        let per_core: Vec<u64> = (0..cores.len())
+            .map(|core| served(addr.port(), core).requests)
+            .collect();
         println!(
-            "connections per core over {} cores: {served:?}",
+            "connections per core over {} cores: {per_core:?}",
             cores.len()
         );
         if cfg!(target_os = "linux") {
             assert!(
-                served.iter().all(|&n| n > 0),
-                "the kernel spreads connections over every core: {served:?}"
+                per_core.iter().all(|&n| n > 0),
+                "the kernel spreads connections over every core: {per_core:?}"
             );
         }
-        assert_eq!(served.iter().sum::<usize>(), 400);
+        assert_eq!(per_core.iter().sum::<u64>(), 400);
     }
 
     #[cfg(target_os = "linux")]
@@ -884,12 +892,12 @@ mod tests {
         for _ in 0..2_000 {
             get(&mut conn).unwrap();
         }
-        let before = CORE_ALLOCS[0].load(Ordering::Relaxed);
+        let before = served(addr.port(), 0).allocations;
         let requests = 20_000;
         for _ in 0..requests {
-            assert_eq!(get(&mut conn).unwrap(), (0, 7));
+            assert_eq!(get(&mut conn).unwrap(), 7);
         }
-        let after = CORE_ALLOCS[0].load(Ordering::Relaxed);
+        let after = served(addr.port(), 0).allocations;
         stop(workers, Instant::now());
         println!(
             "core thread allocations over {requests} keep-alive requests: {}",
@@ -924,8 +932,8 @@ mod tests {
         let workers = spawn_workers(&[0], generation(1, &[a, b])).unwrap();
         let mut on_a = connect(a);
         let mut on_b = connect(b);
-        assert_eq!(get(&mut on_a).unwrap(), (0, 1));
-        assert_eq!(get(&mut on_b).unwrap(), (0, 1));
+        assert_eq!(get(&mut on_a).unwrap(), 1);
+        assert_eq!(get(&mut on_b).unwrap(), 1);
 
         let install = |generation: Arc<Generation>| {
             let (done, failures) = oneshot::channel();
@@ -942,31 +950,31 @@ mod tests {
             std::net::TcpStream::connect(a).is_err(),
             "the removed listener is closed"
         );
-        assert_eq!(
-            get(&mut on_b).unwrap(),
-            (0, 2),
-            "kept listener, next request"
+        assert_eq!(get(&mut on_b).unwrap(), 2, "kept listener, next request");
+        std::io::Write::write_all(&mut on_a, b"GET / HTTP/1.1\r\nHost: test\r\n\r\n").unwrap();
+        let (head, _) = read_response(&mut on_a).unwrap();
+        assert!(
+            head.starts_with("HTTP/1.1 404 Not Found\r\n")
+                && head.contains("\r\nconnection: close\r\n"),
+            "the new plan has no site for a connection of the removed listener: {head}"
         );
+        let mut rest = Vec::new();
         assert_eq!(
-            get(&mut on_a).unwrap(),
-            (0, 2),
-            "a connection of a removed listener keeps running"
+            std::io::Read::read_to_end(&mut on_a, &mut rest).unwrap(),
+            0,
+            "and the connection is closed"
         );
-        assert_eq!(get(&mut connect(c)).unwrap(), (0, 2), "added listener");
+        assert_eq!(get(&mut connect(c)).unwrap(), 2, "added listener");
 
         let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let busy = taken.local_addr().unwrap();
         let failures = install(super::testing::generation(3, &[b, c, busy]));
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].addr, busy);
-        assert_eq!(
-            get(&mut on_b).unwrap(),
-            (0, 3),
-            "other listeners keep serving"
-        );
+        assert_eq!(get(&mut on_b).unwrap(), 3, "other listeners keep serving");
         drop(taken);
         assert!(install(super::testing::generation(4, &[b, c, busy])).is_empty());
-        assert_eq!(get(&mut connect(busy)).unwrap(), (0, 4), "bound on retry");
+        assert_eq!(get(&mut connect(busy)).unwrap(), 4, "bound on retry");
         stop(workers, Instant::now());
     }
 
@@ -1009,9 +1017,9 @@ mod tests {
 
     #[test]
     fn regex_caches_follow_the_requested_plan() {
-        let mut old = plan(1, &[]);
+        let mut old = plan(1, &[free_addr()]);
         old.regexes = vec![regex_automata::meta::Regex::new("a(b)").unwrap()].into();
-        let mut new = plan(2, &[]);
+        let mut new = plan(2, &[free_addr()]);
         new.regexes = vec![
             regex_automata::meta::Regex::new("x").unwrap(),
             regex_automata::meta::Regex::new("(y)(z)").unwrap(),

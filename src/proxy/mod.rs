@@ -2,56 +2,96 @@
 //! upstream connection for the duration of the exchange: checked out of the core-local pool,
 //! written and read inline, checked back in when the response body ends cleanly.
 //!
-//! Retry: a pooled connection that fails before any response byte arrived (the origin closed
-//! it while idle) is retried once on a freshly dialled connection, if the method is idempotent
-//! or the body is replayable. Never otherwise.
+//! Retry: a pooled connection that fails before any byte of the response arrived (the origin
+//! closed it while idle) is retried once on a freshly dialled connection, when the method is
+//! idempotent and no body byte was consumed. Never otherwise.
 //!
 //! Errors map to statuses that go through the site's error routes: dial failure or reset
-//! before the head -> 502, response-header timeout -> 504.
+//! before the head -> 502, dial or response-header timeout -> 504.
+//!
+//! A client that goes away is noticed while its request body is being read and while a
+//! response body is being relayed, and closes the origin's connection. It is not noticed
+//! while the origin is still producing its response head.
 
+pub(crate) mod conn;
 pub(crate) mod pool;
 pub(crate) mod relay;
+pub(crate) mod timer;
+pub(crate) mod tls;
 
-use crate::body::RequestBody;
-use crate::exchange::Exchange;
-use crate::msg::Status;
-use crate::net::Transport;
+pub(crate) use conn::{UpstreamConn, UpstreamIo};
+
+use crate::body::{Body, RequestBody};
+use crate::exchange::{Exchange, Proto};
+use crate::msg::{Known, Method, ResponseHead, Status, Version};
+use crate::net::{Socket, Transport};
 use crate::pipeline::Response;
-use crate::plan::{ProxyPlan, UpstreamId, UpstreamPlan};
-use crate::proto::h1::client::{self, UpFraming};
-use crate::proto::h1::codec::{Chunked, Framing};
+use crate::plan::{OriginAddr, ProxyPlan, UpstreamPlan};
+use crate::proto::h1::client;
+use crate::proto::h1::codec::{self, Limits, OutFraming, Parsed};
 use crate::runtime::{Core, CoreSnapshot};
-use bytes::BytesMut;
+use bytes::{Buf, Bytes, BytesMut};
+use relay::{Sent, Tracker};
+use rustls::pki_types::ServerName;
+use smallvec::SmallVec;
+use std::future::poll_fn;
+use std::io::{self, IoSlice};
+use std::net::{SocketAddr, ToSocketAddrs};
+use std::task::Poll;
 use std::time::{Duration, Instant};
+use timer::Deadline;
 
-/// A connection to an origin. Owned by exactly one request while checked out, by the core's
-/// pool while idle; never shared.
-pub(crate) struct UpstreamConn {
-    pub io: Transport,
-    /// Lent from the core's buffer pool while checked out; `None` while pooled.
-    pub buf: Option<BytesMut>,
-    pub upstream: UpstreamId,
-    /// Plan generation it was dialled under; a conn from an older generation whose origin
-    /// changed is closed instead of pooled.
-    pub generation: u64,
-    pub idle_since: Instant,
-    pub requests: u32,
-}
+/// Field slots of the head parser: a response may carry as many fields as it can take.
+const MAX_RESPONSE_FIELDS: u16 = 256;
 
 /// The response body still on the upstream connection.
 pub(crate) struct UpstreamBody {
     pub conn: UpstreamConn,
-    pub framing: Framing,
-    pub chunked: Chunked,
-    pub remaining: u64,
-    /// The origin allows reuse (no `Connection: close`, HTTP/1.1, framing not EOF).
+    /// Follows the body through the connection's bytes, those in `conn.buf` included.
+    pub track: Tracker,
+    /// The origin allows reuse (no `Connection: close`, HTTP/1.1, framing not EOF) and got
+    /// the whole request.
     pub reusable: bool,
 }
 
 impl UpstreamBody {
+    /// The body's length, when the origin declared one.
+    pub fn len(&self) -> Option<u64> {
+        self.track.remaining()
+    }
+
     /// Ends the body: back to the pool if fully read and reusable, else closed.
     pub fn finish(self, core: &Core) {
-        todo!()
+        let UpstreamBody {
+            mut conn,
+            track,
+            reusable,
+        } = self;
+        let leftover = !conn.buf.is_empty();
+        core.bufs.put(std::mem::take(&mut conn.buf));
+        if !reusable || !track.ended() || leftover {
+            return;
+        }
+        let snap = core.snapshot();
+        if conn.generation == snap.plan.generation {
+            let up = &snap.plan.upstreams[conn.upstream.0 as usize];
+            core.upstreams.checkin(conn, up);
+        }
+    }
+
+    /// The next piece of body data, without chunk syntax; `None` at the end.
+    pub async fn next_chunk(&mut self) -> io::Result<Option<Bytes>> {
+        let UpstreamBody { conn, track, .. } = self;
+        loop {
+            let data = relay::take_data(track, &mut conn.buf)
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+            if data.is_some() || track.ended() {
+                return Ok(data);
+            }
+            if conn.io.read(&mut conn.buf).await? == 0 && !track.close() {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+        }
     }
 }
 
@@ -63,12 +103,12 @@ pub(crate) struct Upgrade {
 
 #[derive(Debug)]
 pub(crate) enum ProxyError {
-    Dial(std::io::Error),
+    Dial(io::Error),
     DialTimeout,
-    Tls(std::io::Error),
+    Tls(io::Error),
     ResponseHeaderTimeout,
     /// Reset or EOF before a complete response head.
-    Upstream(std::io::Error),
+    Upstream(io::Error),
     BadResponse,
     /// The client went away while the request body was being forwarded.
     ClientGone,
@@ -98,43 +138,180 @@ pub(crate) async fn forward(
 ) -> Result<Response, ProxyError> {
     let up = &snap.plan.upstreams[plan.upstream.0 as usize];
     let upgrade = wants_upgrade(ex);
-    client::write_request_head(ex, plan, up, up_framing(&body), upgrade);
+    client::write_request_head(ex, plan, up_framing(&body), upgrade);
 
-    let mut fresh = false;
+    let mut pooled = core.upstreams.checkout(up.id);
     loop {
-        let conn = match (fresh, core.upstreams.checkout(up.id, Instant::now())) {
-            (false, Some(conn)) => conn,
-            _ => {
-                fresh = true;
-                dial(core, up, plan.dial_timeout).await?
-            }
+        let reused = pooled.is_some();
+        let mut conn = match pooled.take() {
+            Some(conn) => conn,
+            None => dial(core, up, snap.plan.generation, plan.dial_timeout).await?,
         };
-        match attempt(core, plan, ex, &mut body, conn).await {
+        conn.buf = core.bufs.take();
+        match attempt(core, snap, plan, ex, &mut body, conn, upgrade).await {
             Ok(resp) => return Ok(resp),
             Err(Failed {
-                error,
-                replayable: true,
-            }) if !fresh && (ex.req.method.idempotent() || body.replayable()) => {
-                fresh = true;
-            }
+                replayable: true, ..
+            }) if reused && ex.req.method.idempotent() && body.replayable() => {}
             Err(Failed { error, .. }) => return Err(error),
         }
     }
 }
 
 /// One try on one connection. The connection moves into the response body (or the upgrade)
-/// on success and is dropped (closed) on failure.
+/// on success and is closed on failure.
 async fn attempt(
     core: &Core,
+    snap: &CoreSnapshot,
     plan: &ProxyPlan,
     ex: &mut Exchange,
     body: &mut RequestBody<'_>,
-    conn: UpstreamConn,
+    mut conn: UpstreamConn,
+    upgrade: bool,
 ) -> Result<Response, Failed> {
-    // writev(ex.out + buffered body) -> relay::copy_request (or chunk loop for h2/h3 bodies)
-    // -> read head with plan.response_header_timeout -> codec::parse_response into a
-    // ResponseHead -> 101: Response { upgrade } / else Body::Upstream(UpstreamBody { conn, .. })
-    todo!()
+    let sent = match body {
+        RequestBody::H1(body) if !body.state.is_empty() => {
+            relay::copy_request(core, &ex.out, body, &mut conn).await
+        }
+        RequestBody::Empty | RequestBody::H1(_) => {
+            // A failed write shows as a failed read of the response just below.
+            let _ = conn
+                .io
+                .write_all_vectored(&mut [IoSlice::new(&ex.out)])
+                .await;
+            Ok(Sent::All)
+        }
+        body => send_chunks(&ex.out, body, &mut conn).await,
+    };
+    let sent = match sent {
+        Ok(sent) => sent,
+        Err(_) => return Err(conn.fail(core, ProxyError::ClientGone)),
+    };
+
+    let limits = Limits {
+        max_head_bytes: snap.plan.server.max_head_bytes,
+        max_header_fields: MAX_RESPONSE_FIELDS,
+    };
+    let mut head = ex.response_head(Status::OK);
+    let read = read_head(
+        &mut conn,
+        &limits,
+        ex.req.method,
+        plan.response_header_timeout,
+        &mut head,
+    )
+    .await;
+    let (framing, keep_alive) = match read {
+        Ok(read) => read,
+        Err(error) => {
+            ex.recycle(head);
+            return Err(conn.fail(core, error));
+        }
+    };
+
+    if head.status == Status::SWITCHING_PROTOCOLS {
+        if !upgrade {
+            ex.recycle(head);
+            return Err(conn.fail(core, ProxyError::BadResponse));
+        }
+        return Ok(Response {
+            head,
+            body: Body::Empty,
+            upgrade: Some(Upgrade {
+                conn,
+                idle: plan.tunnel_idle,
+            }),
+            local: false,
+        });
+    }
+
+    conn.requests += 1;
+    let body = UpstreamBody {
+        conn,
+        track: Tracker::new(framing),
+        reusable: keep_alive && sent == Sent::All,
+    };
+    let body = if body.track.ended() {
+        body.finish(core);
+        Body::Empty
+    } else {
+        Body::Upstream(body)
+    };
+    Ok(Response {
+        head,
+        body,
+        upgrade: None,
+        local: false,
+    })
+}
+
+/// Reads the origin's final response head into `head`, skipping interim (1xx) responses.
+/// The parsed head is cut off the connection's buffer; body bytes that came with it stay.
+async fn read_head(
+    conn: &mut UpstreamConn,
+    limits: &Limits,
+    method: Method,
+    timeout: Option<Duration>,
+    head: &mut ResponseHead,
+) -> Result<(codec::Framing, bool), ProxyError> {
+    let UpstreamConn { io, buf, watch, .. } = conn;
+    watch.set(timeout);
+    loop {
+        if !buf.is_empty() {
+            match codec::parse_response(buf, limits, method, head) {
+                Ok(Parsed::Complete {
+                    head_len,
+                    framing,
+                    extra,
+                }) => {
+                    buf.advance(head_len);
+                    let interim =
+                        head.status.code() < 200 && head.status != Status::SWITCHING_PROTOCOLS;
+                    if interim {
+                        continue;
+                    }
+                    return Ok((framing, extra.keep_alive));
+                }
+                Ok(Parsed::Partial) => {}
+                Err(_) => return Err(ProxyError::BadResponse),
+            }
+        }
+        let read = io.read(buf);
+        tokio::pin!(read);
+        let n = poll_fn(|cx| match read.as_mut().poll(cx) {
+            Poll::Ready(read) => Poll::Ready(read.map_err(ProxyError::Upstream)),
+            Poll::Pending => watch
+                .poll_expired(cx)
+                .map(|()| Err(ProxyError::ResponseHeaderTimeout)),
+        })
+        .await?;
+        if n == 0 {
+            return Err(ProxyError::Upstream(io::ErrorKind::UnexpectedEof.into()));
+        }
+    }
+}
+
+/// A request body that arrives as data chunks (h2, h3), sent with a length when the client
+/// declared one and chunked otherwise. The error is the client's.
+async fn send_chunks(
+    mut head: &[u8],
+    body: &mut RequestBody<'_>,
+    conn: &mut UpstreamConn,
+) -> io::Result<Sent> {
+    let chunked = body.len().is_none();
+    let mut size = [0u8; 18];
+    loop {
+        let chunk = body.next_chunk().await?;
+        let data = chunk.as_deref().unwrap_or_default();
+        let mut slices = relay::framed(head, data, chunked, chunk.is_none(), &mut size);
+        if conn.io.write_all_vectored(&mut slices).await.is_err() {
+            return Ok(Sent::Interrupted);
+        }
+        head = &[];
+        if chunk.is_none() {
+            return Ok(Sent::All);
+        }
+    }
 }
 
 /// `replayable`: nothing of the response had arrived, so the request may be sent again.
@@ -143,21 +320,110 @@ struct Failed {
     replayable: bool,
 }
 
+impl UpstreamConn {
+    /// Closes a connection whose exchange failed, giving its buffer back.
+    fn fail(mut self, core: &Core, error: ProxyError) -> Failed {
+        let replayable = self.buf.is_empty() && matches!(error, ProxyError::Upstream(_));
+        core.bufs.put(std::mem::take(&mut self.buf));
+        Failed { error, replayable }
+    }
+}
+
+/// An HTTP/1.1 GET with `Connection: upgrade` and an Upgrade field.
 fn wants_upgrade(ex: &Exchange) -> bool {
-    todo!("h1 request with Connection: upgrade and an Upgrade header")
+    let fields = &ex.req.fields;
+    ex.conn.proto == Proto::H1
+        && ex.req.version == Version::Http11
+        && ex.req.method == Method::Get
+        && fields.get(Known::Upgrade).is_some_and(|v| !v.is_empty())
+        && fields.has_token(Known::Connection, b"upgrade")
 }
 
-fn up_framing(body: &RequestBody<'_>) -> UpFraming {
-    todo!()
+/// Framing of the request body as sent upstream: an h1 body keeps the client's framing (a
+/// chunked body passes through with its chunk syntax), a body that arrives as data chunks is
+/// chunked here unless its length is known.
+fn up_framing(body: &RequestBody<'_>) -> OutFraming {
+    match body {
+        RequestBody::Empty => OutFraming::None,
+        RequestBody::H1(body) => match body.state.track.framing() {
+            codec::Framing::Length(n) => OutFraming::Length(n),
+            codec::Framing::Chunked => OutFraming::ChunkedPassthrough,
+            codec::Framing::None | codec::Framing::UntilClose => OutFraming::None,
+        },
+        body => body.len().map_or(OutFraming::Chunked, OutFraming::Length),
+    }
 }
 
-/// Dials an origin: resolve (core cache, `getaddrinfo` on the blocking pool on a miss), TCP
-/// connect with TCP_NODELAY within the dial timeout, TLS handshake when `up.tls` (session
-/// resumption through the client config's cache).
+/// Dials an origin within `timeout`: resolve (core cache, `getaddrinfo` on the blocking pool
+/// on a miss), TCP connect with TCP_NODELAY, TLS handshake when `up.tls` (sessions resume
+/// through the client config's cache).
 pub(crate) async fn dial(
     core: &Core,
     up: &UpstreamPlan,
+    generation: u64,
     timeout: Duration,
 ) -> Result<UpstreamConn, ProxyError> {
-    todo!()
+    let io = tokio::time::timeout(timeout, connect(core, up))
+        .await
+        .map_err(|_| ProxyError::DialTimeout)??;
+    Ok(UpstreamConn {
+        io,
+        buf: BytesMut::new(),
+        upstream: up.id,
+        generation,
+        idle_since: Instant::now(),
+        requests: 0,
+        watch: Deadline::default(),
+    })
+}
+
+async fn connect(core: &Core, up: &UpstreamPlan) -> Result<UpstreamIo, ProxyError> {
+    let (sock, addr) = match up.addr {
+        OriginAddr::Ip(addr) => (Socket::connect(addr).await.map_err(ProxyError::Dial)?, addr),
+        OriginAddr::Name => connect_named(core, up).await?,
+    };
+    let Some(tls) = &up.tls else {
+        return Ok(UpstreamIo::Plain(Transport::Plain(sock)));
+    };
+    let name = match &tls.server_name {
+        Some(name) => ServerName::try_from(name.to_string())
+            .map_err(|e| ProxyError::Tls(io::Error::other(e)))?,
+        None => ServerName::IpAddress(addr.ip().into()),
+    };
+    let config = core.upstreams.client_tls(tls.verify);
+    let stream = tls::ClientStream::connect(sock, config, name)
+        .await
+        .map_err(ProxyError::Tls)?;
+    Ok(UpstreamIo::Tls(Box::new(stream)))
+}
+
+/// Connects to the first address of the origin's name that takes the connection, and keeps
+/// that address first for the next dial.
+async fn connect_named(core: &Core, up: &UpstreamPlan) -> Result<(Socket, SocketAddr), ProxyError> {
+    let addrs = match core.upstreams.resolved(up) {
+        Some(addrs) => addrs,
+        None => {
+            let target = (up.host.to_string(), up.port);
+            let resolved =
+                tokio::task::spawn_blocking(move || target.to_socket_addrs().map(Vec::from_iter))
+                    .await
+                    .map_err(|e| ProxyError::Dial(io::Error::other(e)))?
+                    .map_err(ProxyError::Dial)?;
+            SmallVec::from_vec(resolved)
+        }
+    };
+    let mut last = io::Error::from(io::ErrorKind::NotFound);
+    for (i, &addr) in addrs.iter().enumerate() {
+        match Socket::connect(addr).await {
+            Ok(sock) => {
+                let mut addrs = addrs.clone();
+                addrs.swap(0, i);
+                core.upstreams.remember(up, addrs);
+                return Ok((sock, addr));
+            }
+            Err(e) => last = e,
+        }
+    }
+    core.upstreams.forget(up);
+    Err(ProxyError::Dial(last))
 }
