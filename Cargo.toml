@@ -43,13 +43,23 @@ rustc-hash = "2.1"
 zstd = { version = "0.14.4", default-features = false }
 flate2 = { version = "1.1.11", default-features = false, features = ["zlib-rs"] }
 
+[features]
+# Codec entry points for fuzz/ and benches/; not part of the API.
+internals = []
+
 [dev-dependencies]
 proptest = "1.12"
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 tempfile = "3.27"
 # examples/bench-backend.rs
 hyper = { version = "1.12", features = ["server", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net"] }
+
+[[bench]]
+name = "codec"
+harness = false
+required-features = ["internals"]
 
 [profile.release]
 lto = "fat"

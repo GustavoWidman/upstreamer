@@ -58,6 +58,11 @@ use std::path::PathBuf;
 
 pub use plan::Diagnostic;
 
+/// Codec entry points for the fuzz targets and benchmarks; not part of the API.
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub use proto::h1::codec::harness as codec;
+
 /// Options of `upstreamer run`.
 pub struct RunOptions {
     /// The JSON config the NixOS module wrote (`/etc/upstreamer/config.json`). Read again on

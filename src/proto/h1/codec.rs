@@ -684,6 +684,280 @@ pub(crate) fn write_request_head(
 /// had `Expect: 100-continue` (Expect is not forwarded).
 pub(crate) const CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
 
+/// Codec entry points for the fuzz targets and benchmarks (`internals` feature). The `check_*`
+/// functions panic when the codec breaks one of its own invariants on the given input.
+#[cfg(feature = "internals")]
+pub mod harness {
+    use super::*;
+    use crate::plan::ServerParams;
+
+    fn limits() -> Limits {
+        let p = ServerParams::default();
+        Limits {
+            max_head_bytes: p.max_head_bytes,
+            max_header_fields: p.max_header_fields,
+        }
+    }
+
+    /// Limits for parsing what the codec wrote: the receiver applies its own, and the writer
+    /// may add a field (Host, Connection, Date) to a head that was at the cap.
+    const WRITTEN: Limits = Limits {
+        max_head_bytes: u32::MAX,
+        max_header_fields: FIELD_SLOTS as u16,
+    };
+
+    fn out_framing(f: Framing) -> OutFraming {
+        match f {
+            Framing::None => OutFraming::None,
+            Framing::Length(n) => OutFraming::Length(n),
+            Framing::Chunked => OutFraming::ChunkedPassthrough,
+            Framing::UntilClose => OutFraming::Chunked,
+        }
+    }
+
+    fn end_to_end(f: &Fields) -> impl Iterator<Item = (&[u8], &[u8])> {
+        f.live()
+            .filter(|&(_, _, t)| !t.hop_by_hop() && t != Known::ContentLength && t != Known::Expect)
+            .map(|(n, v, _)| (n, v))
+    }
+
+    /// Request heads and an output buffer reused across calls, as a connection reuses its
+    /// exchange.
+    pub struct Requests {
+        limits: Limits,
+        head: RequestHead,
+        again: RequestHead,
+        out: Vec<u8>,
+    }
+
+    impl Default for Requests {
+        fn default() -> Self {
+            Requests {
+                limits: limits(),
+                head: RequestHead::new(),
+                again: RequestHead::new(),
+                out: Vec::new(),
+            }
+        }
+    }
+
+    impl Requests {
+        /// Parses a request head; its length when complete and valid.
+        pub fn parse(&mut self, buf: &[u8]) -> Option<usize> {
+            match parse_request(buf, &self.limits, &mut self.head) {
+                Ok(Parsed::Complete { head_len, .. }) => Some(head_len),
+                _ => None,
+            }
+        }
+
+        /// Parses a request head and serialises it for the upstream; the bytes written.
+        pub fn forward(&mut self, buf: &[u8]) -> usize {
+            let Ok(Parsed::Complete { framing, .. }) =
+                parse_request(buf, &self.limits, &mut self.head)
+            else {
+                return 0;
+            };
+            self.out.clear();
+            write_request_head(&self.head, out_framing(framing), false, &mut self.out);
+            self.out.len()
+        }
+
+        /// A head the codec accepts is forwarded as bytes that parse back to the same request:
+        /// method, path, host, end-to-end fields and framing.
+        pub fn check(&mut self, buf: &[u8]) {
+            let Ok(Parsed::Complete {
+                head_len, framing, ..
+            }) = parse_request(buf, &self.limits, &mut self.head)
+            else {
+                return;
+            };
+            assert!(head_len <= buf.len().min(self.limits.max_head_bytes as usize));
+            self.out.clear();
+            write_request_head(&self.head, out_framing(framing), false, &mut self.out);
+            let again = parse_request(&self.out, &WRITTEN, &mut self.again);
+            let Ok(Parsed::Complete {
+                head_len: len2,
+                framing: framing2,
+                ..
+            }) = again
+            else {
+                panic!("forwarded head does not parse: {again:?}");
+            };
+            assert_eq!(len2, self.out.len());
+            assert_eq!(framing2, framing);
+            let (a, b) = (&self.head, &self.again);
+            assert_eq!(a.method_bytes(), b.method_bytes());
+            assert_eq!(a.path(), b.path());
+            assert_eq!(a.host(), b.host());
+            if a.target() == crate::msg::Target::Original && a.raw_target().starts_with(b"/") {
+                assert_eq!(a.raw_target(), b.raw_target());
+            }
+            match a.fields.get(Known::Host) {
+                Some(_) => assert!(end_to_end(&a.fields).eq(end_to_end(&b.fields))),
+                None => {
+                    assert_eq!(b.fields.get(Known::Host), Some(a.host()), "Host is added");
+                    let added = |&(n, _): &(&[u8], &[u8])| n != b"host";
+                    assert!(end_to_end(&a.fields).eq(end_to_end(&b.fields).filter(added)));
+                }
+            }
+        }
+    }
+
+    /// Response heads and an output buffer reused across calls.
+    pub struct Responses {
+        limits: Limits,
+        head: ResponseHead,
+        again: ResponseHead,
+        out: Vec<u8>,
+    }
+
+    impl Default for Responses {
+        fn default() -> Self {
+            Responses {
+                limits: limits(),
+                head: ResponseHead::new(Status::OK),
+                again: ResponseHead::new(Status::OK),
+                out: Vec::new(),
+            }
+        }
+    }
+
+    impl Responses {
+        /// Parses an upstream response head to a GET and serialises it for an HTTP/1.1 client;
+        /// the bytes written.
+        pub fn relay(&mut self, buf: &[u8], date: &[u8]) -> usize {
+            let Ok(Parsed::Complete { framing, extra, .. }) =
+                parse_response(buf, &self.limits, Method::Get, &mut self.head)
+            else {
+                return 0;
+            };
+            self.out.clear();
+            write_response_head(
+                &self.head,
+                Version::Http11,
+                out_framing(framing),
+                extra.keep_alive,
+                Some(date),
+                &mut self.out,
+            );
+            self.out.len()
+        }
+
+        /// A response head the codec accepts (as the answer to a GET when `head_request` is
+        /// false, to a HEAD otherwise) is relayed as bytes that parse back to the same status,
+        /// end-to-end fields, framing and persistence. A body read to close is re-framed
+        /// chunked.
+        pub fn check(&mut self, buf: &[u8], head_request: bool) {
+            let method = if head_request {
+                Method::Head
+            } else {
+                Method::Get
+            };
+            let Ok(Parsed::Complete {
+                head_len,
+                framing,
+                extra,
+            }) = parse_response(buf, &self.limits, method, &mut self.head)
+            else {
+                return;
+            };
+            assert!(head_len <= buf.len().min(self.limits.max_head_bytes as usize));
+            self.out.clear();
+            let out = out_framing(framing);
+            write_response_head(
+                &self.head,
+                Version::Http11,
+                out,
+                extra.keep_alive,
+                None,
+                &mut self.out,
+            );
+            let again = parse_response(&self.out, &WRITTEN, method, &mut self.again);
+            let Ok(Parsed::Complete {
+                head_len: len2,
+                framing: framing2,
+                extra: extra2,
+            }) = again
+            else {
+                panic!("relayed head does not parse: {again:?}");
+            };
+            assert_eq!(len2, self.out.len());
+            let expected = match framing {
+                Framing::UntilClose => Framing::Chunked,
+                f => f,
+            };
+            assert_eq!(framing2, expected);
+            assert_eq!(self.head.status, self.again.status);
+            if self.head.status != Status::SWITCHING_PROTOCOLS {
+                assert_eq!(extra2.keep_alive, extra.keep_alive);
+            }
+            assert!(end_to_end(&self.head.fields).eq(end_to_end(&self.again.fields)));
+        }
+    }
+
+    /// Scans a chunked body; where the message ends, if it does.
+    pub fn scan_chunked(input: &[u8]) -> Option<usize> {
+        match Chunked::default().scan(input) {
+            Ok(Scan::End(n)) => Some(n),
+            _ => None,
+        }
+    }
+
+    fn scan_pieces(pieces: &[&[u8]]) -> Result<Option<usize>, ParseError> {
+        let mut c = Chunked::default();
+        let mut offset = 0;
+        for piece in pieces {
+            if let Scan::End(n) = c.scan(piece)? {
+                return Ok(Some(offset + n));
+            }
+            offset += piece.len();
+        }
+        Ok(None)
+    }
+
+    /// `scan` gives the same answer whole and split at any point; `decode` agrees with it,
+    /// returns in-bounds ordered ranges, and its data re-encoded decodes to the same data.
+    pub fn check_chunked(input: &[u8]) {
+        let whole = scan_pieces(&[input]);
+        let cut = input
+            .first()
+            .map_or(0, |&b| usize::from(b) % (input.len() + 1));
+        let (a, b) = input.split_at(cut);
+        assert_eq!(scan_pieces(&[a, b]), whole, "split at {cut}");
+
+        let mut c = Chunked::default();
+        let mut ranges = smallvec::SmallVec::new();
+        let decoded = c.decode(input, &mut ranges);
+        match (&whole, &decoded) {
+            (Ok(Some(end)), Ok((used, true))) => assert_eq!(end, used),
+            (Ok(None), Ok((used, false))) => assert_eq!(*used, input.len()),
+            (Err(e), Err(e2)) => assert_eq!(e, e2),
+            _ => panic!("scan {whole:?} and decode {decoded:?} disagree"),
+        }
+        let mut last = 0;
+        let mut data = Vec::new();
+        for r in &ranges {
+            assert!(last <= r.start && r.start <= r.end && r.end <= input.len());
+            last = r.end;
+            data.extend_from_slice(&input[r.clone()]);
+        }
+        if let Ok((_, true)) = decoded {
+            let mut body = Vec::new();
+            if !data.is_empty() {
+                body.extend_from_slice(format!("{:x}\r\n", data.len()).as_bytes());
+                body.extend_from_slice(&data);
+                body.extend_from_slice(b"\r\n");
+            }
+            body.extend_from_slice(b"0\r\n\r\n");
+            let mut ranges = smallvec::SmallVec::new();
+            let (used, ended) = Chunked::default().decode(&body, &mut ranges).unwrap();
+            assert!(ended && used == body.len());
+            let again: Vec<u8> = ranges.into_iter().flat_map(|r| body[r].to_vec()).collect();
+            assert_eq!(again, data);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
