@@ -9,7 +9,9 @@
 pub(crate) mod buf;
 pub(crate) mod listen;
 
-use bytes::BytesMut;
+use crate::tls::record::{MAX_RECORD, Opened, Session, record_len};
+use buf::BufPool;
+use bytes::{Buf, BytesMut};
 use std::io::{self, IoSlice};
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
@@ -145,6 +147,11 @@ impl Socket {
         }
         Ok(sent)
     }
+    /// One nonblocking write that never waits: for a last record (close_notify, an alert) to a
+    /// peer that may have stopped reading.
+    pub fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
+        sys_writev(self.fd.get_ref().as_raw_fd(), &[IoSlice::new(buf)])
+    }
     pub fn fd(&self) -> BorrowedFd<'_> {
         self.fd.get_ref().as_fd()
     }
@@ -254,34 +261,295 @@ pub(crate) enum Transport {
     Plain(Socket),
     /// TLS records handled by the kernel after the handshake; plaintext to us.
     Ktls(Socket),
-    /// Userspace rustls (QUIC is separate; this is TCP only). Server or client side.
+    /// Userspace TLS over TCP (QUIC is separate), after the handshake.
     Tls(Box<TlsStream>),
 }
 
-/// Userspace TLS. The implementation drives rustls's unbuffered API so records are decrypted
-/// and encrypted in our buffers (no per-record allocation inside rustls).
+thread_local! {
+    /// Ciphertext buffers of this core's TLS connections, lent while records are in flight.
+    static CIPHERTEXT: BufPool = BufPool::default();
+}
+
+/// A 64 KiB ciphertext buffer from this core's pool: room for three records of the largest
+/// size a peer may send.
+pub(crate) fn take_ciphertext() -> BytesMut {
+    CIPHERTEXT.with(BufPool::take_large)
+}
+
+pub(crate) fn put_ciphertext(buf: BytesMut) {
+    let _ = CIPHERTEXT.try_with(|pool| pool.put(buf));
+}
+
+/// Userspace TLS: records sealed and opened in place in pooled buffers by [`Session`]. An idle
+/// connection holds no buffer, only its keys.
 pub(crate) struct TlsStream {
     pub sock: Socket,
-    pub conn: rustls::Connection,
-    /// Ciphertext read buffer; released when the connection goes idle.
-    pub rx: Option<BytesMut>,
+    session: Session,
+    /// Received bytes: `plain` opened bytes the reader has not taken, the `trailer` of the
+    /// record they came from, then sealed records (the last one possibly partial). `None` once
+    /// all of it is taken.
+    rx: Option<BytesMut>,
+    plain: usize,
+    trailer: usize,
+    /// close_notify received: reads report the end of the stream.
+    peer_closed: bool,
+    /// Sealed records not yet written, from the poll-based writer.
+    tx: Option<BytesMut>,
+    /// close_notify sealed.
+    closing: bool,
+}
+
+impl TlsStream {
+    /// `rx` holds whatever arrived after the handshake's last record.
+    pub fn new(sock: Socket, session: Session, rx: BytesMut) -> TlsStream {
+        let mut stream = TlsStream {
+            sock,
+            session,
+            rx: Some(rx),
+            plain: 0,
+            trailer: 0,
+            peer_closed: false,
+            tx: None,
+            closing: false,
+        };
+        stream.release_rx();
+        stream
+    }
+
+    async fn read(&mut self, buf: &mut BytesMut) -> io::Result<usize> {
+        if buf.capacity() - buf.len() < MIN_SPARE {
+            buf.reserve(MIN_SPARE);
+        }
+        let n = std::future::poll_fn(|cx| {
+            let mut out = ReadBuf::uninit(buf.spare_capacity_mut());
+            ready!(self.poll_read_plain(cx, &mut out))?;
+            Poll::Ready(Ok::<_, io::Error>(out.filled().len()))
+        })
+        .await?;
+        // SAFETY: `poll_read_plain` initialised the first `n` bytes of the spare capacity.
+        unsafe { buf.set_len(buf.len() + n) };
+        Ok(n)
+    }
+
+    /// Fills `out` with plaintext: what is already opened, then every complete buffered record
+    /// that fits, reading the socket only when nothing was delivered. Delivers nothing at the
+    /// end of the stream (close_notify, or a TCP close between records).
+    fn poll_read_plain(
+        &mut self,
+        cx: &mut Context<'_>,
+        out: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = out.filled().len();
+        loop {
+            if self.plain > 0 {
+                let rx = self.rx.as_mut().expect("opened bytes live in rx");
+                let n = self.plain.min(out.remaining());
+                out.put_slice(&rx[..n]);
+                rx.advance(n);
+                self.plain -= n;
+                if self.plain > 0 {
+                    return Poll::Ready(Ok(()));
+                }
+                rx.advance(self.trailer);
+                self.trailer = 0;
+            }
+            if out.remaining() == 0 || self.peer_closed {
+                self.release_rx();
+                return Poll::Ready(Ok(()));
+            }
+            if self.open_next()? {
+                continue;
+            }
+            if out.filled().len() > before {
+                self.release_rx();
+                return Poll::Ready(Ok(()));
+            }
+            let rx = self.rx.get_or_insert_with(take_ciphertext);
+            // Room for the largest record behind a partial one; with a pool buffer this moves
+            // the partial record to the front instead of growing.
+            if rx.capacity() - rx.len() < MAX_RECORD {
+                rx.reserve(MAX_RECORD);
+            }
+            let mut spare = ReadBuf::uninit(rx.spare_capacity_mut());
+            let polled = self.sock.poll_read_buf(cx, &mut spare);
+            let n = spare.filled().len();
+            // SAFETY: the kernel initialised `n` bytes of the spare capacity.
+            unsafe { rx.set_len(rx.len() + n) };
+            match polled {
+                Poll::Ready(result) => result?,
+                Poll::Pending => {
+                    // A reader parked on an idle connection (the h2 driver) holds no buffer.
+                    self.release_rx();
+                    return Poll::Pending;
+                }
+            }
+            if n == 0 {
+                if rx.is_empty() {
+                    self.release_rx();
+                    return Poll::Ready(Ok(()));
+                }
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "TCP closed inside a TLS record",
+                )));
+            }
+        }
+    }
+
+    /// Opens the record at the front of `rx` if all of it is there. False when there is none.
+    fn open_next(&mut self) -> io::Result<bool> {
+        let Some(rx) = self.rx.as_mut() else {
+            return Ok(false);
+        };
+        let Some(len) = record_len(rx).map_err(invalid)? else {
+            return Ok(false);
+        };
+        match self.session.open(&mut rx[..len]).map_err(invalid)? {
+            Opened::Data(range) => {
+                rx.advance(range.start);
+                self.plain = range.len();
+                self.trailer = len - range.end;
+            }
+            Opened::Nothing => rx.advance(len),
+            Opened::Closed => {
+                rx.clear();
+                self.peer_closed = true;
+            }
+        }
+        Ok(true)
+    }
+
+    /// True when a read returns without waiting for the socket.
+    fn has_buffered(&self) -> bool {
+        self.plain > 0
+            || self.peer_closed
+            || self
+                .rx
+                .as_deref()
+                .is_some_and(|rx| !matches!(record_len(rx), Ok(None)))
+    }
+
+    fn release_rx(&mut self) {
+        if self.plain == 0 && self.rx.as_ref().is_some_and(|rx| rx.is_empty()) {
+            put_ciphertext(self.rx.take().expect("checked"));
+        }
+    }
+
+    /// Seals and writes all of `bufs`, a pool buffer of records per writev.
+    async fn write_all_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<()> {
+        std::future::poll_fn(|cx| self.poll_flush_tx(cx)).await?;
+        let total = total_len(bufs);
+        let mut tx = take_ciphertext();
+        let mut sealed = 0;
+        let result = async {
+            while sealed < total {
+                sealed += self.session.seal(&mut tx, bufs, sealed).map_err(invalid)?;
+                self.sock
+                    .write_all_vectored(&mut [IoSlice::new(&tx)])
+                    .await?;
+                tx.clear();
+            }
+            Ok(())
+        }
+        .await;
+        put_ciphertext(tx);
+        result
+    }
+
+    /// Accepts what one pool buffer of records holds and starts writing it; the rest of the
+    /// write finishes in a later write or flush.
+    fn poll_write_plain(
+        &mut self,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        ready!(self.poll_flush_tx(cx))?;
+        let mut tx = self.tx.take().unwrap_or_else(take_ciphertext);
+        let sealed = self.session.seal(&mut tx, bufs, 0);
+        self.tx = Some(tx);
+        let sealed = sealed.map_err(invalid)?;
+        if let Poll::Ready(Err(e)) = self.poll_flush_tx(cx) {
+            return Poll::Ready(Err(e));
+        }
+        Poll::Ready(Ok(sealed))
+    }
+
+    fn poll_flush_tx(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let Some(tx) = self.tx.as_mut() else {
+            return Poll::Ready(Ok(()));
+        };
+        while !tx.is_empty() {
+            match ready!(self.sock.poll_writev(cx, &[IoSlice::new(tx)]))? {
+                0 => return Poll::Ready(Err(io::ErrorKind::WriteZero.into())),
+                n => tx.advance(n),
+            }
+        }
+        put_ciphertext(self.tx.take().expect("checked"));
+        Poll::Ready(Ok(()))
+    }
+
+    /// Queues close_notify once.
+    fn seal_close_notify(&mut self) -> io::Result<()> {
+        if !self.closing {
+            self.closing = true;
+            let tx = self.tx.get_or_insert_with(take_ciphertext);
+            self.session.seal_close_notify(tx).map_err(invalid)?;
+        }
+        Ok(())
+    }
+
+    fn poll_shutdown(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.seal_close_notify()?;
+        ready!(self.poll_flush_tx(cx))?;
+        Poll::Ready(self.sock.shutdown_write())
+    }
+
+    /// close_notify and FIN in one attempt that never waits: a peer that stopped reading must
+    /// not hold the connection open.
+    fn close(&mut self) {
+        if self.seal_close_notify().is_ok()
+            && let Some(tx) = self.tx.as_ref()
+        {
+            let _ = self.sock.try_write(tx);
+        }
+        let _ = self.sock.shutdown_write();
+    }
+}
+
+impl Drop for TlsStream {
+    fn drop(&mut self) {
+        if let Some(rx) = self.rx.take() {
+            put_ciphertext(rx);
+        }
+        if let Some(tx) = self.tx.take() {
+            put_ciphertext(tx);
+        }
+    }
+}
+
+fn invalid(e: rustls::Error) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, e)
 }
 
 impl Transport {
     pub async fn read(&mut self, buf: &mut BytesMut) -> io::Result<usize> {
         match self {
             Transport::Plain(sock) | Transport::Ktls(sock) => sock.read(buf).await,
-            Transport::Tls(_) => todo!("userspace TLS records"),
+            Transport::Tls(tls) => tls.read(buf).await,
         }
     }
     pub async fn write_all_vectored(&mut self, bufs: &mut [IoSlice<'_>]) -> io::Result<()> {
         match self {
             Transport::Plain(sock) | Transport::Ktls(sock) => sock.write_all_vectored(bufs).await,
-            Transport::Tls(_) => todo!("userspace TLS records"),
+            Transport::Tls(tls) => tls.write_all_vectored(bufs).await,
         }
     }
+    /// Waits until a read would not wait. Holds no buffer while waiting.
     pub async fn readable(&self) -> io::Result<()> {
-        self.socket().readable().await
+        match self {
+            Transport::Tls(tls) if tls.has_buffered() => Ok(()),
+            _ => self.socket().readable().await,
+        }
     }
     /// `Some` when bytes on the fd are the application's plaintext (cleartext or kTLS), i.e.
     /// sendfile/splice may target or source it.
@@ -303,7 +571,7 @@ impl Transport {
             Transport::Plain(sock) | Transport::Ktls(sock) => {
                 let _ = sock.shutdown_write();
             }
-            Transport::Tls(_) => todo!("close_notify, then shutdown"),
+            Transport::Tls(mut tls) => tls.close(),
         }
     }
 }
@@ -315,9 +583,9 @@ impl AsyncRead for Transport {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        match &*self {
+        match self.get_mut() {
             Transport::Plain(sock) | Transport::Ktls(sock) => sock.poll_read_buf(cx, buf),
-            Transport::Tls(_) => todo!("userspace TLS records"),
+            Transport::Tls(tls) => tls.poll_read_plain(cx, buf),
         }
     }
 }
@@ -335,24 +603,24 @@ impl AsyncWrite for Transport {
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        match &*self {
+        match self.get_mut() {
             Transport::Plain(sock) | Transport::Ktls(sock) => sock.poll_writev(cx, bufs),
-            Transport::Tls(_) => todo!("userspace TLS records"),
+            Transport::Tls(tls) => tls.poll_write_plain(cx, bufs),
         }
     }
     fn is_write_vectored(&self) -> bool {
         true
     }
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match &*self {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
             Transport::Plain(_) | Transport::Ktls(_) => Poll::Ready(Ok(())),
-            Transport::Tls(_) => todo!("flush buffered TLS records"),
+            Transport::Tls(tls) => tls.poll_flush_tx(cx),
         }
     }
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match &*self {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
             Transport::Plain(sock) | Transport::Ktls(sock) => Poll::Ready(sock.shutdown_write()),
-            Transport::Tls(_) => todo!("close_notify, then shutdown"),
+            Transport::Tls(tls) => tls.poll_shutdown(cx),
         }
     }
 }

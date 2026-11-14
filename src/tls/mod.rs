@@ -14,24 +14,29 @@
 //! trigger, idempotent.
 
 pub(crate) mod ktls;
+pub(crate) mod record;
 
 use crate::exchange::Proto;
-use crate::net::{Socket, Transport};
+use crate::net::{self, Socket, TlsStream, Transport};
 use crate::plan::CertSource;
 use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
+use bytes::{Buf, BytesMut};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::{ClientHello, NoServerSessionStorage, ProducesTickets, ResolvesServerCert};
+use rustls::server::{ServerConnectionData, UnbufferedServerConnection};
 use rustls::sign::CertifiedKey;
+use rustls::unbuffered::{ConnectionState, EncodeError, EncodeTlsData, InsufficientSizeError};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use std::collections::HashMap;
 use std::fmt;
+use std::io::{self, IoSlice};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// SNI name -> certificate. Immutable once built; replaced whole at reload. Every name of
 /// every source has a slot: from files, or self-signed while no usable pair was ever loaded.
@@ -424,12 +429,10 @@ pub(crate) fn server_config(
 ) -> Arc<rustls::ServerConfig> {
     let versions: &[&rustls::SupportedProtocolVersion] =
         &[&rustls::version::TLS13, &rustls::version::TLS12];
-    Arc::new(base_server_config(
-        store,
-        tickets,
-        versions,
-        &[b"h2", b"http/1.1"],
-    ))
+    let mut config = base_server_config(store, tickets, versions, &[b"h2", b"http/1.1"]);
+    // The record layer (and kTLS) take the traffic keys over from rustls after the handshake.
+    config.enable_secret_extraction = true;
+    Arc::new(config)
 }
 
 /// The QUIC side of the same: ALPN [h3], TLS 1.3 only, same resolver and tickets.
@@ -570,14 +573,158 @@ pub(crate) enum TlsError {
     Timeout,
 }
 
-/// Server handshake on an accepted socket (handshake timeout = header timeout). Returns a
-/// userspace `Transport::Tls` and the ALPN protocol; offload happens later, see
-/// [`ktls::offload_point`].
+impl From<rustls::Error> for TlsError {
+    fn from(e: rustls::Error) -> TlsError {
+        TlsError::Handshake(e)
+    }
+}
+
+impl From<std::io::Error> for TlsError {
+    fn from(e: std::io::Error) -> TlsError {
+        TlsError::Io(e)
+    }
+}
+
+/// The plan's default header timeout.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Server handshake on an accepted socket within [`HANDSHAKE_TIMEOUT`].
 pub(crate) async fn accept(
     sock: Socket,
     config: Arc<rustls::ServerConfig>,
 ) -> Result<(Transport, Proto), TlsError> {
-    todo!()
+    accept_within(sock, config, HANDSHAKE_TIMEOUT).await
+}
+
+/// Server handshake on an accepted socket. Returns a userspace `Transport::Tls` and the
+/// protocol ALPN chose (h2, else HTTP/1.1); offload happens later, see
+/// [`ktls::offload_point`]. A client that has not finished within `timeout` is dropped, which
+/// closes its socket.
+pub(crate) async fn accept_within(
+    mut sock: Socket,
+    config: Arc<rustls::ServerConfig>,
+    timeout: Duration,
+) -> Result<(Transport, Proto), TlsError> {
+    let conn = UnbufferedServerConnection::new(config)?;
+    let mut rx = net::take_ciphertext();
+    let mut tx = net::take_ciphertext();
+    let done = tokio::time::timeout(timeout, handshake(&mut sock, conn, &mut rx, &mut tx)).await;
+    net::put_ciphertext(tx);
+    let (conn, proto) = done.map_err(|_| TlsError::Timeout)??;
+    let (secrets, kernel) = conn.dangerous_into_kernel_connection()?;
+    let session = record::Session::new(secrets, kernel)?;
+    Ok((
+        Transport::Tls(Box::new(TlsStream::new(sock, session, rx))),
+        proto,
+    ))
+}
+
+/// Drives rustls's unbuffered server through the handshake, one complete record at a time, so
+/// it stops before any application data that arrived with the client's last flight: those
+/// records stay in `rx` for the record layer. On a handshake error the alert rustls produced is
+/// sent before returning.
+async fn handshake(
+    sock: &mut Socket,
+    mut conn: UnbufferedServerConnection,
+    rx: &mut BytesMut,
+    tx: &mut BytesMut,
+) -> Result<(UnbufferedServerConnection, Proto), TlsError> {
+    loop {
+        let feed = if conn.is_handshaking() {
+            record::record_len(rx)?.unwrap_or(0)
+        } else {
+            0
+        };
+        let status = conn.process_tls_records(&mut rx[..feed]);
+        let discard = status.discard;
+        let next = match status.state {
+            Ok(ConnectionState::EncodeTlsData(mut data)) => {
+                encode(&mut data, tx)?;
+                Next::Process
+            }
+            Ok(ConnectionState::TransmitTlsData(data)) => {
+                data.done();
+                Next::Transmit
+            }
+            Ok(ConnectionState::BlockedHandshake) => Next::Receive,
+            Ok(ConnectionState::WriteTraffic(_)) => Next::Done,
+            Ok(ConnectionState::PeerClosed | ConnectionState::Closed) => {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+            }
+            Ok(_) => return Err(rustls::Error::General("unexpected handshake state".into()).into()),
+            Err(e) => {
+                rx.advance(discard);
+                send_alert(sock, &mut conn, tx);
+                return Err(e.into());
+            }
+        };
+        rx.advance(discard);
+        match next {
+            Next::Process => {}
+            Next::Transmit => {
+                sock.write_all_vectored(&mut [IoSlice::new(tx)]).await?;
+                tx.clear();
+            }
+            Next::Receive if record::record_len(rx)?.is_some() => {}
+            Next::Receive => {
+                if sock.read(rx).await? == 0 {
+                    return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+                }
+            }
+            Next::Done => {
+                let proto = match conn.alpn_protocol() {
+                    Some(b"h2") => Proto::H2,
+                    _ => Proto::H1,
+                };
+                return Ok((conn, proto));
+            }
+        }
+    }
+}
+
+enum Next {
+    Process,
+    Transmit,
+    Receive,
+    Done,
+}
+
+fn encode(
+    data: &mut EncodeTlsData<'_, ServerConnectionData>,
+    tx: &mut BytesMut,
+) -> Result<(), rustls::Error> {
+    let start = tx.len();
+    let mut room = 4096;
+    loop {
+        tx.resize(start + room, 0);
+        match data.encode(&mut tx[start..]) {
+            Ok(n) => {
+                tx.truncate(start + n);
+                return Ok(());
+            }
+            Err(EncodeError::InsufficientSize(InsufficientSizeError { required_size })) => {
+                room = required_size;
+            }
+            Err(EncodeError::AlreadyEncoded) => {
+                tx.truncate(start);
+                return Err(rustls::Error::General(
+                    "handshake record encoded twice".into(),
+                ));
+            }
+        }
+    }
+}
+
+/// Encodes what rustls queued after a failed handshake (its alert) and writes it once, without
+/// waiting for the socket.
+fn send_alert(sock: &Socket, conn: &mut UnbufferedServerConnection, tx: &mut BytesMut) {
+    while let Ok(ConnectionState::EncodeTlsData(mut data)) = conn.process_tls_records(&mut []).state
+    {
+        if encode(&mut data, tx).is_err() {
+            break;
+        }
+    }
+    let _ = sock.try_write(tx);
 }
 
 #[cfg(test)]
