@@ -307,6 +307,9 @@ pub(crate) fn parse_request(
     // origin sees the host this request was routed by. `set_line` accepted its scheme.
     if let Some((_, rest)) = target.split_once("://").filter(|_| !origin_form) {
         let authority = rest.split(['/', '?']).next().unwrap_or_default();
+        if !valid_authority(authority.as_bytes()) {
+            return Err(ParseError::Malformed);
+        }
         head.fields.set_known(Known::Host, authority.as_bytes());
     }
 
@@ -862,6 +865,14 @@ mod tests {
     }
 
     #[test]
+    fn an_absolute_form_authority_must_be_valid() {
+        assert_eq!(
+            req_err(b"GET http://a`b/ HTTP/1.1\r\nHost: a\r\n\r\n"),
+            ParseError::Malformed
+        );
+    }
+
+    #[test]
     fn a_url_in_the_query_is_not_a_host() {
         let (head, ..) = req(b"GET /r?u=http://evil.example/ HTTP/1.1\r\nHost: a\r\n\r\n").unwrap();
         assert_eq!(head.host(), b"a");
@@ -1119,11 +1130,11 @@ mod tests {
     #[test]
     fn fields_named_by_connection_do_not_cross_the_hop() {
         let (head, ..) = req(
-            b"GET / HTTP/1.1\r\nHost: a\r\nConnection: X-Secret, host, upgrade\r\nX-Secret: 1\r\nX-Kept: 2\r\nUpgrade: h2c\r\n\r\n",
+            b"GET / HTTP/1.1\r\nHost: a\r\nConnection: X-Secret, host, upgrade, close\r\nX-Secret: 1\r\nX-Kept: 2\r\nClose: 3\r\nUpgrade: h2c\r\n\r\n",
         )
         .unwrap();
         let names: Vec<_> = fields(&head.fields).into_iter().map(|(n, _)| n).collect();
-        assert_eq!(names, ["host", "connection", "x-kept", "upgrade"]);
+        assert_eq!(names, ["host", "connection", "x-kept", "close", "upgrade"]);
     }
 
     #[test]

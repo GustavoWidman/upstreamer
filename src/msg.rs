@@ -526,6 +526,8 @@ impl Fields {
     /// Removes the fields a received `Connection` names (RFC 9110 §7.6.1), so they never
     /// cross this hop. Hop-by-hop fields stay for the codec to read (the writers never emit
     /// them), and so do Host and the framing fields, which the codec has already interpreted.
+    /// `close` is the connection option of RFC 9112 §9.6, never a field name: the writers
+    /// send it themselves.
     pub fn drop_connection_named(&mut self) {
         let Fields { buf, table } = self;
         for c in 0..table.len() {
@@ -533,7 +535,10 @@ impl Fields {
                 continue;
             }
             for token in table[c].value.get(buf).split(|&b| b == b',').map(trim_ows) {
-                if token.is_empty() || Known::from_lowercase_ci(token).hop_by_hop() {
+                if token.is_empty()
+                    || token.eq_ignore_ascii_case(b"close")
+                    || Known::from_lowercase_ci(token).hop_by_hop()
+                {
                     continue;
                 }
                 for f in table.iter_mut().filter(|f| {
