@@ -36,6 +36,9 @@
       "tls": null
     }
   ],
+  "timeouts": {
+    "shutdown": "10s"
+  },
   "version": 1,
   "workers": null
 }

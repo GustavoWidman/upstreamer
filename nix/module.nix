@@ -23,9 +23,9 @@
       inherit (lib)
         any
         attrValues
+        concatLists
         concatMap
         filter
-        filterAttrs
         genAttrs
         mapAttrsToList
         mkEnableOption
@@ -58,44 +58,81 @@
             serverAliases = mkOption {
               type = types.listOf types.str;
               default = [ ];
-              description = "More host names answered by this virtual host. They join its certificate's names.";
+              example = [ "www.example.com" ];
+              description = ''
+                More host names this virtual host answers. With an ACME certificate, they are
+                added to the certificate's names.
+              '';
             };
 
             tls = {
               enable = mkOption {
                 type = types.bool;
                 default = true;
-                description = "Serve over TLS (HTTPS on TCP, and HTTP/3 on UDP when `http3`). Off: plain HTTP.";
+                description = ''
+                  Serve HTTPS (and HTTP/3 when `http3` is on). The certificate is an ACME one
+                  named by `tls.acmeCert` (by default, one named after `serverName`), or the
+                  files `tls.certFile` and `tls.keyFile`. Off: plain HTTP, and the `tls.*`
+                  certificate options must stay unset.
+                '';
               };
 
               acmeCert = mkOption {
                 type = types.nullOr types.str;
-                default = if config.tls.enable && config.tls.certFile == null then config.serverName else null;
-                defaultText = lib.literalExpression "serverName, when tls.enable and no certFile";
+                default =
+                  if config.tls.enable && config.tls.certFile == null && config.tls.keyFile == null then
+                    config.serverName
+                  else
+                    null;
+                defaultText = lib.literalExpression "serverName, when tls.enable and no certFile or keyFile";
                 example = "example.com";
                 description = ''
-                  The `security.acme.certs` entry this host uses. The module creates it when no
-                  other module does, and adds this host's names to it, so hosts that share a
-                  certificate (www., blog.) only name it here.
+                  Name of the `security.acme.certs` entry this host's certificate comes from. The
+                  module declares that entry (its `domain` defaults to this name), adds the
+                  `serverName` and `serverAliases` of every host that uses it to its
+                  `extraDomainNames`, gives the proxy read access to it and reloads the proxy
+                  when it is renewed. Hosts that share one certificate (`www.`, `blog.`) all name
+                  it here; a wildcard host (`*.example.com`) names its base domain.
+
+                  Issuance settings (DNS provider, credentials, email) come from
+                  `security.acme.defaults`, or from `security.acme.certs.<name>` for one
+                  certificate. A certificate that other services read too keeps its own `group`
+                  and `reloadServices` there; the proxy joins that group and is added to its
+                  reload list.
+
+                  Until the first issuance finishes, the proxy answers this host's names with a
+                  self-signed certificate and switches to the real one on the reload that
+                  follows it, so a new host never delays the others.
                 '';
               };
 
               certFile = mkOption {
                 type = types.nullOr types.str;
                 default = null;
-                description = "PEM certificate chain not managed by ACME (e.g. the tailscale certificate). Kept as a string so it is never copied into the store.";
+                example = "/var/lib/tailscale/certs/host.tailnet.ts.net.crt";
+                description = ''
+                  PEM certificate chain from outside ACME (a tailscale certificate, say). A path
+                  as a string, so the file is never copied into the Nix store. The proxy reads it
+                  at start and on every reload; replace the file, then `systemctl reload
+                  upstreamer`.
+                '';
               };
 
               keyFile = mkOption {
                 type = types.nullOr types.str;
                 default = null;
-                description = "Private key for `certFile`.";
+                example = "/var/lib/tailscale/certs/host.tailnet.ts.net.key";
+                description = "PEM private key for `certFile`, as a string path (never copied into the Nix store).";
               };
 
               redirectHttp = mkOption {
                 type = types.bool;
                 default = true;
-                description = "Answer plain HTTP requests for this host with a 308 to https.";
+                description = ''
+                  Answer plain HTTP requests for this host's names, on `services.upstreamer.listen.httpPort`,
+                  with a 308 redirect to https. Only for hosts on the default addresses: a host
+                  with its own `listen` serves exactly those.
+                '';
               };
             };
 
@@ -103,7 +140,7 @@
               type = types.bool;
               default = cfg.http3;
               defaultText = lib.literalExpression "config.services.upstreamer.http3";
-              description = "Serve HTTP/3 and advertise it with Alt-Svc.";
+              description = "Serve HTTP/3 (QUIC on UDP) beside HTTPS and advertise it with `Alt-Svc`. TLS hosts only.";
             };
 
             listen = mkOption {
@@ -113,14 +150,24 @@
                     addr = mkOption {
                       type = types.nullOr types.str;
                       default = null;
-                      description = "Address; null binds every address in `services.upstreamer.listen.addresses`.";
+                      example = "127.0.0.1";
+                      description = "IP address, IPv6 in brackets (`[::1]`). Null: every address in `services.upstreamer.listen.addresses`.";
                     };
-                    port = mkOption { type = types.port; };
+                    port = mkOption {
+                      type = types.port;
+                      description = "TCP port (and UDP port for HTTP/3 on a TLS host).";
+                    };
                   };
                 }
               );
               default = [ ];
-              description = "Addresses for this host instead of the defaults (80 for plain hosts, 443 for TLS hosts).";
+              example = [ { port = 8080; } ];
+              description = ''
+                Where this host is served, instead of the defaults (`listen.httpPort` for plain
+                hosts, `listen.httpsPort` for TLS hosts). A TLS host serves HTTPS on each, and
+                HTTP/3 on the same UDP ports when `http3` is on; it gets no HTTP redirect.
+                `openFirewall` opens these ports.
+              '';
             };
 
             headers = mkOption {
@@ -140,16 +187,59 @@
             routes = mkOption {
               type = types.listOf json;
               default = [ ];
+              example = lib.literalExpression ''
+                [
+                  {
+                    name = "api";
+                    when.path = "/api/*";
+                    proxy = "http://127.0.0.1:8080";
+                  }
+                  { headers.Cache-Control = "no-cache"; }
+                  { files.root = "''${pkgs.my-site}"; }
+                ]
+              '';
               description = ''
-                Ordered route steps, `{ name?; when?; <action>; }`, in upstreamer's route schema.
-                Lists from several modules concatenate; use lib.mkBefore/mkAfter to order them.
+                Ordered route steps; a request runs them top to bottom. A step is
+                `{ name?; when?; <one action>; }`:
+
+                - `when` is a matcher whose keys must all hold (`path`, `pathRegex`, `method`,
+                  `header`, `headerRegex`, `query`, `value` with `in` or `regex`, `file`,
+                  `after`); `all`, `any` and `none` take lists of matchers.
+                - Actions that change the request or the pending response and continue:
+                  `set`, `rewrite`, `stripPrefix`, `tryFiles`, `headers`, `requestHeaders`,
+                  `encode`.
+                - Actions that answer and end routing: `proxy`, `files`, `respond`, `redirect`,
+                  `error`.
+                - `routes` nests steps; `firstOf` runs only the first step whose `when` holds;
+                  `include` splices the steps of a JSON fragment file (a store path, typically
+                  generated by a package's build).
+
+                A request that reaches the end without an answer gets 404. Strings are
+                templates (`{host}`, `{path}`, `{query}`, `{remote_host}`, `{scheme}`,
+                `{vars.x}`, and `{re.1}` for a capture of the step's own `pathRegex`).
+
+                The steps are plain attribute sets serialised to JSON. `upstreamer check`
+                validates them when the system is built, so a mistake fails the build and names
+                the step. Lists from several modules concatenate; order them with
+                `lib.mkBefore` and `lib.mkAfter`.
               '';
             };
 
             errors = mkOption {
               type = types.listOf json;
               default = [ ];
-              description = "Error routes, `{ status?; routes; }`, first match by status.";
+              example = [
+                {
+                  status = [ 404 ];
+                  routes = [ { respond.body = "Not here"; } ];
+                }
+              ];
+              description = ''
+                Error routes, `{ status?; routes; }`, tried in order for an error response (an
+                `error` step, a missing file, an unreachable upstream); the first whose `status`
+                list holds the code (absent: every error) runs its `routes`. A response
+                there keeps the error's status unless it names another.
+              '';
             };
 
             proxy = mkOption {
@@ -158,8 +248,11 @@
               example = "http://127.0.0.1:8080";
               description = ''
                 Short form for a reverse-proxy host: appended as the last route step,
-                `{ proxy = <this>; }`. A string is the upstream URL; an attribute set is the full
-                proxy step (`to`, `tlsSkipVerify`, `headers`, `timeouts`).
+                `{ proxy = <this>; }`. A string is the upstream URL (`http://`, or `https://`
+                for a TLS upstream); an attribute set is the full proxy step (`to`,
+                `tlsSkipVerify`, `headers` for request headers sent upstream, `timeouts`).
+                The client's `Host` is passed through, and `X-Forwarded-For`,
+                `X-Forwarded-Proto` and `X-Forwarded-Host` are set.
               '';
             };
           };
@@ -168,8 +261,11 @@
       vhosts = attrValues cfg.virtualHosts;
       tlsHosts = filter (v: v.tls.enable) vhosts;
       acmeHosts = filter (v: v.tls.acmeCert != null) tlsHosts;
-      certNames = unique (map (v: v.tls.acmeCert) acmeHosts);
+      # A name with `*` is not a valid security.acme.certs entry (its unit names would be
+      # rejected before any assertion could explain why); the wildcard assertion reports it.
+      certNames = filter (c: !(lib.hasInfix "*" c)) (unique (map (v: v.tls.acmeCert) acmeHosts));
       namesOf = v: [ v.serverName ] ++ v.serverAliases;
+      allNames = concatMap namesOf vhosts;
       hostsOfCert = c: concatMap namesOf (filter (v: v.tls.acmeCert == c) acmeHosts);
       certDir = c: config.security.acme.certs.${c}.directory;
       certGroups = unique (map (c: config.security.acme.certs.${c}.group) certNames);
@@ -187,7 +283,7 @@
             {
               cert = if v.tls.certFile != null then v.tls.certFile else "${certDir v.tls.acmeCert}/fullchain.pem";
               key = if v.tls.keyFile != null then v.tls.keyFile else "${certDir v.tls.acmeCert}/key.pem";
-              inherit (v.tls) redirectHttp;
+              redirectHttp = v.tls.redirectHttp && v.listen == [ ];
               inherit (v) http3;
             };
         listen =
@@ -222,19 +318,37 @@
         cp ${configJSON} "$out"
       '';
 
-      udpPorts = optionals (any (v: v.tls.enable && v.http3) vhosts) [ cfg.listen.httpsPort ];
+      # Ports a host is served on (TCP, and UDP for HTTP/3), besides the HTTP redirect.
+      ports =
+        v:
+        if v.listen != [ ] then
+          map (l: l.port) v.listen
+        else if v.tls.enable then
+          [ cfg.listen.httpsPort ]
+        else
+          [ cfg.listen.httpPort ];
 
       usedPorts = unique (
         concatMap (
-          v:
-          if v.listen != [ ] then
-            map (l: l.port) v.listen
-          else if v.tls.enable then
-            [ cfg.listen.httpsPort ] ++ optional v.tls.redirectHttp cfg.listen.httpPort
-          else
-            [ cfg.listen.httpPort ]
+          v: ports v ++ optional (v.tls.enable && v.tls.redirectHttp && v.listen == [ ]) cfg.listen.httpPort
         ) vhosts
       );
+      udpPorts = unique (concatMap (v: optionals (v.tls.enable && v.http3) (ports v)) vhosts);
+
+      # "10s" -> 10, "1500ms" -> 2 (rounded up), as the shutdown timeout's type allows.
+      seconds =
+        d:
+        let
+          m = builtins.match "([0-9]+)(ms|s|m|h)" d;
+          n = lib.toIntBase10 (builtins.head m);
+        in
+        {
+          ms = (n + 999) / 1000;
+          s = n;
+          m = n * 60;
+          h = n * 3600;
+        }
+        .${builtins.elemAt m 1};
     in
     {
       options.services.upstreamer = {
@@ -250,25 +364,33 @@
         workers = mkOption {
           type = types.nullOr types.ints.positive;
           default = null;
-          description = "Worker threads, one per core. Null: one per CPU the service may run on.";
+          description = "Worker threads, each pinned to one CPU. Null: one per CPU the service may run on.";
         };
 
         http3 = mkOption {
           type = types.bool;
           default = true;
-          description = "Default for each virtual host's `http3`.";
+          description = "Default of every virtual host's `http3`.";
         };
 
         ktls = mkOption {
           type = types.bool;
           default = true;
-          description = "Offload TLS records to the kernel after handshakes (loads the `tls` module).";
+          description = ''
+            Hand TLS record encryption to the kernel after each handshake (kTLS), so files are
+            sent with sendfile. Loads the `tls` kernel module at boot when a TLS host exists.
+            Without kernel support, TLS stays in user space.
+          '';
         };
 
         openFirewall = mkOption {
           type = types.bool;
           default = true;
-          description = "Open the TCP ports of every virtual host, and UDP for HTTP/3.";
+          description = ''
+            Open the TCP ports the virtual hosts are served on (with their HTTP redirect), and
+            the UDP ports of TLS hosts with `http3`, on every interface. Off: open them
+            yourself, for example on one interface with `networking.firewall.interfaces`.
+          '';
         };
 
         listen = {
@@ -278,15 +400,21 @@
               "0.0.0.0"
               "[::]"
             ];
-            description = "Addresses bound by default. Wildcards, so binding never waits for an interface.";
+            description = ''
+              Addresses every virtual host without its own `listen` is served on (IPv6 in
+              brackets). The default wildcards (`[::]` bound IPv6-only) let the proxy start before
+              any interface has an address, so it needs no ordering after the network.
+            '';
           };
           httpPort = mkOption {
             type = types.port;
             default = 80;
+            description = "Port of plain HTTP hosts and of the HTTPS redirect.";
           };
           httpsPort = mkOption {
             type = types.port;
             default = 443;
+            description = "Port of TLS hosts: HTTPS on TCP, HTTP/3 on UDP.";
           };
         };
 
@@ -294,26 +422,55 @@
           type = types.str;
           default = "upstreamer";
           description = ''
-            Default group of the ACME certificates this module creates. A certificate another
-            service also reads can set its own group in security.acme.certs; the proxy joins
-            whatever group each of its certificates has.
+            Default group of the ACME certificates the virtual hosts use; the module creates it.
+            A certificate another service reads too sets its own group in
+            `security.acme.certs.<name>.group`; the proxy joins the group of each of its
+            certificates.
           '';
         };
 
         settings = mkOption {
-          type = json;
+          type = types.submodule {
+            freeformType = json;
+            options.timeouts.shutdown = mkOption {
+              type = types.strMatching "[0-9]+(ms|s|m|h)";
+              default = "10s";
+              description = ''
+                How long requests in flight and open tunnels may run after the service is told
+                to stop (restart, shutdown) before they are cut. The unit's `TimeoutStopSec`
+                follows it.
+              '';
+            };
+          };
           default = { };
           example = {
             timeouts.keepAlive = "120s";
             limits.maxHeadBytes = 65536;
           };
-          description = "Top-level settings merged over the generated config (timeouts, limits).";
+          description = ''
+            Top-level settings of upstreamer's config file, merged over what the module
+            generates: `timeouts` (`header`, `keepAlive`, `h2Idle`, `shutdown`; durations such
+            as `"300ms"`, `"5s"`, `"2m"`, `"1h"`) and `limits` (`maxHeadBytes`,
+            `maxHeaderFields`, `h2MaxStreams`).
+          '';
         };
 
         virtualHosts = mkOption {
           type = types.attrsOf (types.submodule vhostOptions);
           default = { };
-          description = "Virtual hosts. Several modules may define the same host; their options merge.";
+          example = lib.literalExpression ''
+            {
+              "app.example.com".proxy = "http://127.0.0.1:8080";
+              "www.example.com".tls.acmeCert = "example.com";
+              "example.com".routes = [ { files.root = "''${pkgs.my-site}"; } ];
+            }
+          '';
+          description = ''
+            Virtual hosts by name. A host is served over TLS with an ACME certificate named
+            after it unless it says otherwise. Several modules may define the same host: a
+            service's module can contribute its `routes` and `headers` while the machine's
+            configuration sets its TLS.
+          '';
         };
 
         configFile = mkOption {
@@ -335,15 +492,42 @@
 
       config = mkIf cfg.enable {
         assertions =
-          map (v: {
-            assertion =
-              v.tls.enable -> (v.tls.acmeCert != null) != (v.tls.certFile != null && v.tls.keyFile != null);
-            message = "services.upstreamer.virtualHosts.${v.serverName}.tls: set exactly one of acmeCert or certFile+keyFile.";
-          }) vhosts
-          ++ map (v: {
-            assertion = v.tls.acmeCert == null || !(lib.hasInfix "*" v.tls.acmeCert);
-            message = "services.upstreamer.virtualHosts.${v.serverName}: name the certificate of a wildcard host with tls.acmeCert.";
-          }) vhosts;
+          concatLists (
+            mapAttrsToList (
+              name: v:
+              let
+                at = "services.upstreamer.virtualHosts.${lib.strings.escapeNixIdentifier name}.tls";
+              in
+              [
+                {
+                  assertion =
+                    v.tls.enable -> (v.tls.acmeCert != null) != (v.tls.certFile != null && v.tls.keyFile != null);
+                  message = "${at}: set either acmeCert, or both certFile and keyFile.";
+                }
+                {
+                  assertion =
+                    !v.tls.enable -> v.tls.acmeCert == null && v.tls.certFile == null && v.tls.keyFile == null;
+                  message = "${at}: acmeCert, certFile and keyFile need tls.enable.";
+                }
+                {
+                  assertion = v.tls.acmeCert == null || !(lib.hasInfix "*" v.tls.acmeCert);
+                  message = "${at}.acmeCert: a wildcard host names its certificate, e.g. \"example.com\" for \"*.example.com\".";
+                }
+              ]
+            ) cfg.virtualHosts
+          )
+          # A certificate for a name no host serves is almost always a misspelt acmeCert, and
+          # its issuance would fail at run time; this fails the build instead.
+          ++ map (
+            c:
+            let
+              domain = config.security.acme.certs.${c}.domain;
+            in
+            {
+              assertion = lib.elem domain allNames || lib.elem "*.${domain}" allNames;
+              message = "services.upstreamer: tls.acmeCert \"${c}\" of ${lib.concatStringsSep ", " (hostsOfCert c)} names a certificate for ${domain}, which no virtual host serves.";
+            }
+          ) certNames;
 
         security.acme.certs = genAttrs certNames (c: {
           domain = lib.mkDefault c;
@@ -374,7 +558,8 @@
             ExecStart = "${lib.getExe cfg.package} run --config /etc/upstreamer/config.json";
             Restart = "on-failure";
             RestartSec = "1s";
-            TimeoutStopSec = "15s";
+            # The drain, then a margin for the process to exit.
+            TimeoutStopSec = seconds cfg.settings.timeouts.shutdown + 5;
 
             DynamicUser = true;
             SupplementaryGroups = certGroups;

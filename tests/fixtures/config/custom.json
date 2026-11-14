@@ -1,0 +1,187 @@
+{
+  "http3": true,
+  "limits": {
+    "maxHeadBytes": 65536
+  },
+  "listen": {
+    "http": [
+      "0.0.0.0:80",
+      "[::]:80"
+    ],
+    "https": [
+      "0.0.0.0:443",
+      "[::]:443"
+    ]
+  },
+  "sites": [
+    {
+      "errors": [],
+      "headers": {},
+      "hosts": [
+        "*.preview.example.com"
+      ],
+      "listen": null,
+      "name": "*.preview.example.com",
+      "routes": [
+        {
+          "proxy": "http://127.0.0.1:4000"
+        }
+      ],
+      "tls": {
+        "cert": "/var/lib/acme/preview.example.com/fullchain.pem",
+        "http3": true,
+        "key": "/var/lib/acme/preview.example.com/key.pem",
+        "redirectHttp": true
+      }
+    },
+    {
+      "errors": [],
+      "headers": {},
+      "hosts": [
+        "admin.example.com"
+      ],
+      "listen": [
+        "0.0.0.0:8443",
+        "[::]:8443"
+      ],
+      "name": "admin.example.com",
+      "routes": [
+        {
+          "proxy": "http://127.0.0.1:9000"
+        }
+      ],
+      "tls": {
+        "cert": "/var/lib/acme/admin.example.com/fullchain.pem",
+        "http3": true,
+        "key": "/var/lib/acme/admin.example.com/key.pem",
+        "redirectHttp": false
+      }
+    },
+    {
+      "errors": [],
+      "headers": {
+        "Referrer-Policy": "no-referrer",
+        "Server": null,
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY"
+      },
+      "hosts": [
+        "localhost"
+      ],
+      "listen": [
+        "0.0.0.0:8080",
+        "[::]:8080"
+      ],
+      "name": "localhost",
+      "routes": [
+        {
+          "name": "api",
+          "proxy": "http://127.0.0.1:7979",
+          "when": {
+            "path": "/api/*"
+          }
+        },
+        {
+          "name": "immutable",
+          "routes": [
+            {
+              "headers": {
+                "Cache-Control": "public, max-age=31536000, immutable"
+              }
+            },
+            {
+              "files": {
+                "precompressed": [
+                  "br",
+                  "gzip"
+                ],
+                "root": "/srv/example-app/web"
+              }
+            }
+          ],
+          "when": {
+            "path": "/_app/immutable/*"
+          }
+        },
+        {
+          "headers": {
+            "Cache-Control": "no-cache",
+            "Last-Modified": null
+          }
+        },
+        {
+          "requestHeaders": {
+            "If-Modified-Since": null
+          }
+        },
+        {
+          "error": 404,
+          "name": "sidecar",
+          "when": {
+            "path": [
+              "*.etag",
+              "*.br",
+              "*.gz"
+            ]
+          }
+        },
+        {
+          "name": "client-route",
+          "rewrite": "/index.html",
+          "when": {
+            "none": [
+              {
+                "path": "/_app/*"
+              },
+              {
+                "file": {
+                  "paths": [
+                    "{path}"
+                  ],
+                  "root": "/srv/example-app/web"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "files": {
+            "etagSidecar": ".etag",
+            "precompressed": [
+              "br",
+              "gzip"
+            ],
+            "root": "/srv/example-app/web"
+          }
+        }
+      ],
+      "tls": null
+    },
+    {
+      "errors": [],
+      "headers": {},
+      "hosts": [
+        "node.tailnet.ts.net"
+      ],
+      "listen": null,
+      "name": "node.tailnet.ts.net",
+      "routes": [
+        {
+          "proxy": "http://127.0.0.1:59553"
+        }
+      ],
+      "tls": {
+        "cert": "/var/lib/tailscale/certs/node.tailnet.ts.net.crt",
+        "http3": false,
+        "key": "/var/lib/tailscale/certs/node.tailnet.ts.net.key",
+        "redirectHttp": true
+      }
+    }
+  ],
+  "timeouts": {
+    "keepAlive": "120s",
+    "shutdown": "30s"
+  },
+  "version": 1,
+  "workers": null
+}

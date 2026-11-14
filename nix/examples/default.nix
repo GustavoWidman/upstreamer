@@ -4,7 +4,8 @@
 # from their virtual hosts: the config it emits (equal to tests/fixtures/config, which the Rust
 # schema tests read), the ACME certificates and their names and groups, the unit, the firewall
 # and the kernel modules. Each host's whole system is instantiated too, so a type error anywhere
-# in the module fails here. The hosts get a stub package, so evaluating them for another system
+# in the module fails here. It also evaluates misconfigured hosts and checks that the module's
+# assertions reject each one with its message. The hosts get a stub package, so evaluating them for another system
 # needs nothing built for it. `fixtures` in the dev shell rewrites tests/fixtures/config from
 # its `hosts`.
 #
@@ -26,6 +27,7 @@ let
     edge = ./edge.nix;
     apps = ./apps.nix;
     desktop = ./desktop.nix;
+    custom = ./custom.nix;
   };
 
   eval =
@@ -55,14 +57,14 @@ let
       u = c.systemd.services.upstreamer;
     in
     {
-      failedAssertions = map (a: a.message) (lib.filter (a: !a.assertion) c.assertions);
+      failedAssertions = failedAssertions c;
       certs = lib.mapAttrs (_: cert: {
         inherit (cert) domain group;
         extraDomainNames = sorted cert.extraDomainNames;
         reloadServices = sorted cert.reloadServices;
       }) c.security.acme.certs;
       unit = {
-        inherit (u.serviceConfig) Type ExecStart;
+        inherit (u.serviceConfig) Type ExecStart TimeoutStopSec;
         SupplementaryGroups = sorted u.serviceConfig.SupplementaryGroups;
         wants = sorted u.wants;
       };
@@ -80,12 +82,15 @@ let
       ;
   };
   own = domain: cert domain [ ] "upstreamer" [ "upstreamer.service" ];
-  unit = groups: certs: {
+  unit' = timeoutStopSec: groups: certs: {
     Type = "notify-reload";
     ExecStart = "${lib.getExe systems.edge.services.upstreamer.package} run --config /etc/upstreamer/config.json";
+    # The default 10s drain, plus 5s to exit.
+    TimeoutStopSec = timeoutStopSec;
     SupplementaryGroups = groups;
     wants = map (c: "acme-${c}.service") certs;
   };
+  unit = unit' 15;
 
   expected = {
     edge = {
@@ -137,6 +142,97 @@ let
       udp = [ ];
       tlsModule = false;
     };
+    custom = {
+      failedAssertions = [ ];
+      certs = {
+        "admin.example.com" = own "admin.example.com";
+        "preview.example.com" = cert "preview.example.com" [ "*.preview.example.com" ] "upstreamer" [
+          "upstreamer.service"
+        ];
+      };
+      # A 30s drain.
+      unit = unit' 35 [ "upstreamer" ] [ "admin.example.com" "preview.example.com" ];
+      tcp = [
+        80
+        443
+        8080
+        8443
+      ];
+      udp = [
+        443
+        8443
+      ];
+      tlsModule = true;
+    };
+  };
+
+  # Misconfigured hosts, each with the assertion messages it must fail with.
+  rejected = {
+    acme-and-files = {
+      module.services.upstreamer.virtualHosts."a.example.com" = {
+        tls = {
+          acmeCert = "a.example.com";
+          certFile = "/run/a.crt";
+          keyFile = "/run/a.key";
+        };
+        proxy = "http://127.0.0.1:1";
+      };
+      messages = [
+        "services.upstreamer.virtualHosts.\"a.example.com\".tls: set either acmeCert, or both certFile and keyFile."
+      ];
+    };
+    cert-without-key = {
+      module.services.upstreamer.virtualHosts."a.example.com" = {
+        tls.certFile = "/run/a.crt";
+        proxy = "http://127.0.0.1:1";
+      };
+      messages = [
+        "services.upstreamer.virtualHosts.\"a.example.com\".tls: set either acmeCert, or both certFile and keyFile."
+      ];
+    };
+    files-without-tls = {
+      module.services.upstreamer.virtualHosts.plain = {
+        tls = {
+          enable = false;
+          certFile = "/run/a.crt";
+          keyFile = "/run/a.key";
+        };
+        proxy = "http://127.0.0.1:1";
+      };
+      messages = [
+        "services.upstreamer.virtualHosts.plain.tls: acmeCert, certFile and keyFile need tls.enable."
+      ];
+    };
+    acme-without-tls = {
+      module.services.upstreamer.virtualHosts.plain = {
+        tls = {
+          enable = false;
+          acmeCert = "example.com";
+        };
+        proxy = "http://127.0.0.1:1";
+      };
+      messages = [
+        "services.upstreamer.virtualHosts.plain.tls: acmeCert, certFile and keyFile need tls.enable."
+      ];
+    };
+    unknown-acme-cert = {
+      module.services.upstreamer.virtualHosts = {
+        "example.com".proxy = "http://127.0.0.1:1";
+        "www.example.com" = {
+          tls.acmeCert = "exmaple.com";
+          proxy = "http://127.0.0.1:1";
+        };
+      };
+      messages = [
+        "services.upstreamer: tls.acmeCert \"exmaple.com\" of www.example.com names a certificate for exmaple.com, which no virtual host serves."
+      ];
+    };
+    unnamed-wildcard-cert = {
+      module.services.upstreamer.virtualHosts."*.example.com".proxy = "http://127.0.0.1:1";
+      messages = [
+        "services.upstreamer.virtualHosts.\"*.example.com\".tls.acmeCert: a wildcard host names its certificate, e.g. \"example.com\" for \"*.example.com\"."
+      ];
+    };
   };
 
   # The emitted config, as JSON would carry it.
@@ -147,21 +243,40 @@ let
     )
   ) systems;
 
-  problems = lib.concatLists (
-    lib.mapAttrsToList (
-      name: c:
-      let
-        seen = observed c;
-        fixture = ../../tests/fixtures/config + "/${name}.json";
-      in
-      lib.optional (seen != expected.${name})
-        "${name}: derived ${builtins.toJSON seen}\n  expected ${builtins.toJSON expected.${name}}"
-      ++
-        lib.optional (!builtins.pathExists fixture || hosts.${name} != lib.importJSON fixture)
-          "${name}: the emitted config differs from tests/fixtures/config/${name}.json; run `fixtures` in the dev shell"
-      ++ lib.optional (builtins.typeOf c.system.build.toplevel.drvPath != "string") "${name}: no system"
-    ) systems
-  );
+  failedAssertions = c: map (a: a.message) (lib.filter (a: !a.assertion) c.assertions);
+
+  problems =
+    lib.concatLists (
+      lib.mapAttrsToList (
+        name: c:
+        let
+          seen = observed c;
+          fixture = ../../tests/fixtures/config + "/${name}.json";
+        in
+        lib.optional (seen != expected.${name})
+          "${name}: derived ${builtins.toJSON seen}\n  expected ${builtins.toJSON expected.${name}}"
+        ++
+          lib.optional (!builtins.pathExists fixture || hosts.${name} != lib.importJSON fixture)
+            "${name}: the emitted config differs from tests/fixtures/config/${name}.json; run `fixtures` in the dev shell"
+        ++ lib.optional (builtins.typeOf c.system.build.toplevel.drvPath != "string") "${name}: no system"
+      ) systems
+    )
+    ++ lib.concatLists (
+      lib.mapAttrsToList (
+        name: case:
+        let
+          seen = failedAssertions (
+            eval (pkgs: pkgs.writeShellScriptBin "upstreamer" "") {
+              imports = [ case.module ];
+              services.upstreamer.enable = true;
+            }
+          );
+        in
+        lib.optional (
+          seen != case.messages
+        ) "rejected ${name}: failed ${builtins.toJSON seen}\n  expected ${builtins.toJSON case.messages}"
+      ) rejected
+    );
 in
 {
   # `hosts` stays readable while the check fails, so `fixtures` can rewrite what it compares.
