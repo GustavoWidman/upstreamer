@@ -69,10 +69,20 @@ enum Framing {
 impl Framing {
     /// Bytes one record adds to its plaintext.
     fn overhead(self) -> usize {
+        self.prefix() + self.suffix()
+    }
+    /// Bytes before the plaintext: the header, and TLS 1.2 GCM's explicit nonce.
+    fn prefix(self) -> usize {
         match self {
-            Framing::Tls13 => HEADER + 1 + TAG,
-            Framing::Tls12Gcm => HEADER + 8 + TAG,
-            Framing::Tls12ChaCha => HEADER + TAG,
+            Framing::Tls12Gcm => HEADER + 8,
+            Framing::Tls13 | Framing::Tls12ChaCha => HEADER,
+        }
+    }
+    /// Bytes after the plaintext: TLS 1.3's content type, and the tag.
+    fn suffix(self) -> usize {
+        match self {
+            Framing::Tls13 => 1 + TAG,
+            Framing::Tls12Gcm | Framing::Tls12ChaCha => TAG,
         }
     }
 }
@@ -326,6 +336,41 @@ impl Session {
         Ok(sealed)
     }
 
+    /// Starts an application-data record at the end of `tx`, after the key update it must
+    /// follow when one is due. [`Session::fill`] adds its plaintext and [`Session::finish`]
+    /// seals it; nothing else may be sealed into `tx` meanwhile. Returns the record's offset,
+    /// or `None` when `tx` has no room for its overhead and one byte of plaintext.
+    pub fn begin(&mut self, tx: &mut BytesMut) -> Result<Option<usize>, Error> {
+        let key_update = self.key_update_due()?;
+        let need = 1 + self.framing.overhead() + key_update * (5 + self.framing.overhead());
+        if tx.capacity() - tx.len() < need {
+            return Ok(None);
+        }
+        if key_update == 1 {
+            self.seal_record(tx, HANDSHAKE, 5, |tx| {
+                tx.extend_from_slice(&[KEY_UPDATE, 0, 0, 1, 0])
+            })?;
+            self.seal = Keys::new(self.kernel.update_tx_secret()?)?;
+            self.owe_key_update = false;
+        }
+        Ok(Some(self.start(tx)))
+    }
+
+    /// Appends as much of `bufs` to the record begun at `start` as both the record and `tx`'s
+    /// capacity hold. Returns the bytes taken, and whether the record is full.
+    pub fn fill(&self, tx: &mut BytesMut, start: usize, bufs: &[IoSlice<'_>]) -> (usize, bool) {
+        let used = tx.len() - start - self.framing.prefix();
+        let room = (MAX_PLAINTEXT - used).min(tx.capacity() - tx.len() - self.framing.suffix());
+        let n = room.min(bufs.iter().map(|b| b.len()).sum());
+        gather(bufs, 0, n, tx);
+        (n, n == room)
+    }
+
+    /// Seals the record begun at `start`.
+    pub fn finish(&mut self, tx: &mut BytesMut, start: usize) -> Result<(), Error> {
+        self.seal_started(tx, start, APPLICATION_DATA)
+    }
+
     /// 1 when a key update must precede the next record: the update itself is the last record
     /// the old key protects. TLS 1.2 has no key update, so its connection ends one record short
     /// of the limit, which leaves room for close_notify.
@@ -373,7 +418,27 @@ impl Session {
         n: usize,
         fill: impl FnOnce(&mut BytesMut),
     ) -> Result<(), Error> {
+        let start = self.start(tx);
+        fill(tx);
+        debug_assert_eq!(tx.len() - start - self.framing.prefix(), n);
+        self.seal_started(tx, start, typ)
+    }
+
+    /// Appends what precedes a record's plaintext: room for the header and, for TLS 1.2 GCM,
+    /// the explicit nonce. Returns the record's offset.
+    fn start(&self, tx: &mut BytesMut) -> usize {
         let start = tx.len();
+        tx.extend_from_slice(&[0; HEADER]);
+        if self.framing == Framing::Tls12Gcm {
+            tx.extend_from_slice(&self.seal.nonce()[4..]);
+        }
+        start
+    }
+
+    /// Seals the record of type `typ` at `start`, whose plaintext runs to the end of `tx`.
+    fn seal_started(&mut self, tx: &mut BytesMut, start: usize, typ: u8) -> Result<(), Error> {
+        let from = start + self.framing.prefix();
+        let n = tx.len() - from;
         let keys = &mut self.seal;
         let nonce = keys.nonce();
         let len = n + self.framing.overhead() - HEADER;
@@ -383,25 +448,17 @@ impl Session {
             Framing::Tls12Gcm | Framing::Tls12ChaCha => typ,
         };
         let header = [outer, LEGACY_VERSION[0], LEGACY_VERSION[1], len_hi, len_lo];
-        tx.extend_from_slice(&header);
+        tx[start..start + HEADER].copy_from_slice(&header);
         let mut aad = [0u8; 13];
-        let (aad_len, from) = match self.framing {
+        let aad_len = match self.framing {
             Framing::Tls13 => {
-                fill(tx);
                 tx.put_u8(typ);
                 aad[..HEADER].copy_from_slice(&header);
-                (HEADER, HEADER)
+                HEADER
             }
-            Framing::Tls12Gcm => {
-                tx.extend_from_slice(&nonce[4..]);
-                fill(tx);
+            Framing::Tls12Gcm | Framing::Tls12ChaCha => {
                 aad = tls12_aad(keys.seq, typ, n);
-                (aad.len(), HEADER + 8)
-            }
-            Framing::Tls12ChaCha => {
-                fill(tx);
-                aad = tls12_aad(keys.seq, typ, n);
-                (aad.len(), HEADER)
+                aad.len()
             }
         };
         let tag = keys
@@ -409,7 +466,7 @@ impl Session {
             .seal_in_place_separate_tag(
                 Nonce::assume_unique_for_key(nonce),
                 Aad::from(&aad[..aad_len]),
-                &mut tx[start + from..],
+                &mut tx[from..],
             )
             .map_err(|_| Error::EncryptError)?;
         tx.extend_from_slice(tag.as_ref());

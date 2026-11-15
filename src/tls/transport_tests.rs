@@ -374,6 +374,53 @@ fn a_vectored_write_becomes_full_records() {
     );
 }
 
+#[test]
+fn poll_writes_between_flushes_share_full_records() {
+    use tokio::io::AsyncWriteExt;
+    // TLS 1.3 record: 5-byte header + plaintext + 1 content-type byte + 16-byte tag.
+    const OVERHEAD: usize = 22;
+    let config = server(&store());
+    let frames = [pattern(300), pattern(301), pattern(302), pattern(20_000)];
+    let expected = frames.concat();
+    let total = expected.len();
+    let ((), (wire, got)) = run(
+        move |addr| {
+            let tls =
+                Client::with(&[], Some(suites::TLS13_AES_128_GCM_SHA256)).connect(addr, "a.test");
+            let read = Arc::new(AtomicUsize::new(0));
+            let counting = Counting {
+                tcp: tls.sock,
+                read: read.clone(),
+            };
+            let mut tls = StreamOwned::new(tls.conn, counting);
+            tls.write_all(b"go").unwrap();
+            tls.read_exact(&mut [0u8; 2]).unwrap();
+            read.store(0, Ordering::Relaxed);
+            tls.write_all(b"more").unwrap();
+            let mut got = vec![0u8; total];
+            tls.read_exact(&mut got).unwrap();
+            (read.load(Ordering::Relaxed), got)
+        },
+        async move |sock| {
+            let (mut io, _) = accepted(sock, config).await;
+            assert_eq!(read_exactly(&mut io, 2).await, b"go");
+            io.write_all(b"ok").await.unwrap();
+            io.flush().await.unwrap();
+            assert_eq!(read_exactly(&mut io, 4).await, b"more");
+            for frame in &frames {
+                io.write_all(frame).await.unwrap();
+            }
+            io.flush().await.unwrap();
+        },
+    );
+    assert!(got == expected);
+    assert_eq!(
+        wire,
+        total + 2 * OVERHEAD,
+        "four writes of 20903 bytes in two records: 16384, 4519"
+    );
+}
+
 /// Seals `data` with the client's keys into one record without sending it.
 fn sealed_record(tls: &mut StreamOwned<ClientConnection, TcpStream>, data: &[u8]) -> Vec<u8> {
     tls.conn.writer().write_all(data).unwrap();

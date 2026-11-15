@@ -293,8 +293,11 @@ pub(crate) struct TlsStream {
     trailer: usize,
     /// close_notify received: reads report the end of the stream.
     peer_closed: bool,
-    /// Sealed records not yet written, from the poll-based writer, which writes them on flush.
+    /// Records not yet written, from the poll-based writer, which writes them on flush.
     tx: Option<BytesMut>,
+    /// Offset in `tx` of the record the poll-based writer is filling, not sealed yet: the
+    /// writes between two flushes share records.
+    filling: Option<usize>,
     /// close_notify sealed.
     closing: bool,
 }
@@ -310,6 +313,7 @@ impl TlsStream {
             trailer: 0,
             peer_closed: false,
             tx: None,
+            filling: None,
             closing: false,
         };
         stream.release_rx();
@@ -431,6 +435,7 @@ impl TlsStream {
     fn fail(&mut self, e: rustls::Error) -> io::Error {
         if !self.closing {
             self.closing = true;
+            let _ = self.seal_filling();
             let mut tx = self.tx.take().unwrap_or_else(take_ciphertext);
             if self.session.seal_fatal_alert(&mut tx, &e) {
                 let _ = self.sock.try_write(&tx);
@@ -481,9 +486,9 @@ impl TlsStream {
         result
     }
 
-    /// Seals what fits behind the records already queued, writing nothing: a flush writes
-    /// them, so the frames of several writes leave in one writev. A full buffer is written
-    /// first.
+    /// Adds what fits to the record being filled, writing nothing: a flush seals it and writes
+    /// the records, so the frames of several writes leave in few records and one writev. A
+    /// full buffer is written first.
     fn poll_write_plain(
         &mut self,
         cx: &mut Context<'_>,
@@ -492,20 +497,37 @@ impl TlsStream {
         if self.closing {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
-        let total = total_len(bufs);
+        if total_len(bufs) == 0 {
+            return Poll::Ready(Ok(0));
+        }
         loop {
-            let mut tx = self.tx.take().unwrap_or_else(take_ciphertext);
-            let sealed = self.session.seal(&mut tx, bufs, 0);
-            self.tx = Some(tx);
-            let sealed = sealed.map_err(invalid)?;
-            if sealed > 0 || total == 0 {
-                return Poll::Ready(Ok(sealed));
+            let tx = self.tx.get_or_insert_with(take_ciphertext);
+            if self.filling.is_none() {
+                self.filling = self.session.begin(tx).map_err(invalid)?;
+            }
+            if let Some(start) = self.filling {
+                let (n, full) = self.session.fill(tx, start, bufs);
+                if full {
+                    self.seal_filling()?;
+                }
+                if n > 0 {
+                    return Poll::Ready(Ok(n));
+                }
             }
             ready!(self.poll_flush_tx(cx))?;
         }
     }
 
+    fn seal_filling(&mut self) -> io::Result<()> {
+        if let Some(start) = self.filling.take() {
+            let tx = self.tx.as_mut().expect("a record being filled lives in tx");
+            self.session.finish(tx, start).map_err(invalid)?;
+        }
+        Ok(())
+    }
+
     fn poll_flush_tx(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.seal_filling()?;
         let Some(tx) = self.tx.as_mut() else {
             return Poll::Ready(Ok(()));
         };
@@ -523,6 +545,7 @@ impl TlsStream {
     fn seal_close_notify(&mut self) -> io::Result<()> {
         if !self.closing {
             self.closing = true;
+            self.seal_filling()?;
             let tx = self.tx.get_or_insert_with(take_ciphertext);
             self.session.seal_close_notify(tx).map_err(invalid)?;
         }
