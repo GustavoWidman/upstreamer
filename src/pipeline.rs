@@ -182,9 +182,10 @@ fn redirect(ex: &mut Exchange, status: Status, location: ASpan) -> Result<Respon
 /// 0. `Alt-Svc` advertising HTTP/3, on h1 and h2 responses of a site that serves it, so a
 ///    site header or step op can still change it,
 /// 1. site headers,
-/// 2. pending step ops in step order (main route, then error route),
-/// 3. dynamic compression, decided from the head as the ops left it,
-/// 4. `Vary: Accept-Encoding` if negotiation chose an encoding or a sidecar could have been
+/// 2. pending step ops in step order (the error route's alone when one answered),
+/// 3. a 304 loses Content-Type (RFC 9110 §15.4.5), whoever set it,
+/// 4. dynamic compression, decided from the head as the ops left it,
+/// 5. `Vary: Accept-Encoding` if negotiation chose an encoding or a sidecar could have been
 ///    chosen, merged into the Vary the ops set.
 ///
 /// Framing headers are never touched here; the driver writes them.
@@ -213,6 +214,10 @@ pub(crate) fn finalize(site: &SitePlan, ex: &mut Exchange, resp: &mut Response) 
         if let Some(value) = op.value {
             fields.push(name, ex.arena.get(value));
         }
+    }
+
+    if resp.head.status == Status::NOT_MODIFIED {
+        fields.remove_known(Known::ContentType);
     }
 
     if let Some(encoding) = encode::decide(ex.pending.encode, &ex.req, &resp.head, resp.body.len())
@@ -261,5 +266,93 @@ pub(crate) fn bare(ex: &mut Exchange, status: Status) -> Response {
         body: Body::Empty,
         upgrade: None,
         local: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encode::{Encoding, EncodingSet};
+    use crate::exchange::{ConnInfo, PendingOp, Proto};
+    use crate::msg::Version;
+    use crate::plan::{Block, BlockKind, ListenerKey, ListenerKind};
+    use bytes::Bytes;
+
+    fn site() -> SitePlan {
+        SitePlan {
+            name: "test".into(),
+            headers: Box::new([]),
+            routes: Block {
+                kind: BlockKind::Seq,
+                steps: Box::new([]),
+            },
+            errors: Box::new([]),
+            alt_svc: None,
+        }
+    }
+
+    fn exchange(method: &str, headers: &[(&str, &str)]) -> Exchange {
+        let conn = ConnInfo {
+            remote: "192.0.2.1:5000".parse().unwrap(),
+            local_port: 80,
+            scheme: Scheme::Http,
+            proto: Proto::H1,
+            listener: ListenerKey {
+                addr: "0.0.0.0:80".parse().unwrap(),
+                kind: ListenerKind::Http,
+            },
+        };
+        let mut ex = Exchange::new(conn, 0);
+        ex.req
+            .set_line(method.as_bytes(), b"/page", Version::Http11)
+            .unwrap();
+        for (name, value) in headers {
+            ex.req.push_field(name.as_bytes(), value.as_bytes());
+        }
+        ex.pending.encode = EncodingSet::new([Encoding::Zstd, Encoding::Gzip]);
+        ex
+    }
+
+    fn page(ex: &mut Exchange, status: u16) -> Response {
+        let mut head = ex.response_head(Status::new(status).unwrap());
+        head.fields
+            .append_known(Known::ContentType, b"text/html; charset=utf-8");
+        head.fields.append_known(Known::ETag, b"\"v1\"");
+        head.fields.push(b"accept-ranges", b"bytes");
+        let body = if status == 304 {
+            Body::Empty
+        } else {
+            Body::Bytes(Bytes::from(vec![b'a'; 2048]))
+        };
+        Response {
+            head,
+            body,
+            upgrade: None,
+            local: true,
+        }
+    }
+
+    fn field<'r>(resp: &'r Response, name: &str) -> Option<&'r str> {
+        resp.head
+            .fields
+            .live()
+            .find(|(n, _, _)| *n == name.as_bytes())
+            .map(|(_, v, _)| std::str::from_utf8(v).unwrap())
+    }
+
+    #[test]
+    fn a_304_carries_no_content_type_whoever_set_it() {
+        let mut ex = exchange("GET", &[("If-None-Match", "\"v1\"")]);
+        let name = ex.arena.push(b"content-type");
+        let value = ex.arena.push(b"text/html; charset=utf-8");
+        ex.pending.ops.push(PendingOp {
+            name,
+            tag: Known::ContentType,
+            value: Some(value),
+        });
+        let mut resp = page(&mut ex, 304);
+        finalize(&site(), &mut ex, &mut resp);
+        assert_eq!(field(&resp, "content-type"), None, "RFC 9110 §15.4.5");
+        assert_eq!(field(&resp, "etag"), Some("\"v1\""));
     }
 }

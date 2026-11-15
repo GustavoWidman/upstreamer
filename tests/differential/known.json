@@ -375,47 +375,6 @@
   },
   {
     "kind": "finding",
-    "about": "A 304 carries Content-Type, from the file server and passed through from origins; Caddy removes it. RFC 9110 §15.4.5 asks a 304 not to carry representation metadata beyond its list.",
-    "differences": [
-      {
-        "site": "app.example.com",
-        "probe": "api conditional passes through",
-        "field": "header content-type",
-        "caddy": "(absent)",
-        "upstreamer": "text/plain; charset=utf-8"
-      },
-      {
-        "site": "example.org",
-        "probe": "home revalidated by sidecar etag",
-        "field": "header content-type",
-        "caddy": "(absent)",
-        "upstreamer": "text/html; charset=utf-8"
-      },
-      {
-        "site": "example.org",
-        "probe": "home revalidated by a weak sidecar etag",
-        "field": "header content-type",
-        "caddy": "(absent)",
-        "upstreamer": "text/html; charset=utf-8"
-      },
-      {
-        "site": "example.org",
-        "probe": "robots.txt revalidated",
-        "field": "header content-type",
-        "caddy": "(absent)",
-        "upstreamer": "text/plain; charset=utf-8"
-      },
-      {
-        "site": "mail.example.net",
-        "probe": "conditional",
-        "field": "header content-type",
-        "caddy": "(absent)",
-        "upstreamer": "text/plain; charset=utf-8"
-      }
-    ]
-  },
-  {
-    "kind": "finding",
     "about": "Caddy adds `Via: 1.1 Caddy` to every request it forwards and every proxied response; upstreamer adds none. RFC 9110 §7.6.3 requires a gateway to send Via on the requests it forwards.",
     "differences": [
       {
