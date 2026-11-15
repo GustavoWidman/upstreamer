@@ -4,3 +4,4 @@ target/
 .direnv
 result
 bench-results/
+result-*

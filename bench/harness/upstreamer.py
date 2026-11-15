@@ -60,11 +60,12 @@ def build(src: Path) -> Build:
     """Build upstreamer from a source tree with `nix build <tree>#default`: the flake's own
     derivation, so the tree's pinned toolchain (rust-toolchain.toml through fenix), its release
     profile, and the same binary the NixOS module deploys. Uncommitted edits to tracked files
-    are part of the build and set `dirty`."""
+    are part of the build and set `dirty`. The out-link `result-bench` in the tree is a garbage
+    collector root, so an automatic collection cannot delete the binary while it is measured."""
     global _build
     src = src.resolve()
     out = subprocess.run(
-        ["nix", "build", f"{src}#default", "--no-link", "--print-out-paths"],
+        ["nix", "build", f"{src}#default", "--out-link", str(src / "result-bench"), "--print-out-paths"],
         cwd=src,
         check=True,
         capture_output=True,
