@@ -12,6 +12,7 @@
         ../Cargo.toml
         ../Cargo.lock
         ../src
+        ../benches
         ../examples/bench-backend.rs
       ];
 
