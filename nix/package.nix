@@ -37,38 +37,61 @@
         builtins.toFile "Cargo.lock" (
           builtins.replaceStrings [ (entry ownVersion) ] [ (entry "0.0.0") ] lock
         );
-      cargoArtifacts = craneLib.buildDepsOnly (
-        removeAttrs args [ "src" ]
-        // {
-          pname = "upstreamer";
-          version = "0.0.0";
-          dummySrc = craneLib.mkDummySrc {
-            # Without Cargo.lock, which depsLock stands in for.
-            src = lib.fileset.toSource {
-              inherit root;
-              fileset = lib.fileset.difference (lib.fileset.unions cargoFiles) ../Cargo.lock;
+      # RUSTFLAGS reach the dependencies too, so profile-guided builds instrument and optimise
+      # them along with upstreamer itself.
+      depsWith =
+        rustflags:
+        craneLib.buildDepsOnly (
+          removeAttrs args [ "src" ]
+          // lib.optionalAttrs (rustflags != null) { RUSTFLAGS = rustflags; }
+          // {
+            pname = "upstreamer";
+            version = "0.0.0";
+            dummySrc = craneLib.mkDummySrc {
+              # Without Cargo.lock, which depsLock stands in for.
+              src = lib.fileset.toSource {
+                inherit root;
+                fileset = lib.fileset.difference (lib.fileset.unions cargoFiles) ../Cargo.lock;
+              };
+              cargoLock = depsLock;
+              cleanCargoTomlFilter =
+                path: lib.concatStringsSep "." path != "package.version" && craneLib.filters.cargoTomlDefault path;
             };
-            cargoLock = depsLock;
-            cleanCargoTomlFilter =
-              path: lib.concatStringsSep "." path != "package.version" && craneLib.filters.cargoTomlDefault path;
-          };
-          cargoVendorDir = craneLib.vendorCargoDeps { inherit (args) src; };
-        }
-      );
+            cargoVendorDir = craneLib.vendorCargoDeps { inherit (args) src; };
+          }
+        );
 
-      upstreamer = craneLib.buildPackage (
-        args
-        // {
-          inherit cargoArtifacts;
-          # checks.upstreamer-test runs the tests.
-          doCheck = false;
-          meta = {
-            description = "A reverse proxy and static file server for NixOS hosts";
-            license = lib.licenses.mit;
-            mainProgram = "upstreamer";
-          };
-        }
-      );
+      cargoArtifacts = depsWith null;
+
+      packageWith =
+        rustflags:
+        craneLib.buildPackage (
+          args
+          // lib.optionalAttrs (rustflags != null) { RUSTFLAGS = rustflags; }
+          // {
+            cargoArtifacts = depsWith rustflags;
+            # checks.upstreamer-test runs the tests.
+            doCheck = false;
+            meta = {
+              description = "A reverse proxy and static file server for NixOS hosts";
+              license = lib.licenses.mit;
+              mainProgram = "upstreamer";
+            };
+          }
+        );
+
+      # Linux builds are profile-guided (nix/pgo.nix). The instrumented build writes its counters
+      # where LLVM_PROFILE_FILE says when the training runs.
+      profile = import ./pgo.nix {
+        inherit pkgs craneLib;
+        inherit (toolchain) llvm-tools;
+        instrumented = packageWith "-Cprofile-generate=/build/pgo";
+      };
+      upstreamer =
+        if pkgs.stdenv.hostPlatform.isLinux then
+          packageWith "-Cprofile-use=${profile}"
+        else
+          packageWith null;
     in
     {
       packages = {
