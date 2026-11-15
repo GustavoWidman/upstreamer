@@ -477,9 +477,10 @@
 
         acme.group = mkOption {
           type = types.str;
-          default = "upstreamer";
+          default = "upstreamer-certs";
           description = ''
             Default group of the ACME certificates the virtual hosts use; the module creates it.
+            It cannot be `upstreamer`, the name of the unit's dynamic user and group.
             A certificate another service reads too sets its own group in
             `security.acme.certs.<name>.group`; the proxy joins the group of each of its
             certificates.
@@ -584,7 +585,13 @@
               assertion = lib.elem domain allNames || lib.elem "*.${domain}" allNames;
               message = "services.upstreamer: tls.acmeCert \"${c}\" of ${lib.concatStringsSep ", " (hostsOfCert c)} names a certificate for ${domain}, which no virtual host serves.";
             }
-          ) certNames;
+          ) certNames
+          ++ [
+            {
+              assertion = !(lib.elem "upstreamer" certGroups);
+              message = "services.upstreamer: a certificate group is named upstreamer, the name of the unit's dynamic user and group; systemd will not start the unit while a static group has that name.";
+            }
+          ];
 
         security.acme.certs = genAttrs certNames (c: {
           domain = lib.mkDefault c;

@@ -105,7 +105,7 @@ let
       reloadServices
       ;
   };
-  own = domain: cert domain [ ] "upstreamer" [ "upstreamer.service" ];
+  own = domain: cert domain [ ] "upstreamer-certs" [ "upstreamer.service" ];
   unit' = timeoutStopSec: groups: certs: {
     Type = "notify-reload";
     ExecStart = "${lib.getExe systems.edge.services.upstreamer.package} run --config /etc/upstreamer/config.json";
@@ -120,7 +120,7 @@ let
     edge = {
       failedAssertions = [ ];
       certs = lib.genAttrs [ "app.example.com" "cache.example.com" "s3.cache.example.com" ] own;
-      unit = unit [ "upstreamer" ] [ "app.example.com" "cache.example.com" "s3.cache.example.com" ];
+      unit = unit [ "upstreamer-certs" ] [ "app.example.com" "cache.example.com" "s3.cache.example.com" ];
       tcp = [
         80
         443
@@ -150,13 +150,13 @@ let
           "upstreamer.service"
         ];
         "mail.example.net" = cert "mail.example.net" [ ] "mail-certs" [ "upstreamer.service" ];
-        "example.org" = cert "example.org" [ "blog.example.org" "www.example.org" ] "upstreamer" [
+        "example.org" = cert "example.org" [ "blog.example.org" "www.example.org" ] "upstreamer-certs" [
           "upstreamer.service"
         ];
       };
       unit =
         unit
-          [ "dns-certs" "mail-certs" "upstreamer" ]
+          [ "dns-certs" "mail-certs" "upstreamer-certs" ]
           [
             "dns.example.net"
             "example.org"
@@ -186,12 +186,12 @@ let
       failedAssertions = [ ];
       certs = {
         "admin.example.com" = own "admin.example.com";
-        "preview.example.com" = cert "preview.example.com" [ "*.preview.example.com" ] "upstreamer" [
+        "preview.example.com" = cert "preview.example.com" [ "*.preview.example.com" ] "upstreamer-certs" [
           "upstreamer.service"
         ];
       };
       # A 30s drain.
-      unit = unit' 35 [ "upstreamer" ] [ "admin.example.com" "preview.example.com" ];
+      unit = unit' 35 [ "upstreamer-certs" ] [ "admin.example.com" "preview.example.com" ];
       tcp = [
         80
         443
@@ -209,6 +209,15 @@ let
 
   # Misconfigured hosts, each with the assertion messages it must fail with.
   rejected = {
+    cert-group-named-like-the-unit = {
+      module.services.upstreamer = {
+        acme.group = "upstreamer";
+        virtualHosts."a.example.com".proxy = "http://127.0.0.1:1";
+      };
+      messages = [
+        "services.upstreamer: a certificate group is named upstreamer, the name of the unit's dynamic user and group; systemd will not start the unit while a static group has that name."
+      ];
+    };
     acme-and-files = {
       module.services.upstreamer.virtualHosts."a.example.com" = {
         tls = {
