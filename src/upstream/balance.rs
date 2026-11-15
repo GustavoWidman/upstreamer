@@ -34,3 +34,7 @@ pub(crate) fn pick(
     let _ = (pool, members, upstreams, local, ex, tried, now);
     None
 }
+
+/// Entry points for `benches/balance.rs`; not part of the API.
+#[cfg(feature = "internals")]
+pub mod bench {}

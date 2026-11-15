@@ -72,6 +72,21 @@ name = "codec"
 harness = false
 required-features = ["internals"]
 
+[[bench]]
+name = "balance"
+harness = false
+required-features = ["internals"]
+
+[[bench]]
+name = "limit"
+harness = false
+required-features = ["internals"]
+
+[[bench]]
+name = "metrics"
+harness = false
+required-features = ["internals"]
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

@@ -79,6 +79,15 @@ pub use proto::h1::codec::harness as codec;
 #[doc(hidden)]
 pub use proto::h2::harness as h2;
 
+/// Balancing, rate-limit and metrics entry points for the benchmarks; not part of the API.
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod bench {
+    pub use crate::limit::bench as limit;
+    pub use crate::metrics::bench as metrics;
+    pub use crate::upstream::balance::bench as balance;
+}
+
 /// Options of `upstreamer run`.
 pub struct RunOptions {
     /// The JSON config the NixOS module wrote (`/etc/upstreamer/config.json`). Read again on

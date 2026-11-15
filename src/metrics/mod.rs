@@ -79,3 +79,7 @@ pub(crate) fn series(plan: &Plan) -> usize {
     let _ = plan;
     0
 }
+
+/// Entry points for `benches/metrics.rs`; not part of the API.
+#[cfg(feature = "internals")]
+pub mod bench {}

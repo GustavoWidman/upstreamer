@@ -60,3 +60,7 @@ impl Table {
         }
     }
 }
+
+/// Entry points for `benches/limit.rs`; not part of the API.
+#[cfg(feature = "internals")]
+pub mod bench {}
