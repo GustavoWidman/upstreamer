@@ -172,6 +172,13 @@ winner is the best median. upstreamer's margin to the best competitor is
 reported with the combined spread (half of each range, summed) and a verdict:
 better or worse with disjoint ranges, or no separation.
 
+Some scenarios overcommit the VM by themselves: in `wide` `tls-handshake`
+the client spends about as much CPU per handshake as the server, and the
+fastest server's vCPUs see 7 to 9% steal on every attempt. When a server has
+no clean run and its runs failed only on steal, the report summarizes those
+runs and labels the row with the steal level, instead of dropping the
+fastest server from the ranking.
+
 ## Known noise
 
 - The VM's vCPUs share a power-limited mobile CPU; total load sets the clock,
