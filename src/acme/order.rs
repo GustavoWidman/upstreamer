@@ -417,3 +417,54 @@ impl<'a> Session<'a> {
         valid_nonce(response.nonce).ok_or_else(|| format!("{url}: no Replay-Nonce").into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(list: &[&str]) -> Vec<Box<str>> {
+        list.iter().map(|n| Box::from(*n)).collect()
+    }
+
+    /// A chain for `names` signed by the key of `key_pem`.
+    fn chain(key_pem: &str, names: &[&str]) -> Vec<u8> {
+        let der = PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).unwrap();
+        let key = rcgen::KeyPair::try_from(&der).unwrap();
+        let params =
+            rcgen::CertificateParams::new(names.iter().map(|n| n.to_string()).collect::<Vec<_>>())
+                .unwrap();
+        store::pem("CERTIFICATE", params.self_signed(&key).unwrap().der()).into_bytes()
+    }
+
+    #[test]
+    fn an_issued_chain_must_name_every_host_and_match_the_requested_key() {
+        let wanted = names(&["a.test", "b.test"]);
+        let (_, key_pem) = request(&wanted).unwrap();
+        assert!(check_chain(&chain(&key_pem, &["b.test", "a.test"]), &key_pem, &wanted).is_ok());
+        assert_eq!(
+            check_chain(&chain(&key_pem, &["a.test"]), &key_pem, &wanted).unwrap_err(),
+            "the issued certificate does not name b.test"
+        );
+        let (_, other_key) = request(&wanted).unwrap();
+        assert!(
+            check_chain(&chain(&other_key, &["a.test", "b.test"]), &key_pem, &wanted).is_err(),
+            "a certificate for another key"
+        );
+        assert!(
+            check_chain(b"", &key_pem, &wanted).is_err(),
+            "no certificate"
+        );
+    }
+
+    #[test]
+    fn only_base64url_nonces_are_used() {
+        assert_eq!(
+            valid_nonce(Some("abc-_09".into())).as_deref(),
+            Some("abc-_09")
+        );
+        for bad in ["", "a b", "a+b", "a/b", "a=b"] {
+            assert_eq!(valid_nonce(Some(bad.into())), None, "{bad:?}");
+        }
+        assert_eq!(valid_nonce(None), None);
+    }
+}
