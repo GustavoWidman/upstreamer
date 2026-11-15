@@ -313,6 +313,22 @@ fn show_flag(flag: Option<bool>) -> String {
     }
 }
 
+/// Whether Caddy served a file without a Content-Type, which means the host it runs on has no
+/// type for the file's extension. Its file server takes the type from Go's
+/// `mime.TypeByExtension` and, when that finds none, sends no Content-Type at all rather than
+/// let Go sniff one. Go knows a few types of its own and reads every other from the host: the
+/// first freedesktop `globs2` database it finds, otherwise the `mime.types` files (nixpkgs adds
+/// mailcap's). Hosts disagree on extensions: Ubuntu's shared-mime-info has no `.webmanifest`,
+/// which the fleet's NixOS hosts type from mailcap. Such an absence says nothing about the
+/// fleet, so the probe's Content-Type is not compared; upstreamer's own table is checked by
+/// its unit tests. A file is a local answer (no origin read) with a 200 or 206 and a body.
+fn untyped_by_host(caddy: &Observation) -> bool {
+    caddy.upstream.is_empty()
+        && matches!(caddy.status, 200 | 206)
+        && !caddy.body.is_empty()
+        && !caddy.headers.iter().any(|(n, _)| n == "content-type")
+}
+
 /// Every difference between Caddy's and upstreamer's observation of one probe.
 pub fn differences(
     site: &str,
@@ -338,6 +354,9 @@ pub fn differences(
         ours.status.to_string(),
     );
     for name in names(&caddy.headers, &ours.headers) {
+        if name == "content-type" && untyped_by_host(caddy) {
+            continue;
+        }
         differ(
             format!("header {name}"),
             values(&caddy.headers, &name),
