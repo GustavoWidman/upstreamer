@@ -49,7 +49,11 @@ in
       {
         imports = [ "${pkgs.path}/nixos/tests/common/acme/server" ];
         networking.nameservers = lib.mkForce [ "127.0.0.1" ];
-        networking.firewall.allowedTCPPorts = [ 8055 ];
+        networking.firewall.allowedTCPPorts = [
+          53
+          8055
+        ];
+        networking.firewall.allowedUDPPorts = [ 53 ];
         systemd.services.pebble-challtestsrv = {
           wantedBy = [ "multi-user.target" ];
           before = [ "pebble.service" ];
@@ -61,13 +65,15 @@ in
       };
 
     server =
-      { ... }:
+      { nodes, ... }:
       {
         imports = [
           module
           "${pkgs.path}/nixos/tests/common/acme/client"
         ];
         networking.hosts."127.0.0.1" = names;
+        # lego finds each challenge's zone through the resolver: pebble-challtestsrv's DNS.
+        networking.nameservers = lib.mkForce [ nodes.acme.networking.primaryIPAddress ];
         environment.systemPackages = [
           pkgs.openssl
           pkgs.python3
