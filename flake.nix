@@ -29,6 +29,7 @@
         (import ./nix/package.nix inputs)
         (import ./nix/module.nix inputs)
         (import ./nix/bench.nix inputs)
+        (import ./nix/tests inputs)
       ];
     };
 }
