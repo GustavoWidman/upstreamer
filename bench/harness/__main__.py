@@ -21,7 +21,7 @@ from . import report, upstreamer
 from . import topology as t
 from .loadgen import plan as loadgen_plan
 from .procs import raise_nofile, run_pinned
-from .runner import Origin, Runner, RunSpec, Session, matrix, probe, wait_port_free
+from .runner import Origin, Runner, RunSpec, Session, matrix, pin_harness, probe, wait_port_free
 from .scenarios import SCENARIOS, lookup
 from .servers import registry
 from .tools import tool
@@ -150,6 +150,7 @@ def cmd_serve(a: argparse.Namespace) -> None:
     profile = pick_profiles(a.profile)[0]
     session = Session(a.out, a.repo, "serve")
     runner = Runner(session)
+    pin_harness(profile)
     wait_port_free(t.ORIGIN_PORT)
     runner.origin = Origin(profile, session.dir)
     run_dir = session.dir / "runs" / f"serve-{server.name}"
@@ -189,6 +190,7 @@ def cmd_profile(a: argparse.Namespace) -> None:
     sc = lookup(a.scenario)
     session = Session(a.out, a.repo, "profile")
     runner = Runner(session)
+    pin_harness(profile)
     wait_port_free(t.ORIGIN_PORT)
     runner.origin = Origin(profile, session.dir)
     out = a.out / "profiles" / f"{session.id}-{profile.name}-{sc.name}-{server.name}"

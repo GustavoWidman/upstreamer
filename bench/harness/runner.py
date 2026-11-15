@@ -36,8 +36,6 @@ ORIGIN_IDLE_MIN = 0.20
 PROXY_IDLE_MAX = 0.10
 PROXY_FOREIGN_MAX = 0.10
 PROXY_STEAL_MAX = 0.05
-FOREIGN_CORES_MAX = 1.5
-QUIET_CORES_MAX = 1.0
 QUIET_WAIT_MAX_S = 3600
 # Flags that say the host, not the server, moved the number: such runs are
 # invalid and re-queued at the end of the matrix.
@@ -197,10 +195,11 @@ def probe(scenario: Scenario, port_override: int | None, workdir: Path) -> str |
     return None
 
 
-def wait_quiet(progress=print, max_wait_s: float = QUIET_WAIT_MAX_S) -> dict:
+def wait_quiet(profile: t.Profile, progress=print, max_wait_s: float = QUIET_WAIT_MAX_S) -> dict:
     """Block until the host's task CPU use (everything but steal, irq and
-    idle) stays under QUIET_CORES_MAX for a 2 s sample. lab is shared; this
-    keeps another job's build or test from landing inside a measured window."""
+    idle) stays under the profile's quiet_cores_max for a 2 s sample. lab is
+    shared; this keeps another job's build or test from landing inside a
+    measured window."""
     start = time.monotonic()
     announced = False
     while True:
@@ -210,8 +209,8 @@ def wait_quiet(progress=print, max_wait_s: float = QUIET_WAIT_MAX_S) -> dict:
         bd = breakdown(a, b, a.cpus.keys())
         busy = (bd["user"] + bd["nice"] + bd["system"]) / (b.at - a.at)
         waited = time.monotonic() - start
-        if busy < QUIET_CORES_MAX or waited >= max_wait_s:
-            return {"busy_cores_before": busy, "waited_s": waited, "gave_up": busy >= QUIET_CORES_MAX}
+        if busy < profile.quiet_cores_max or waited >= max_wait_s:
+            return {"busy_cores_before": busy, "waited_s": waited, "gave_up": busy >= profile.quiet_cores_max}
         if not announced:
             progress(f"host busy ({busy:.1f} cores of foreign work); waiting for quiet")
             announced = True
@@ -439,7 +438,7 @@ class Runner:
             flags.append("loadgen_saturated")
         if usage["origin"]["idle_frac"] < ORIGIN_IDLE_MIN:
             flags.append("origin_saturated")
-        if out["system"]["foreign_cores"] > FOREIGN_CORES_MAX:
+        if out["system"]["foreign_cores"] > spec.profile.foreign_cores_max:
             flags.append("foreign_load")
         if spec.server.launches:
             if spec.mode == "closed" and usage["proxy"]["idle_frac"] > PROXY_IDLE_MAX:
@@ -509,6 +508,15 @@ class Runner:
         }
 
 
+_AFFINITY = os.sched_getaffinity(0)
+
+
+def pin_harness(profile: t.Profile) -> None:
+    """Pin this process (and the threads it starts later) to the profile's
+    harness CPUs, so its sampling never runs on the proxy's vCPUs."""
+    os.sched_setaffinity(0, profile.harness or _AFFINITY)
+
+
 def rotate(items: list, k: int) -> list:
     if not items:
         return items
@@ -552,6 +560,7 @@ def matrix(
         for profile in profiles:
             if runner.origin:
                 runner.origin.stop()
+            pin_harness(profile)
             wait_port_free(t.ORIGIN_PORT)
             runner.origin = Origin(profile, session.dir)
             queue = by_profile[profile.name]
@@ -565,7 +574,7 @@ def matrix(
                         if not rate:
                             progress(f"skip {sc.name}/{profile.name}: no open-loop rate stored")
                             continue
-                    runner.quiet = wait_quiet(progress, quiet_wait_s)
+                    runner.quiet = wait_quiet(profile, progress, quiet_wait_s)
                     rec = runner.run(RunSpec(server, sc, profile, mode, rate, rep, warmup_s, duration_s))
                     rec_retry = rec["status"] != "ok" or bool(NOISE & set(rec.get("flags", [])))
                     records.append(rec)

@@ -1,10 +1,15 @@
 """CPU layout per profile and the fixed ports every server listens on.
 
-CPUs 0 and 1 are left to the harness, sshd and the host's own services. The
-origin, the proxy and the load generator each get disjoint CPU sets so none of
-them steals cycles from another. The layouts leave vCPUs 11/12 to 15 idle on
-purpose: the bench VM's 16 vCPUs share a power-limited 8-core mobile CPU, and
-past about 10 busy vCPUs hypervisor steal climbs and total throughput falls.
+On the 16-vCPU bench VM, CPUs 0 and 1 are left to the harness, sshd and the
+host's own services. The origin, the proxy and the load generator each get
+disjoint CPU sets so none of them steals cycles from another. The layouts leave
+vCPUs 11/12 to 15 idle on purpose: the bench VM's 16 vCPUs share a
+power-limited 8-core mobile CPU, and past about 10 busy vCPUs hypervisor steal
+climbs and total throughput falls.
+
+A 2-vCPU host has no such room: `pair` gives the proxy vCPU 1 alone and puts
+the origin, the load generator and the harness itself on vCPU 0, so that
+vCPU's idle fraction says whether the client side limited the run.
 """
 
 import os
@@ -35,6 +40,13 @@ class Profile:
     # Added to the load generator for client-heavy scenarios (full TLS
     # handshakes cost the client about as much as the server).
     spare: tuple[int, ...] = ()
+    # CPUs the harness process pins itself to; empty leaves it unpinned.
+    harness: tuple[int, ...] = ()
+    # Task CPU, in cores, other processes may use: before a run starts (quiet
+    # gate) and during its measured window (else the run is flagged
+    # foreign_load and re-queued).
+    quiet_cores_max: float = 1.0
+    foreign_cores_max: float = 1.5
 
     @property
     def workers(self) -> int:
@@ -62,6 +74,16 @@ PROFILES = {
             loadgen=(8, 9, 10, 11),
             description="proxy on 3 vCPUs, the most this VM gives before hypervisor steal reaches the proxy",
             spare=(12, 13, 14),
+        ),
+        Profile(
+            "pair",
+            proxy=(1,),
+            origin=(0,),
+            loadgen=(0,),
+            description="2-vCPU host: proxy alone on vCPU 1; origin, load generator and harness share vCPU 0",
+            harness=(0,),
+            quiet_cores_max=0.2,
+            foreign_cores_max=0.2,
         ),
         Profile(
             "single",

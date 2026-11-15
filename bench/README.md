@@ -6,7 +6,10 @@ records enough to answer, after the fact: what limited it, whether every
 request succeeded and reached the origin, whether the load generator or the
 origin was the bottleneck, and whether the host was disturbing it.
 
-Run it on the Linux bench host only (`x86_64-linux`). Never benchmark on macOS.
+Run it on Linux only: the x86_64 bench VM with the `fleet` and `wide`
+profiles, or a 2-vCPU aarch64 host (the fleet's own hardware) with the `pair`
+profile. Never benchmark on macOS. On aarch64 the toolchain has no wrk2, which
+does not build there, so only closed-loop runs work.
 
 ## Commands
 
@@ -41,6 +44,7 @@ come from its cgroup and cover every process and thread it spawns.
 | `fleet` | 2-3 | 4-6 | 7-10 | 11-12 |
 | `wide` | 2-4 | 5-7 | 8-11 | 12-14 |
 | `single` | 2 | 4-6 | 7-10 | 11-12 (sensitivity check only) |
+| `pair` | 1 | 0 | 0 | none (2-vCPU hosts) |
 
 `fleet` mirrors the 2-core production hosts. `wide` is 3 proxy vCPUs because
 the bench VM's 16 vCPUs share a power-limited 8-core mobile CPU: at 8 busy
@@ -50,6 +54,12 @@ whole VM delivers about 5.5 single-vCPU equivalents. Measured with nginx on
 left on the origin. 4 gave 87k, but with 10% steal on the proxy's vCPUs and
 the origin under 10% idle, so the number measured the host. 6 and 8 fell to
 72k and 74k.
+`pair` is for a host with 2 vCPUs: every server runs one worker on vCPU 1,
+and the origin, the load generator and the harness itself share vCPU 0. Its
+`loadgen_saturated` and `origin_saturated` flags both read vCPU 0, so they say
+the client side, not the proxy, set the number; compare against `direct` on
+`h1` for the client side's own ceiling. Its quiet gate and `foreign_load`
+limit are 0.2 cores, since 1.5 foreign cores would be most of the host.
 `custom:p=2-3:o=4-6:l=7-8` builds an ad-hoc layout for harness checks.
 
 The origin (`bench/origin`) is a small HTTP/1.1 server: one thread per vCPU,
@@ -113,7 +123,7 @@ must print `ok` for every scenario it claims.
 ## One run
 
 1. Wait until the host's task CPU use (everything except the idle origin) is
-   under 1 core for 2 s (lab is shared).
+   under 1 core (0.2 on `pair`) for 2 s (lab is shared).
 2. Start the server in its scope; probe the scenario's protocol and path with
    4 requests until all return 2xx with the expected body size.
 3. Warm up for `--warmup` seconds with the same load, then measure for
@@ -154,7 +164,7 @@ A run is valid only without these:
   during the hold.
 - `loadgen_saturated`: the load generator's vCPUs were under 10% idle (closed loop).
 - `loadgen_failed`: the load generator exited non-zero.
-- `foreign_load`: other processes used over 1.5 cores host-wide, or (closed
+- `foreign_load`: other processes used over 1.5 cores (0.2 on `pair`) host-wide, or (closed
   loop) over 10% of the proxy's vCPUs.
 - `steal`: hypervisor steal over 5% of the proxy's vCPUs.
 
