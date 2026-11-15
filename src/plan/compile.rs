@@ -54,7 +54,11 @@ impl Sources for FileSystem {
 
 const DEFAULT_DIAL: Duration = Duration::from_secs(5);
 const DEFAULT_IDLE: Duration = Duration::from_secs(120);
-const MAX_IDLE_PER_CORE: u16 = 64;
+/// Idle connections kept per origin and core. A core with more exchanges in flight than this
+/// closes the surplus when they finish together and dials again for the next burst, so the
+/// cap sits above the concurrency one core serves (an HTTP/2 client multiplexes up to
+/// `max_streams` requests over each of its connections).
+const MAX_IDLE_PER_CORE: u16 = 256;
 const ALT_SVC_MAX_AGE: u32 = 86400;
 
 /// Compiles a parsed config. `generation` is stamped into the plan. On error, every
