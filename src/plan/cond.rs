@@ -75,6 +75,8 @@ impl Cond {
 }
 
 /// Path patterns split by shape at compile time so the common ones are a slice compare.
+/// Paths match ASCII case-insensitively, as Caddy's `path` matcher does: `/API/sync` takes
+/// the `/api/*` route, and `/_MD/x` is refused like `/_md/x`.
 #[derive(Debug, Default)]
 pub(crate) struct PathPatterns {
     pub exact: Box<[Box<[u8]>]>,
@@ -88,10 +90,15 @@ pub(crate) struct PathPatterns {
 
 impl PathPatterns {
     pub fn matches(&self, path: &[u8]) -> bool {
-        self.exact.iter().any(|p| **p == *path)
-            || self.prefix.iter().any(|p| path.starts_with(p))
-            || self.suffix.iter().any(|p| path.ends_with(p))
-            || self.glob.iter().any(|g| g.matches(path))
+        self.exact.iter().any(|p| p.eq_ignore_ascii_case(path))
+            || self
+                .prefix
+                .iter()
+                .any(|p| path.len() >= p.len() && path[..p.len()].eq_ignore_ascii_case(p))
+            || self.suffix.iter().any(|p| {
+                path.len() >= p.len() && path[path.len() - p.len()..].eq_ignore_ascii_case(p)
+            })
+            || self.glob.iter().any(|g| g.matches_with(path, true))
     }
 }
 
@@ -119,15 +126,21 @@ impl Glob {
     }
 
     pub fn matches(&self, s: &[u8]) -> bool {
+        self.matches_with(s, false)
+    }
+
+    /// `fold`: compare ASCII letters case-insensitively.
+    pub fn matches_with(&self, s: &[u8], fold: bool) -> bool {
+        let starts = |s: &[u8], p: &[u8]| s.len() >= p.len() && eq(&s[..p.len()], p, fold);
         let mut pieces = &*self.pieces;
         let mut rest = s;
         if self.anchored_start {
             match pieces.split_first() {
                 Some((first, tail)) => {
-                    let Some(r) = rest.strip_prefix(&**first) else {
+                    if !starts(rest, first) {
                         return false;
-                    };
-                    rest = r;
+                    }
+                    rest = &rest[first.len()..];
                     pieces = tail;
                 }
                 // A pattern with no star and no bytes matches only the empty string.
@@ -147,15 +160,31 @@ impl Glob {
             None
         };
         for piece in pieces {
-            match memchr::memmem::find(rest, piece) {
+            let found = if fold {
+                rest.windows(piece.len())
+                    .position(|w| w.eq_ignore_ascii_case(piece))
+            } else {
+                memchr::memmem::find(rest, piece)
+            };
+            match found {
                 Some(i) => rest = &rest[i + piece.len()..],
                 None => return false,
             }
         }
         match last {
-            Some(last) => rest.len() >= last.len() && rest.ends_with(last),
+            Some(last) => {
+                rest.len() >= last.len() && eq(&rest[rest.len() - last.len()..], last, fold)
+            }
             None => true,
         }
+    }
+}
+
+fn eq(a: &[u8], b: &[u8], fold: bool) -> bool {
+    if fold {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
     }
 }
 

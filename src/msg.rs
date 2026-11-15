@@ -845,14 +845,14 @@ impl RequestHead {
         if prefix.is_empty() {
             return true;
         }
-        match self.path.get(&self.fields.buf).strip_prefix(prefix) {
+        match strip_prefix_ignore_case(self.path.get(&self.fields.buf), prefix) {
             Some([]) => self.path = self.fields.copy(b"/"),
             Some([b'/', ..]) => self.path.start += prefix.len() as u32,
             _ => return false,
         }
         if self.target == Target::Original {
             let raw = self.raw_target.get(&self.fields.buf);
-            match raw.strip_prefix(prefix) {
+            match strip_prefix_ignore_case(raw, prefix) {
                 Some([b'/', ..]) => self.raw_target.start += prefix.len() as u32,
                 _ => self.target = Target::Rebuilt,
             }
@@ -999,6 +999,12 @@ impl ResponseHead {
         }
         resp
     }
+}
+
+/// Path prefixes compare ASCII case-insensitively, like the `path` matcher that selects them.
+fn strip_prefix_ignore_case<'a>(s: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+    (s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix))
+        .then(|| &s[prefix.len()..])
 }
 
 #[cfg(test)]
@@ -1169,6 +1175,17 @@ mod tests {
             b"/a%20b",
             "a failed rewrite changes nothing"
         );
+    }
+
+    #[test]
+    fn strip_prefix_ignores_ascii_case() {
+        let mut h = head("GET", "/DAEMON/x?a=1", "a");
+        assert!(h.strip_prefix(b"/daemon"));
+        assert_eq!(h.path().as_bytes(), b"/x");
+        let mut out = Vec::new();
+        h.write_upstream_target(&mut out);
+        assert_eq!(out, b"/x?a=1");
+        assert!(!head("GET", "/daemonx", "a").strip_prefix(b"/daemon"));
     }
 
     #[test]

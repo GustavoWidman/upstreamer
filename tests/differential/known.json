@@ -701,6 +701,27 @@
         "field": "header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api in upper case is proxied, as with Caddy",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "bucket in upper case",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon upper case",
+        "field": "header via",
+        "caddy": "1.1 Caddy",
+        "upstreamer": "(absent)"
       }
     ]
   },
@@ -1145,6 +1166,27 @@
       {
         "site": "100.64.0.7",
         "probe": "viewer by tailnet address",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "play.example.net",
+        "probe": "daemon upper case",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "app.example.com",
+        "probe": "api in upper case is proxied, as with Caddy",
+        "field": "upstream header accept-encoding",
+        "caddy": "gzip",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "s3.cache.example.com",
+        "probe": "bucket in upper case",
         "field": "upstream header accept-encoding",
         "caddy": "gzip",
         "upstreamer": "(absent)"
@@ -2316,152 +2358,6 @@
         "field": "body",
         "caddy": "45 bytes, sha256 d2ea46080e3f, \"400 Bad Request: missing required Host header\"",
         "upstreamer": "(empty)"
-      }
-    ]
-  },
-  {
-    "kind": "accepted",
-    "about": "Tradeoffs accepted: \"Paths match case-sensitively.\" Caddy's path matchers and handle_path ignore case.",
-    "differences": [
-      {
-        "site": "app.example.com",
-        "probe": "api upper case is a client route",
-        "field": "header accept-ranges",
-        "caddy": "(absent)",
-        "upstreamer": "bytes"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "api upper case is a client route",
-        "field": "header cache-control",
-        "caddy": "(absent)",
-        "upstreamer": "no-cache"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "api upper case is a client route",
-        "field": "header content-type",
-        "caddy": "text/plain; charset=utf-8",
-        "upstreamer": "text/html; charset=utf-8"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "api upper case is a client route",
-        "field": "header etag",
-        "caddy": "\"o1\"",
-        "upstreamer": "\"index-html-5d41402a\""
-      },
-      {
-        "site": "app.example.com",
-        "probe": "api upper case is a client route",
-        "field": "header vary",
-        "caddy": "(absent)",
-        "upstreamer": "accept-encoding"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "api upper case is a client route",
-        "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "api upper case is a client route",
-        "field": "header x-origin",
-        "caddy": "API",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "api upper case is a client route",
-        "field": "body",
-        "caddy": "28 bytes, sha256 fbd2326085f8, \"API: GET /API/sync HTTP/1.1\\n\"",
-        "upstreamer": "11 bytes, sha256 9bf4884b82a5, \"index.html\\n\""
-      },
-      {
-        "site": "app.example.com",
-        "probe": "api upper case is a client route",
-        "field": "upstream",
-        "caddy": "API GET /API/sync HTTP/1.1",
-        "upstreamer": "(none)"
-      },
-      {
-        "site": "s3.cache.example.com",
-        "probe": "bucket in upper case",
-        "field": "status",
-        "caddy": "200",
-        "upstreamer": "404"
-      },
-      {
-        "site": "s3.cache.example.com",
-        "probe": "bucket in upper case",
-        "field": "header etag",
-        "caddy": "\"o1\"",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "s3.cache.example.com",
-        "probe": "bucket in upper case",
-        "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "s3.cache.example.com",
-        "probe": "bucket in upper case",
-        "field": "header x-origin",
-        "caddy": "STORAGE",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "s3.cache.example.com",
-        "probe": "bucket in upper case",
-        "field": "body",
-        "caddy": "34 bytes, sha256 b532e9535913, \"STORAGE: GET /BUCKET/obj HTTP/1.1\\n\"",
-        "upstreamer": "9 bytes, sha256 e3ebaa16dd9d, \"Not found\""
-      },
-      {
-        "site": "s3.cache.example.com",
-        "probe": "bucket in upper case",
-        "field": "upstream",
-        "caddy": "STORAGE GET /BUCKET/obj HTTP/1.1",
-        "upstreamer": "(none)"
-      },
-      {
-        "site": "play.example.net",
-        "probe": "daemon upper case",
-        "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "play.example.net",
-        "probe": "daemon upper case",
-        "field": "header x-origin",
-        "caddy": "DAEMON",
-        "upstreamer": "PANEL"
-      },
-      {
-        "site": "play.example.net",
-        "probe": "daemon upper case",
-        "field": "body",
-        "caddy": "24 bytes, sha256 6972074fd5f4, \"DAEMON: GET /x HTTP/1.1\\n\"",
-        "upstreamer": "30 bytes, sha256 186142e4a280, \"PANEL: GET /DAEMON/x HTTP/1.1\\n\""
-      },
-      {
-        "site": "play.example.net",
-        "probe": "daemon upper case",
-        "field": "upstream request",
-        "caddy": "DAEMON GET /x HTTP/1.1",
-        "upstreamer": "PANEL GET /DAEMON/x HTTP/1.1"
-      },
-      {
-        "site": "play.example.net",
-        "probe": "daemon upper case",
-        "field": "upstream header accept-encoding",
-        "caddy": "gzip",
-        "upstreamer": "(absent)"
       }
     ]
   }

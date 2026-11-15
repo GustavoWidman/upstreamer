@@ -10,6 +10,13 @@
       "ops": []
     },
     {
+      "name": "api matches regardless of ASCII case, as Caddy's path matcher does",
+      "request": "GET https://app.example.com/API/sync",
+      "outcome": "proxy http://127.0.0.1:7979",
+      "target": "/API/sync",
+      "ops": []
+    },
+    {
       "name": "the live event stream is proxied",
       "request": "GET https://app.example.com/api/live",
       "headers": [
