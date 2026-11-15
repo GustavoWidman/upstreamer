@@ -4,6 +4,8 @@
 
 #![allow(dead_code)]
 
+pub mod clients;
+
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -22,6 +24,8 @@ pub const PATIENCE: Duration = Duration::from_secs(20);
 pub struct Proxy {
     child: Child,
     pub addr: SocketAddr,
+    /// The notification that said the proxy was ready.
+    pub ready: String,
     config: PathBuf,
     notify: UnixDatagram,
     _port: Reserved,
@@ -84,6 +88,7 @@ impl Proxy {
         Proxy {
             child,
             addr,
+            ready,
             config,
             notify,
             _port: port,
@@ -110,9 +115,33 @@ impl Proxy {
 
     /// Replaces the config file's sites; takes effect at the next [`Proxy::reload`].
     pub fn rewrite(&self, sites: Value) {
+        self.rewrite_with(sites, json!({}));
+    }
+
+    /// Replaces the config file's sites and top-level keys, as [`Proxy::start_with`] takes them.
+    pub fn rewrite_with(&self, sites: Value, top: Value) {
+        self.rewrite_raw(document(self.addr, sites, top).to_string().as_bytes());
+    }
+
+    /// Replaces the config file with `bytes`, as an atomic rename.
+    pub fn rewrite_raw(&self, bytes: &[u8]) {
         let temp = self.config.with_extension("new");
-        std::fs::write(&temp, document(self.addr, sites, json!({})).to_string()).unwrap();
+        std::fs::write(&temp, bytes).unwrap();
         std::fs::rename(temp, &self.config).unwrap();
+    }
+
+    /// Waits up to `limit` for the proxy to exit; `None` if it is still running.
+    pub fn exit_within(&mut self, limit: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = Instant::now() + limit;
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return Some(status);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     pub fn signal(&self, signal: libc::c_int) {
