@@ -32,5 +32,19 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "h2_frames"
+path = "fuzz_targets/h2_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_hpack"
+path = "fuzz_targets/h2_hpack.rs"
+test = false
+doc = false
+bench = false
+
 # Not a member of the proxy's build; built by `cargo fuzz` on its own.
 [workspace]
