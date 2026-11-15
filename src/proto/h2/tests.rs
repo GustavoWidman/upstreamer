@@ -1756,7 +1756,7 @@ fn a_repeated_head_is_sent_as_the_same_small_block_and_others_are_not_mistaken_f
     let mut client = Client::new();
     let mut stream = 1;
     // Answers a request and returns the head a client decodes and the size of its block.
-    let mut answer = |client: &mut Client, head: &Fields, length: u64, date: &[u8]| {
+    let mut answer = |client: &mut Client, head: &Fields, length: u64, date: &[u8; 29]| {
         let slot = client.get(stream);
         stream += 2;
         let engine = &mut client.session.engine;

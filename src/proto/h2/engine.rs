@@ -240,11 +240,11 @@ impl LastHead {
         status: Status,
         fields: &Fields,
         length: Option<u64>,
-        date: Option<&[u8]>,
+        date: Option<&[u8; 29]>,
     ) -> bool {
         self.status == status.code()
             && self.length == length
-            && self.date.as_ref().map(|date| &date[..]) == date
+            && self.date.as_ref() == date
             && self.bytes == fields.buf
             && self.fields.len() == fields.table.len()
             && self
@@ -259,13 +259,13 @@ impl LastHead {
         status: Status,
         fields: &Fields,
         length: Option<u64>,
-        date: Option<&[u8]>,
+        date: Option<&[u8; 29]>,
         block: &[u8],
         changes: u64,
     ) {
         self.status = status.code();
         self.length = length;
-        self.date = date.and_then(|date| date.try_into().ok());
+        self.date = date.copied();
         self.bytes.clear();
         self.bytes.extend_from_slice(&fields.buf);
         self.fields.clear();
@@ -1201,16 +1201,16 @@ impl Engine {
     }
 
     /// Queues the response head of the stream in `slot`: status, the head's end-to-end
-    /// fields, then `length` as content-length and `date`, each when given. A head's own
-    /// Content-Length is never sent (the body's length is `length`), nor is its Date when
-    /// `date` replaces it.
+    /// fields, then `length` as content-length and `date` (an IMF-fixdate, 29 bytes), each
+    /// when given. A head's own Content-Length is never sent (the body's length is
+    /// `length`), nor is its Date when `date` replaces it.
     pub fn send_head(
         &mut self,
         slot: u32,
         status: Status,
         fields: &Fields,
         length: Option<u64>,
-        date: Option<&[u8]>,
+        date: Option<&[u8; 29]>,
         end_stream: bool,
     ) {
         let stream = &mut self.streams[slot as usize];

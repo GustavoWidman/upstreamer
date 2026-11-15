@@ -616,9 +616,8 @@ async fn stream<'a>(
     let empty = head_only || length == Some(0);
     {
         let date = local.then(|| *core.clock.http_date.borrow());
-        let date = date.as_ref().map(|date| &date[..]);
         let mut engine = conn.engine.borrow_mut();
-        engine.send_head(slot, status, &head.fields, length, date, empty);
+        engine.send_head(slot, status, &head.fields, length, date.as_ref(), empty);
     }
     ex.recycle(head);
     request.answered = Some((log, status));

@@ -155,7 +155,7 @@ struct Work {
 type Head = Vec<(Vec<u8>, Vec<u8>)>;
 
 /// The Date every stand-in response carries.
-const DATE: &[u8] = b"Thu, 01 Jan 1970 00:00:00 GMT";
+const DATE: &[u8; 29] = b"Thu, 01 Jan 1970 00:00:00 GMT";
 
 /// Answers every request of a [`Session`], as the streams' work would.
 #[derive(Default)]
