@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .runner import INVALID
+
+CEILING = frozenset({"steal", "loadgen_saturated"})
 from .scenarios import SCENARIOS, lookup
 from .servers import registry
 
@@ -90,19 +92,24 @@ def summarize(records: list[dict]) -> dict:
             valid = [r for r in recs if r.get("valid") and _metric(r)[2] is not None]
             if mode == "open":
                 valid = [r for r in valid if "rate_missed" not in r.get("flags", [])]
-            # A scenario whose own load overcommits the VM puts hypervisor steal
-            # on the fastest server's vCPUs in every attempt. Dropping those runs
-            # would rank the wrong winner, so fall back to them, labelled.
-            steal_fallback = False
+            # Some runs fail only because the scenario hits a ceiling of this
+            # host: steal from its own load on the fastest server's vCPUs, or a
+            # load generator that cannot outrun the server. Dropping them would
+            # rank the wrong winner, so fall back to them and label the row; a
+            # loadgen-bound median is a lower bound.
+            fallback = None
             if not valid:
-                steal_only = [
+                ceiling = [
                     r for r in recs
-                    if r.get("status") == "ok" and set(r.get("flags", [])) & INVALID == {"steal"} and _metric(r)[2] is not None
+                    if r.get("status") == "ok" and _metric(r)[2] is not None
+                    and (set(r.get("flags", [])) & INVALID)
+                    and (set(r.get("flags", [])) & INVALID) <= CEILING
+                    and not (mode == "open" and "rate_missed" in r.get("flags", []))
                 ]
-                if mode == "open":
-                    steal_only = [r for r in steal_only if "rate_missed" not in r.get("flags", [])]
-                if steal_only:
-                    valid, steal_fallback = steal_only, True
+                if ceiling:
+                    valid = ceiling
+                    hit = set().union(*(set(r["flags"]) & CEILING for r in ceiling))
+                    fallback = "loadgen_bound" if "loadgen_saturated" in hit else "steal"
             flags: dict[str, int] = defaultdict(int)
             for r in recs:
                 for f in r.get("flags", []):
@@ -127,13 +134,13 @@ def summarize(records: list[dict]) -> dict:
                     ]
                 ),
                 "proxy_steal_median": _median([(u.get("proxy") or {}).get("steal_frac") for u in usage]),
-                "steal_fallback": steal_fallback,
+                "fallback": fallback,
                 "versions": sorted({r.get("server_version") for r in recs}),
                 "failures": sorted({r.get("failure") for r in recs if r.get("failure")}),
             }
             if metric == "proxy_pss_bytes":
                 extra["pss_per_conn_bytes_median"] = _median([(r.get("idle") or {}).get("pss_per_conn_bytes") for r in valid])
-            invalid = len(recs) - (0 if steal_fallback else len(valid))
+            invalid = len(recs) - (0 if fallback else len(valid))
             stats[server] = Stat(metric, higher, [_metric(r)[2] for r in valid], invalid, dict(flags), extra)
 
         def better(a: Stat, b: Stat) -> bool:
@@ -231,7 +238,7 @@ def _fmt(metric: str, v: float | None) -> str:
 
 def markdown(summary: dict) -> str:
     lines = ["# Benchmark summary", ""]
-    lines.append("Median and range over valid runs. `n` counts valid runs; `bad` counts runs flagged invalid (errors, work mismatch, saturated load generator, host noise) or failed, including re-queued attempts. A server with no valid runs whose runs failed only on proxy steal is summarized from those runs and labelled. Closed loop ranks by req/s, open loop by p99 at the fixed rate, idle-tls by proxy PSS with 10k connections open.")
+    lines.append("Median and range over valid runs. `n` counts valid runs; `bad` counts runs flagged invalid (errors, work mismatch, saturated load generator, host noise) or failed, including re-queued attempts. A server with no valid runs whose runs failed only on a host ceiling (proxy steal, or a saturated load generator) is summarized from those runs and labelled; a loadgen-bound median is a lower bound. Closed loop ranks by req/s, open loop by p99 at the fixed rate, idle-tls by proxy PSS with 10k connections open.")
     lines.append("")
     for g in summary["groups"]:
         sc = lookup(g["scenario"])
@@ -247,8 +254,10 @@ def markdown(summary: dict) -> str:
         )
         for name, st in order:
             mark = " (winner)" if name == g["winner"] else ""
-            if st.get("steal_fallback"):
+            if st.get("fallback") == "steal":
                 mark += f" [steal-only runs, proxy steal {100 * (st.get('proxy_steal_median') or 0):.0f}%]"
+            elif st.get("fallback") == "loadgen_bound":
+                mark += " [load generator saturated: lower bound]"
             rng = f"{_fmt(metric, st.get('min'))} to {_fmt(metric, st.get('max'))}" if st.get("values") else "-"
             def ms(k):
                 v = st.get(k)

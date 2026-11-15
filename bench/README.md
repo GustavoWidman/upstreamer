@@ -174,10 +174,12 @@ better or worse with disjoint ranges, or no separation.
 
 Some scenarios overcommit the VM by themselves: in `wide` `tls-handshake`
 the client spends about as much CPU per handshake as the server, and the
-fastest server's vCPUs see 7 to 9% steal on every attempt. When a server has
-no clean run and its runs failed only on steal, the report summarizes those
-runs and labels the row with the steal level, instead of dropping the
-fastest server from the ranking.
+fastest server's vCPUs see 7 to 9% steal on every attempt; in `wide`
+`static-h2`, h2load on 4 vCPUs saturates near 480k req/s before h2o does.
+When a server has no clean run and its runs failed only on such a host
+ceiling, the report summarizes those runs and labels the row (with the steal
+level, or as a lower bound when the load generator saturated), instead of
+dropping the fastest server from the ranking.
 
 ## Known noise
 
