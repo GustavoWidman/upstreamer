@@ -108,6 +108,7 @@ async fn accept(
             },
             () = &mut drain, if !draining => {
                 draining = true;
+                streams.draining.set(true);
                 // h3 sends the stream id it computes here as GOAWAY's and still accepts that
                 // stream. One past the last accepted stream is the id RFC 9114 section 5.2 asks
                 // for (every lower one is processed), and the arm above rejects the stream
@@ -158,6 +159,9 @@ const QUIET_SLACK: std::time::Duration = std::time::Duration::from_millis(60);
 #[derive(Default)]
 struct Streams {
     open: Cell<usize>,
+    /// Only a draining connection waits for its streams, so only then does the last stream
+    /// to end wake it (the signal takes a lock).
+    draining: Cell<bool>,
     none_open: Notify,
 }
 
@@ -181,7 +185,7 @@ impl Drop for OpenStream {
     fn drop(&mut self) {
         let left = self.0.open.get() - 1;
         self.0.open.set(left);
-        if left == 0 {
+        if left == 0 && self.0.draining.get() {
             self.0.none_open.notify_one();
         }
     }
