@@ -671,32 +671,53 @@ fn out_of_resources(e: &io::Error) -> bool {
     )
 }
 
-async fn connection(core: Rc<Core>, sock: Socket, info: ConnInfo, _guard: ConnGuard) {
-    match info.scheme {
-        Scheme::Http => crate::proto::h1::server::serve(core, Transport::Plain(sock), info).await,
-        Scheme::Https => {
-            let (config, timeout) = {
-                let snap = core.snapshot();
-                let Some(config) = snap.tls.clone() else {
-                    return;
+/// The task of one accepted connection. Its future is what every open connection carries for
+/// its whole life, so the handshake and the h2 driver are boxed: a task is as large as the
+/// largest future it awaits inline.
+#[expect(
+    clippy::manual_async_fn,
+    reason = "an async fn keeps a second copy of its arguments in its state"
+)]
+fn connection(
+    core: Rc<Core>,
+    sock: Socket,
+    info: ConnInfo,
+    guard: ConnGuard,
+) -> impl std::future::Future<Output = ()> {
+    async move {
+        let (io, proto) = match info.scheme {
+            Scheme::Http => (Transport::Plain(sock), Proto::H1),
+            Scheme::Https => match Box::pin(handshake(&core, sock, info)).await {
+                Some(accepted) => accepted,
+                None => return,
+            },
+        };
+        match proto {
+            Proto::H2 => {
+                let info = ConnInfo {
+                    proto: Proto::H2,
+                    ..info
                 };
-                (config, snap.plan.server.header_timeout)
-            };
-            // The handshake and the h2 driver are boxed: a task is as large as the largest
-            // future it awaits inline, and an idle h1 connection must not carry their size.
-            match Box::pin(tls::accept_within(sock, config, timeout)).await {
-                Ok((io, Proto::H2)) => {
-                    let info = ConnInfo {
-                        proto: Proto::H2,
-                        ..info
-                    };
-                    Box::pin(crate::proto::h2::serve(core, io, info)).await;
-                }
-                Ok((io, _)) => crate::proto::h1::server::serve(core, io, info).await,
-                Err(e) => debug!("core {}: TLS from {}: {e:?}", core.index, info.remote),
+                Box::pin(crate::proto::h2::serve(core, io, info)).await;
             }
+            _ => crate::proto::h1::server::serve(core, io, info).await,
         }
+        // The connection counts as open until here (or until an early return drops the
+        // future).
+        drop(guard);
     }
+}
+
+/// TLS accept under the header timeout, with the protocol ALPN chose.
+async fn handshake(core: &Core, sock: Socket, info: ConnInfo) -> Option<(Transport, Proto)> {
+    let (config, timeout) = {
+        let snap = core.snapshot();
+        (snap.tls.clone()?, snap.plan.server.header_timeout)
+    };
+    tls::accept_within(sock, config, timeout)
+        .await
+        .inspect_err(|e| debug!("core {}: TLS from {}: {e:?}", core.index, info.remote))
+        .ok()
 }
 
 #[cfg(test)]
@@ -892,7 +913,7 @@ mod tests {
         // The connection future is the task state every open connection carries for its whole
         // life; the handshake, the h2 driver and the request path must not live in it inline.
         let size = output_size(connection);
-        assert!(size <= 1200, "connection future is {size} bytes");
+        assert!(size <= 800, "connection future is {size} bytes");
     }
 
     #[test]

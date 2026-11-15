@@ -58,7 +58,7 @@ use std::io::{self, IoSlice};
 use std::os::fd::AsFd;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::task::Poll;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 /// An unread request body up to this size is read and dropped to keep the connection;
@@ -71,35 +71,47 @@ const LINGER: Duration = Duration::from_secs(2);
 /// Serves one connection until close, error, idle timeout or shutdown. Between requests the
 /// task holds only the idle wait; each request runs in a block recycled by the core, so an idle
 /// connection costs a few hundred bytes of task state, not the size of the request path.
-pub(crate) async fn serve(core: Rc<Core>, mut io: Transport, info: ConnInfo) {
-    // Bytes of a pipelined next request that arrived with the previous one.
-    let mut carry: Option<BytesMut> = None;
-    let mut watch = Deadline::default();
-    let drain = core.until_drain();
-    tokio::pin!(drain);
-    let mut drain_watched = false;
-    let close = loop {
-        if carry.is_none()
-            && let Err(close) = idle(
-                &core,
-                &mut io,
-                &mut watch,
-                drain.as_mut(),
-                &mut drain_watched,
-            )
-            .await
-        {
-            break close;
+#[expect(
+    clippy::manual_async_fn,
+    reason = "an async fn keeps a second copy of its arguments in its state"
+)]
+pub(crate) fn serve(core: Rc<Core>, mut io: Transport, info: ConnInfo) -> impl Future<Output = ()> {
+    async move {
+        // Bytes of a pipelined next request that arrived with the previous one.
+        let mut carry: Option<BytesMut> = None;
+        let mut watch = Deadline::default();
+        let drain = core.until_drain();
+        tokio::pin!(drain);
+        let mut drain_watched = false;
+        let close = loop {
+            if carry.is_none() {
+                watch.set(Some(core.snapshot().plan.server.keep_alive));
+                let readable = io.readable();
+                tokio::pin!(readable);
+                let woken = poll_fn(|cx| {
+                    poll_idle(
+                        cx,
+                        &core,
+                        readable.as_mut(),
+                        &mut watch,
+                        drain.as_mut(),
+                        &mut drain_watched,
+                    )
+                });
+                if let Err(close) = woken.await {
+                    break close;
+                }
+            }
+            let request = request(&core, &mut io, info, carry.take(), &mut watch);
+            match core.requests.run(request).await {
+                Ok(next) => carry = next,
+                Err(close) => break close,
+            }
+        };
+        match close {
+            Close::Bad(_) | Close::SlowHead | Close::Unread => Box::pin(linger(&core, io)).await,
+            _ => io.close().await,
         }
-        let request = request(&core, &mut io, info, carry.take(), &mut watch);
-        match core.requests.run(request).await {
-            Ok(next) => carry = next,
-            Err(close) => break close,
-        }
-    };
-    match close {
-        Close::Bad(_) | Close::SlowHead | Close::Unread => Box::pin(linger(&core, io)).await,
-        _ => io.close().await,
     }
 }
 
@@ -167,41 +179,37 @@ async fn request(
     }
 }
 
-/// Waits until the connection is readable without holding any buffer (idle keep-alive
-/// connections cost only their socket and this task's state). Ends on keep-alive timeout or
-/// shutdown.
-async fn idle(
+/// The wait for the next request: until the connection is readable, without holding any
+/// buffer (idle keep-alive connections cost only their socket and their task's state). Ends on
+/// keep-alive timeout or shutdown. A poll function rather than an `async fn`, so the wait adds
+/// no state of its own to the connection's task.
+fn poll_idle(
+    cx: &mut Context<'_>,
     core: &Core,
-    io: &mut Transport,
+    readable: Pin<&mut impl Future<Output = io::Result<()>>>,
     watch: &mut Deadline,
-    mut drain: Pin<&mut impl Future<Output = ()>>,
+    drain: Pin<&mut impl Future<Output = ()>>,
     drain_watched: &mut bool,
-) -> Result<(), Close> {
-    watch.set(Some(core.snapshot().plan.server.keep_alive));
-    let readable = io.readable();
-    tokio::pin!(readable);
-    poll_fn(|cx| {
-        // A request that has arrived is answered even while draining, with `Connection:
-        // close`: its client sent it before it could know, and it may be the first request of
-        // a connection, which clients do not retry.
-        if let Poll::Ready(ready) = readable.as_mut().poll(cx) {
-            return Poll::Ready(ready.map_err(Close::Io));
-        }
-        if core.draining.get() {
+) -> Poll<Result<(), Close>> {
+    // A request that has arrived is answered even while draining, with `Connection: close`:
+    // its client sent it before it could know, and it may be the first request of a
+    // connection, which clients do not retry.
+    if let Poll::Ready(ready) = readable.poll(cx) {
+        return Poll::Ready(ready.map_err(Close::Io));
+    }
+    if core.draining.get() {
+        return Poll::Ready(Err(Close::Shutdown));
+    }
+    // Polled once per connection: the drain signal keeps this task's waker from then on, and
+    // each later wait reads the flag above when it is woken. Polling it per wait would take
+    // the signal's lock per request.
+    if !*drain_watched {
+        *drain_watched = true;
+        if drain.poll(cx).is_ready() {
             return Poll::Ready(Err(Close::Shutdown));
         }
-        // Polled once per connection: the drain signal keeps this task's waker from then on,
-        // and each later wait reads the flag above when it is woken. Polling it per wait
-        // would take the signal's lock per request.
-        if !*drain_watched {
-            *drain_watched = true;
-            if drain.as_mut().poll(cx).is_ready() {
-                return Poll::Ready(Err(Close::Shutdown));
-            }
-        }
-        watch.poll_expired(cx).map(|()| Err(Close::Timeout))
-    })
-    .await
+    }
+    watch.poll_expired(cx).map(|()| Err(Close::Timeout))
 }
 
 /// One read, bounded by the connection's deadline.
