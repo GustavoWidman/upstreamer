@@ -60,6 +60,8 @@ cargo clippy --all-targets -- -D warnings
 nix flake check --no-build
 ```
 
+every push and pull request runs `nix flake check` on x86_64-linux, nixos vm tests included, and on aarch64-darwin, every check but the vm tests on aarch64-linux, and `cargo test` in the dev shell on x86_64-linux with caddy, h2load and an http/3 curl, so the differential suite against caddy runs instead of skipping. its commits must follow conventional commits. the version lives in `Cargo.toml`, with `Cargo.lock` agreeing, and a pull request must raise it unless labeled `no-release`. a push to `main` that brings a version with no release yet builds upstreamer for x86_64-linux, aarch64-linux and aarch64-darwin, pushes it to `https://cache.r3dlust.com` (key `cache.r3dlust.com-1:Wdkf9mes2ued0P7C7CL3Jax1b4KPuJwQpM3h4G/Z+yI=`) pinned as `upstreamer-<system>`, then tags it `v<version>` and releases it.
+
 [docs/architecture.md](docs/architecture.md) maps the modules, the request path and the nix side.
 
 ## license
