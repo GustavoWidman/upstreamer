@@ -2005,8 +2005,12 @@ mod tests {
             ["/sites/0/tls: a TLS site takes `cert` and `key`, or `acme`, not both"]
         );
         assert_eq!(
-            tls(r#"{"acme":{"email":"ops@example.com"}}"#),
-            ["/sites/0/tls/acme: in-process ACME is not supported by this upstreamer yet"]
+            tls(r#"{"acme":{"email":"ops@example.com"},"redirectHttp":false}"#),
+            [
+                "/sites/0/tls/acme: http-01 tokens are answered on the http addresses by the \
+                 HTTP->HTTPS redirect, which `redirectHttp: false` turns off; use \
+                 `\"challenge\": \"tls-alpn-01\"` or keep the redirect"
+            ]
         );
     }
 
