@@ -11,6 +11,10 @@ publish = false
 tokio = { version = "1.54", default-features = false, features = ["rt", "net", "time", "sync", "signal", "io-util", "macros"] }
 socket2 = { version = "0.6.5", features = ["all"] }
 libc = "0.2.191"
+# The global allocator. Without no_thp it madvises its arenas into transparent huge pages, which
+# pins most of a 2 MiB page behind every few live objects: 10k idle TLS connections then hold
+# 77 to 86 MiB instead of 45.
+mimalloc = { version = "0.1.52", default-features = false, features = ["no_thp"] }
 
 # HTTP/1.1 is our own codec; httparse only tokenises heads.
 httparse = "1.10.1"

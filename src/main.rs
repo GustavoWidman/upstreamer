@@ -10,6 +10,9 @@ use std::process::ExitCode;
 
 use upstreamer::{CheckInput, ExpectedPorts, RunOptions, StartError};
 
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const USAGE: &str = "usage:
   upstreamer run [--config] <file> [--workers N]
   upstreamer check [--config] <file> [--expect-tcp PORT,..] [--expect-udp PORT,..]
