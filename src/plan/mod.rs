@@ -30,6 +30,8 @@ pub(crate) struct VarId(pub u16);
 pub(crate) struct RegexId(pub u16);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct UpstreamId(pub u16);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct LogId(pub u16);
 
 #[derive(Debug)]
 pub(crate) struct Plan {
@@ -47,6 +49,9 @@ pub(crate) struct Plan {
     pub var_names: Box<[Box<str>]>,
     /// Certificate files to load, one per TLS site (sites sharing files share an entry).
     pub certs: Box<[CertSource]>,
+    /// Access log files by [`LogId`], each path once however many sites write to it. Opened
+    /// by the control thread at every (re)load, never by `check`.
+    pub access_logs: Box<[PathBuf]>,
     pub server: ServerParams,
     /// `sites[..user_sites]` are the config's sites, in order; the rest are synthetic (the
     /// HTTP->HTTPS redirect site).
@@ -119,6 +124,8 @@ pub(crate) struct SitePlan {
     pub errors: Box<[ErrorRoutePlan]>,
     /// `h3=":443"; ma=86400` when the site serves HTTP/3; added to h1/h2 TLS responses.
     pub alt_svc: Option<Box<[u8]>>,
+    /// Where this site's requests are logged; `None` logs nothing.
+    pub access_log: Option<LogId>,
 }
 
 #[derive(Debug)]

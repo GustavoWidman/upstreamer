@@ -293,6 +293,7 @@ mod tests {
             },
             errors: Box::new([]),
             alt_svc: None,
+            access_log: None,
         }
     }
 

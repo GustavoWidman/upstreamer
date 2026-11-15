@@ -24,7 +24,7 @@ use super::host::{HostIndex, HostPattern};
 use super::template::{self, Captures, Part, Placeholder, Scope};
 use super::{
     Action, Block, BlockKind, CertSource, Cond, Diagnostic, ErrorRoutePlan, FileProbe, FilesPlan,
-    HeaderOp, ListenerKey, ListenerKind, ListenerSpec, OriginAddr, Plan, ProxyPlan, RegexId,
+    HeaderOp, ListenerKey, ListenerKind, ListenerSpec, LogId, OriginAddr, Plan, ProxyPlan, RegexId,
     ServerParams, Severity, SiteId, SitePlan, Step, Template, Terminal, UpstreamId, UpstreamPlan,
     UpstreamTls, VarId,
 };
@@ -76,6 +76,7 @@ pub(crate) fn compile(
         upstreams: Vec::new(),
         includes: Vec::new(),
         fragments: Vec::new(),
+        access_logs: Vec::new(),
         site: Site::default(),
     };
     let mut sites: Vec<SitePlan> = Vec::new();
@@ -99,6 +100,7 @@ pub(crate) fn compile(
         var_count: c.vars.len() as u16,
         var_names: c.vars.into(),
         certs: derived.certs.into(),
+        access_logs: c.access_logs.into(),
         server,
         user_sites: config.sites.len() as u16,
     };
@@ -131,6 +133,8 @@ struct Compiler<'s> {
     includes: Vec<PathBuf>,
     /// Every fragment read, to locate diagnostics inside it.
     fragments: Vec<(PathBuf, Vec<u8>)>,
+    /// Interned by path.
+    access_logs: Vec<PathBuf>,
     site: Site,
 }
 
@@ -254,13 +258,38 @@ impl<'s> Compiler<'s> {
         let routes = self.block(&site.routes, BlockKind::Seq, ctx, &at.at("routes"));
         let mut errors = self.error_routes(&site.errors, &at.at("errors"));
         errors.append(&mut self.site.fragment_errors);
+        let access_log = site
+            .access_log
+            .as_deref()
+            .and_then(|path| self.access_log(path, &at.at("accessLog")));
         SitePlan {
             name: site.name.as_str().into(),
             headers: std::mem::take(&mut self.site.header_ops).into(),
             routes,
             errors: errors.into(),
             alt_svc: None,
+            access_log,
         }
+    }
+
+    /// The log a path names. A relative path is an error: it would depend on the directory
+    /// the service happens to start in.
+    fn access_log(&mut self, path: &Path, at: &Where) -> Option<LogId> {
+        if !path.is_absolute() {
+            self.error(
+                at,
+                format!("the access log path {} is not absolute", path.display()),
+            );
+            return None;
+        }
+        let index = match self.access_logs.iter().position(|p| p == path) {
+            Some(index) => index,
+            None => {
+                self.access_logs.push(path.to_path_buf());
+                self.access_logs.len() - 1
+            }
+        };
+        Some(LogId(index as u16))
     }
 
     fn site_headers(&mut self, headers: &BTreeMap<String, Option<String>>, at: &Where) {
@@ -1222,6 +1251,7 @@ fn redirect_site(https_port: u16) -> SitePlan {
         },
         errors: Box::new([]),
         alt_svc: None,
+        access_log: None,
     }
 }
 
@@ -1636,5 +1666,49 @@ mod tests {
         assert_eq!(http.hosts.lookup(b"other"), Some(SiteId(2)));
         let quic = &plan.listeners[1];
         assert_eq!(quic.hosts.lookup(b"b.example"), None);
+    }
+
+    #[test]
+    fn sites_naming_one_access_log_share_it() {
+        let (plan, _) = compile_json(
+            r#"{"version":1,"sites":[
+                {"name":"a","hosts":["a.example"],"accessLog":"/var/log/x.log"},
+                {"name":"b","hosts":["b.example"]},
+                {"name":"c","hosts":["c.example"],"accessLog":"/var/log/y.log",
+                 "tls":{"cert":"/c.crt","key":"/c.key"}},
+                {"name":"d","hosts":["d.example"],"accessLog":"/var/log/x.log"}
+            ]}"#,
+            &[],
+        )
+        .expect("a valid config");
+        let logs: Vec<Option<u16>> = plan.sites[..4]
+            .iter()
+            .map(|s| s.access_log.map(|l| l.0))
+            .collect();
+        assert_eq!(logs, [Some(0), None, Some(1), Some(0)]);
+        assert_eq!(
+            &*plan.access_logs,
+            [
+                PathBuf::from("/var/log/x.log"),
+                PathBuf::from("/var/log/y.log")
+            ]
+        );
+        assert_eq!(plan.sites.len(), 5);
+        assert_eq!(
+            plan.sites[4].access_log, None,
+            "the HTTP->HTTPS redirect site logs nothing"
+        );
+    }
+
+    #[test]
+    fn a_relative_access_log_path_is_an_error() {
+        let errors = errors(
+            r#"{"version":1,"sites":[{"name":"a","hosts":["a.example"],"accessLog":"access.log"}]}"#,
+            &[],
+        );
+        assert_eq!(
+            errors,
+            ["/sites/0/accessLog: the access log path access.log is not absolute"]
+        );
     }
 }

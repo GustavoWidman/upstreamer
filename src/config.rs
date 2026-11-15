@@ -176,6 +176,10 @@ pub(crate) struct Site {
     pub routes: Vec<Step>,
     #[serde(default)]
     pub errors: Vec<ErrorRoute>,
+    /// Absolute path of the file this site's access log is appended to, one JSON object per
+    /// finished request. Absent: the site logs nothing. Sites naming the same path share it.
+    #[serde(default)]
+    pub access_log: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
