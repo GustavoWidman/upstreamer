@@ -1,6 +1,9 @@
-//! Reverse proxy to one HTTP/1.1 origin (cleartext or TLS). The request's own task owns the
+//! Reverse proxy to HTTP/1.1 origins (cleartext or TLS). The request's own task owns the
 //! upstream connection for the duration of the exchange: checked out of the core-local pool,
 //! written and read inline, checked back in when the response body ends cleanly.
+//!
+//! A proxy step's target is one origin (`Target::Origin`: no balancing state, no health) or a
+//! pool (`Target::Pool`: an origin picked per attempt by `upstream::balance`).
 //!
 //! Retry: a pooled connection that fails before any byte of the response arrived (the origin
 //! closed it while idle) is retried once on a freshly dialled connection, when the method is
@@ -23,13 +26,15 @@ pub(crate) use conn::{UpstreamConn, UpstreamIo};
 
 use crate::body::{Body, RequestBody};
 use crate::exchange::{Exchange, Proto};
+use crate::log::debug;
 use crate::msg::{Known, Method, ResponseHead, Status, Version};
 use crate::net::{Socket, Transport};
 use crate::pipeline::Response;
-use crate::plan::{OriginAddr, ProxyPlan, UpstreamPlan};
+use crate::plan::{OriginAddr, OriginId, PoolId, ProxyPlan, Target};
 use crate::proto::h1::client;
 use crate::proto::h1::codec::{self, Limits, OutFraming, Parsed};
 use crate::runtime::{Core, CoreSnapshot};
+use crate::upstream::Upstreams;
 use bytes::{Buf, Bytes, BytesMut};
 use relay::{Sent, Tracker};
 use rustls::pki_types::ServerName;
@@ -73,9 +78,9 @@ impl UpstreamBody {
             return;
         }
         let snap = core.snapshot();
-        if conn.generation == snap.plan.generation {
-            let up = &snap.plan.upstreams[conn.upstream.0 as usize];
-            core.upstreams.checkin(conn, up);
+        if conn.epoch == snap.upstreams.epoch {
+            let origin = snap.upstreams.origin(conn.origin);
+            core.upstreams.checkin(conn, origin);
         }
     }
 
@@ -112,13 +117,29 @@ pub(crate) enum ProxyError {
     BadResponse,
     /// The client went away while the request body was being forwarded.
     ClientGone,
+    /// No member of the pool may be picked; `ex.refused` says when to retry.
+    NoOrigin,
 }
 
 impl ProxyError {
     pub fn status(&self) -> Status {
         match self {
             ProxyError::DialTimeout | ProxyError::ResponseHeaderTimeout => Status::GATEWAY_TIMEOUT,
+            ProxyError::NoOrigin => Status::SERVICE_UNAVAILABLE,
             _ => Status::BAD_GATEWAY,
+        }
+    }
+
+    /// The metrics cause of a failed last attempt.
+    pub fn cause(&self) -> crate::metrics::Cause {
+        use crate::metrics::Cause;
+        match self {
+            ProxyError::Dial(_) | ProxyError::NoOrigin => Cause::Connect,
+            ProxyError::DialTimeout | ProxyError::ResponseHeaderTimeout => Cause::Timeout,
+            ProxyError::Tls(_) => Cause::Tls,
+            ProxyError::Upstream(_) | ProxyError::BadResponse | ProxyError::ClientGone => {
+                Cause::Reset
+            }
         }
     }
 }
@@ -126,10 +147,13 @@ impl ProxyError {
 /// Hot path:
 /// 1. add [`via`] to the request's fields, then serialise the upstream request head into
 ///    `ex.out` (`client::write_request_head`, which applies the plan's header ops first);
-/// 2. take a pooled connection or [`dial`];
+///    the same bytes go to any origin, since the client's Host passes through;
+/// 2. a pool target goes to [`balanced`]; one origin takes a pooled connection or [`dial`]s;
 /// 3. [`attempt`]: send head + body, read the response head;
 /// 4. retry once on a fresh connection only if the pooled one failed before any response
 ///    byte and the request can be replayed.
+///
+/// `ex.origin` names the origin of the last attempt (access log, metrics).
 pub(crate) async fn forward(
     core: &Core,
     snap: &CoreSnapshot,
@@ -137,17 +161,22 @@ pub(crate) async fn forward(
     ex: &mut Exchange,
     mut body: RequestBody<'_>,
 ) -> Result<Response, ProxyError> {
-    let up = &snap.plan.upstreams[plan.upstream.0 as usize];
     let upgrade = wants_upgrade(ex);
     ex.req.fields.push(b"via", via(ex.req.version));
     client::write_request_head(ex, plan, up_framing(&body), upgrade);
+    let id = match plan.to {
+        Target::Origin(id) => id,
+        Target::Pool(pool) => return balanced(core, snap, plan, pool, ex, body).await,
+    };
+    ex.origin = Some(id);
+    let up = &*snap.upstreams;
 
-    let mut pooled = core.upstreams.checkout(up, snap.plan.generation);
+    let mut pooled = core.upstreams.checkout(up.origin(id), id, up.epoch);
     loop {
         let reused = pooled.is_some();
         let mut conn = match pooled.take() {
             Some(conn) => conn,
-            None => dial(core, up, snap.plan.generation, plan.dial_timeout).await?,
+            None => dial(core, up, id, plan.dial_timeout).await?,
         };
         conn.buf = core.bufs.take();
         match attempt(core, snap, plan, ex, &mut body, conn, upgrade).await {
@@ -158,6 +187,28 @@ pub(crate) async fn forward(
             Err(Failed { error, .. }) => return Err(error),
         }
     }
+}
+
+/// A pool target: up to 1 + `retries` attempts, each on the origin `upstream::balance::pick`
+/// returns, each recorded by `upstream::health::observe`. The connection carries a busy guard
+/// while checked out, so the requests in flight to an origin are this core's checked-out
+/// connections to it.
+async fn balanced(
+    core: &Core,
+    snap: &CoreSnapshot,
+    plan: &ProxyPlan,
+    pool: PoolId,
+    ex: &mut Exchange,
+    body: RequestBody<'_>,
+) -> Result<Response, ProxyError> {
+    let _ = (snap, plan, body);
+    debug!(
+        "core {}: pool {} of {:?}: balanced targets are not built yet",
+        core.index, pool.0, ex.site
+    );
+    Err(ProxyError::Upstream(io::Error::other(
+        "balanced targets are not built yet",
+    )))
 }
 
 /// The Via entry a gateway MUST add to each request it forwards (RFC 9110 §7.6.3): the
@@ -247,7 +298,6 @@ async fn attempt(
         });
     }
 
-    conn.requests += 1;
     let body = UpstreamBody {
         conn,
         track: Tracker::new(framing),
@@ -423,37 +473,40 @@ fn up_framing(body: &RequestBody<'_>) -> OutFraming {
     }
 }
 
-/// Dials an origin within `timeout`: resolve (core cache, `getaddrinfo` on the blocking pool
-/// on a miss), TCP connect with TCP_NODELAY, TLS handshake when `up.tls` (sessions resume
-/// through the client config's cache).
+/// Dials origin `id` of `upstreams` within `timeout`: resolve (core cache, `getaddrinfo` on
+/// the blocking pool on a miss), TCP connect with TCP_NODELAY, TLS handshake when the origin
+/// has TLS (sessions resume through the client config's cache). Takes the table rather than
+/// the origin and its epoch: the dial future is part of every proxied request's future, and
+/// one reference is smaller than three arguments.
 pub(crate) async fn dial(
     core: &Core,
-    up: &UpstreamPlan,
-    generation: u64,
+    upstreams: &Upstreams,
+    id: OriginId,
     timeout: Duration,
 ) -> Result<UpstreamConn, ProxyError> {
-    let io = tokio::time::timeout(timeout, connect(core, up, generation))
+    let io = tokio::time::timeout(timeout, connect(core, upstreams, id))
         .await
         .map_err(|_| ProxyError::DialTimeout)??;
     Ok(UpstreamConn {
         io,
         buf: BytesMut::new(),
-        upstream: up.id,
-        generation,
+        origin: id,
+        epoch: upstreams.epoch,
+        busy: None,
         idle_since: Instant::now(),
-        requests: 0,
         watch: Deadline::default(),
     })
 }
 
 async fn connect(
     core: &Core,
-    up: &UpstreamPlan,
-    generation: u64,
+    upstreams: &Upstreams,
+    id: OriginId,
 ) -> Result<UpstreamIo, ProxyError> {
+    let up = &upstreams.origin(id).spec;
     let (sock, addr) = match up.addr {
         OriginAddr::Ip(addr) => (Socket::connect(addr).await.map_err(ProxyError::Dial)?, addr),
-        OriginAddr::Name => connect_named(core, up, generation).await?,
+        OriginAddr::Name => connect_named(core, upstreams, id).await?,
     };
     let Some(tls) = &up.tls else {
         return Ok(UpstreamIo::Plain(Transport::Plain(sock)));
@@ -474,10 +527,11 @@ async fn connect(
 /// that address first for the next dial.
 async fn connect_named(
     core: &Core,
-    up: &UpstreamPlan,
-    generation: u64,
+    upstreams: &Upstreams,
+    id: OriginId,
 ) -> Result<(Socket, SocketAddr), ProxyError> {
-    let addrs = match core.upstreams.resolved(up, generation) {
+    let (up, epoch) = (&upstreams.origin(id).spec, upstreams.epoch);
+    let addrs = match core.upstreams.resolved(id, epoch) {
         Some(addrs) => addrs,
         None => {
             let target = (up.host.to_string(), up.port);
@@ -495,13 +549,13 @@ async fn connect_named(
             Ok(sock) => {
                 let mut addrs = addrs.clone();
                 addrs.swap(0, i);
-                core.upstreams.remember(up, generation, Some(addrs));
+                core.upstreams.remember(id, epoch, Some(addrs));
                 return Ok((sock, addr));
             }
             Err(e) => last = e,
         }
     }
-    core.upstreams.remember(up, generation, None);
+    core.upstreams.remember(id, epoch, None);
     Err(ProxyError::Dial(last))
 }
 
@@ -562,11 +616,7 @@ mod tests {
                 }],
             }),
         );
-        Arc::new(Generation {
-            plan: Arc::new(plan),
-            tls: None,
-            access: Arc::default(),
-        })
+        Arc::new(Generation::standalone(plan, None, Arc::default()))
     }
 
     const REQUEST: &[u8] = b"GET /api/items?limit=20 HTTP/1.1\r\n\

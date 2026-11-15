@@ -39,6 +39,8 @@ rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serde_path_to_error = "0.1.20"
+# TOML configs, converted to the JSON value the schema reads; spans for diagnostics.
+toml_edit = { version = "0.25.19", default-features = false, features = ["parse"] }
 regex-automata = { version = "0.4.18", default-features = false, features = ["std", "syntax", "perf", "unicode", "meta", "hybrid", "dfa-onepass", "nfa-backtrack"] }
 rustc-hash = "2.1"
 
@@ -49,6 +51,10 @@ flate2 = { version = "1.1.11", default-features = false, features = ["zlib-rs"] 
 [features]
 # Codec entry points for fuzz/ and benches/; not part of the API.
 internals = []
+# Origins from Kubernetes EndpointSlices (`proxy.to.kubernetes`). Off by default: a default
+# build carries no Kubernetes client, and a config that names a source fails `check` with a
+# message naming this feature.
+kubernetes = []
 
 [dev-dependencies]
 proptest = "1.12"

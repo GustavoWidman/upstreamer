@@ -2108,14 +2108,11 @@ mod driver {
             }),
         );
         let (certs, _) = tls::load(&plan.certs, None);
-        Arc::new(Generation {
-            plan: Arc::new(plan),
-            tls: Some(TlsState {
-                certs: Arc::new(certs),
-                tickets: Arc::new(TicketKeys::generate(3600)),
-            }),
-            access: Arc::default(),
-        })
+        let tls = TlsState {
+            certs: Arc::new(certs),
+            tickets: Arc::new(TicketKeys::generate(3600)),
+        };
+        Arc::new(Generation::standalone(plan, Some(tls), Arc::default()))
     }
 
     async fn client(addr: std::net::SocketAddr) -> ::h2::client::SendRequest<Bytes> {

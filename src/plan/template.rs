@@ -1,33 +1,41 @@
 //! Templates: literal bytes and typed placeholders, parsed once at compile time.
 //!
 //! Placeholders (one spelling each):
-//! `{host}` `{remote_host}` `{remote_port}` `{scheme}` `{method}` `{path}` `{query}`
-//! `{?query}` (empty, or `?` + query) `{uri}` (the request-target as it would go upstream:
-//! the client's bytes, or the percent-encoded path and query after a rewrite) `{query.K}`
-//! `{cookie.K}` `{header.Name}` (fields joined with ", ") `{vars.k}` `{re.N}`
-//! `{err.status_code}` `{err.status_text}`. Unknown names are compile errors. `{{` and `}}` are
-//! literal braces.
+//! `{host}` `{remote_host}` (the client's address: the peer's, or the one a trusted proxy
+//! forwarded) `{remote_net}` (the client's IPv4 address, or its IPv6 /64 as
+//! `2001:db8:1:2::/64`) `{peer_host}` (the address of the connection's peer, always)
+//! `{remote_port}` `{scheme}` `{method}` `{path}` `{query}` `{?query}` (empty, or `?` +
+//! query) `{uri}` (the request-target as it would go upstream: the client's bytes, or the
+//! percent-encoded path and query after a rewrite) `{query.K}` `{cookie.K}` `{header.Name}`
+//! (fields joined with ", ") `{vars.k}` `{re.N}` `{err.status_code}` `{err.status_text}`
+//! `{err.retry_after}` (seconds until a refused request may retry, empty when it was not
+//! refused). Unknown names are compile errors. `{{` and `}}` are literal braces.
 
 use super::VarId;
 use crate::exchange::{ASpan, Exchange, Scheme};
 use crate::msg::{HeaderName, Known};
 use std::io::Write;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Template {
     parts: Box<[Part]>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Part {
     Lit(Box<[u8]>),
     Ph(Placeholder),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Placeholder {
     Host,
     RemoteHost,
+    RemoteNet,
+    PeerHost,
+    /// The default `X-Forwarded-For` of a plan with trusted proxies: the chain a trusted peer
+    /// sent, then the peer. Not spelled in templates.
+    ForwardedFor,
     RemotePort,
     Scheme,
     Method,
@@ -43,6 +51,7 @@ pub(crate) enum Placeholder {
     Capture(u8),
     ErrStatus,
     ErrText,
+    ErrRetryAfter,
 }
 
 /// What `{re.N}` may refer to in the template being parsed.
@@ -54,6 +63,8 @@ pub(crate) enum Captures {
     Groups(u8),
     /// It has more than one, so `{re.N}` would not say which.
     Ambiguous,
+    /// A request key (`limit.key`, `balance.hash`): computed from the request alone.
+    Unavailable,
 }
 
 /// Compile-time context for parsing: interns var names, knows which capture groups the
@@ -129,6 +140,14 @@ impl Template {
         })
     }
 
+    /// The single placeholder of a template that is exactly one, such as `{remote_net}`.
+    pub fn as_placeholder(&self) -> Option<&Placeholder> {
+        match &*self.parts {
+            [Part::Ph(ph)] => Some(ph),
+            _ => None,
+        }
+    }
+
     /// A template of literal bytes only, for values the compiler builds itself.
     pub fn literal(bytes: &[u8]) -> Template {
         Template::from_parts(vec![Part::Lit(bytes.into())])
@@ -162,10 +181,12 @@ impl Template {
         let Exchange {
             req,
             conn,
+            client,
             vars,
             captures,
             arena,
             error,
+            refused,
             ..
         } = ex;
         arena.build(|out| {
@@ -180,7 +201,14 @@ impl Template {
                 match ph {
                     Placeholder::Host => out.extend_from_slice(req.host()),
                     Placeholder::RemoteHost => {
+                        let _ = write!(out, "{client}");
+                    }
+                    Placeholder::RemoteNet => write_net(out, *client),
+                    Placeholder::PeerHost => {
                         let _ = write!(out, "{}", conn.remote.ip());
+                    }
+                    Placeholder::ForwardedFor => {
+                        crate::trust::forwarded_for(req, conn, *client, out)
                     }
                     Placeholder::RemotePort => {
                         let _ = write!(out, "{}", conn.remote.port());
@@ -237,6 +265,11 @@ impl Template {
                             out.extend_from_slice(e.status.text().as_bytes());
                         }
                     }
+                    Placeholder::ErrRetryAfter => {
+                        if let Some(r) = refused {
+                            let _ = write!(out, "{}", r.retry_after);
+                        }
+                    }
                 }
             }
         })
@@ -257,6 +290,8 @@ fn placeholder(name: &str, scope: &mut Scope<'_>) -> Result<Placeholder, String>
     Ok(match (head, arg) {
         ("host", None) => Placeholder::Host,
         ("remote_host", None) => Placeholder::RemoteHost,
+        ("remote_net", None) => Placeholder::RemoteNet,
+        ("peer_host", None) => Placeholder::PeerHost,
         ("remote_port", None) => Placeholder::RemotePort,
         ("scheme", None) => Placeholder::Scheme,
         ("method", None) => Placeholder::Method,
@@ -305,19 +340,39 @@ fn placeholder(name: &str, scope: &mut Scope<'_>) -> Result<Placeholder, String>
                         "`{{re.{n}}}` is ambiguous: this step's `when` has more than one regex"
                     ));
                 }
+                Captures::Unavailable => {
+                    return Err(format!(
+                        "`{{re.{n}}}` cannot be read in a key, which is computed from the request alone"
+                    ));
+                }
             }
             scope.uses_captures = true;
             Placeholder::Capture(n)
         }
-        ("err", Some("status_code" | "status_text")) if !scope.in_error_route => {
+        ("err", Some("status_code" | "status_text" | "retry_after")) if !scope.in_error_route => {
             return Err(format!(
                 "`{{{name}}}` has a value only inside an error route (`errors`)"
             ));
         }
         ("err", Some("status_code")) => Placeholder::ErrStatus,
         ("err", Some("status_text")) => Placeholder::ErrText,
+        ("err", Some("retry_after")) => Placeholder::ErrRetryAfter,
         _ => return Err(format!("unknown placeholder `{{{name}}}`")),
     })
+}
+
+/// `{remote_net}`: an IPv4 address as is, an IPv6 address with its low 64 bits zeroed and
+/// `/64` appended. An IPv4-mapped IPv6 address is its IPv4 address.
+fn write_net(out: &mut Vec<u8>, ip: std::net::IpAddr) {
+    match ip.to_canonical() {
+        std::net::IpAddr::V4(v4) => {
+            let _ = write!(out, "{v4}");
+        }
+        std::net::IpAddr::V6(v6) => {
+            let net = std::net::Ipv6Addr::from_bits(v6.to_bits() & !u128::from(u64::MAX));
+            let _ = write!(out, "{net}/64");
+        }
+    }
 }
 
 pub(crate) fn intern(vars: &mut Vec<Box<str>>, name: &str) -> VarId {
@@ -494,5 +549,58 @@ mod tests {
         assert_eq!(cookie(fields.into_iter(), b"site_lang"), Some(&b"pt"[..]));
         assert_eq!(cookie(fields.into_iter(), b"b"), Some(&b"2"[..]));
         assert_eq!(cookie(fields.into_iter(), b"c"), None);
+    }
+
+    fn expand(src: &str, client: &str, refused: Option<u32>) -> String {
+        use crate::exchange::{ConnInfo, Proto, Refused, RefusedBy, Scheme};
+        use crate::plan::{ListenerKey, ListenerKind};
+        let mut vars = Vec::new();
+        let t = Template::parse(src, &mut scope(&mut vars, Captures::None, true)).unwrap();
+        let conn = ConnInfo {
+            remote: "198.51.100.7:40000".parse().unwrap(),
+            local_port: 443,
+            scheme: Scheme::Https,
+            proto: Proto::H1,
+            listener: ListenerKey {
+                addr: "0.0.0.0:443".parse().unwrap(),
+                kind: ListenerKind::Https,
+            },
+        };
+        let mut ex = Exchange::new(conn, 0);
+        ex.client = client.parse().unwrap();
+        ex.refused = refused.map(|retry_after| Refused {
+            by: RefusedBy::Limit,
+            retry_after,
+        });
+        let span = t.expand(&mut ex);
+        String::from_utf8(ex.arena.get(span).to_vec()).unwrap()
+    }
+
+    #[test]
+    fn client_peer_and_network_placeholders() {
+        assert_eq!(
+            expand("{remote_host} {peer_host}", "203.0.113.9", None),
+            "203.0.113.9 198.51.100.7",
+            "the client is what a trusted proxy forwarded; the peer is the connection's"
+        );
+        assert_eq!(expand("{remote_net}", "203.0.113.9", None), "203.0.113.9");
+        assert_eq!(
+            expand("{remote_net}", "2001:db8:1:2:aaaa:bbbb:cccc:dddd", None),
+            "2001:db8:1:2::/64"
+        );
+        assert_eq!(
+            expand("{remote_net}", "::ffff:192.0.2.1", None),
+            "192.0.2.1"
+        );
+    }
+
+    #[test]
+    fn retry_after_is_empty_unless_the_request_was_refused() {
+        assert_eq!(expand("[{err.retry_after}]", "192.0.2.1", Some(7)), "[7]");
+        assert_eq!(expand("[{err.retry_after}]", "192.0.2.1", None), "[]");
+        assert_eq!(
+            parse("{err.retry_after}").unwrap_err(),
+            "`{err.retry_after}` has a value only inside an error route (`errors`)"
+        );
     }
 }

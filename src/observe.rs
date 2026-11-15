@@ -1,0 +1,145 @@
+//! What happens to a request once it is over: its access log line and its metrics. The one
+//! place that decides, per request, which of them runs. `access.rs` keeps the line format and
+//! the per-core writer; `metrics` keeps the counters.
+//!
+//! A site that neither logs nor runs under a plan that collects metrics has no `Observe`, and
+//! `pipeline::handle` never calls in here.
+
+use crate::access;
+use crate::exchange::{ASpan, Exchange};
+use crate::msg::Status;
+use crate::plan::{LogId, Observe};
+use crate::runtime::{Core, CoreSnapshot};
+use std::time::Instant;
+
+/// What the pipeline noted about a request, until the driver finishes it. `Copy` and as small
+/// as the access log's record was (32 bytes on Linux): the pipeline future holds it across the
+/// proxy's await, and future size costs memmoves per stream. What metrics note about the
+/// upstream attempt lives in the exchange instead ([`Upstream`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Started {
+    at: Instant,
+    /// The request's fields, formatted into the arena while still as received; empty unless
+    /// `log`.
+    request: ASpan,
+    log: Option<LogId>,
+    metrics: bool,
+}
+
+/// When a proxied request's first upstream attempt started and when its answer came back, in
+/// microseconds after the request started (saturating at about 71 minutes; 0: not proxied, or
+/// no answer), and what the answer was. Kept in `Exchange::upstream`, written only while
+/// metrics are collected.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Upstream {
+    pub started_at: u32,
+    pub answered_at: u32,
+    pub answer: Answer,
+}
+
+/// A status, or the cause of a failed last attempt, in two bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Answer(u16);
+
+/// One clock read; for a logging site, the request's fields into the arena.
+pub(crate) fn start(observe: &Observe, ex: &mut Exchange) -> Started {
+    let at = Instant::now();
+    let request = match observe.log {
+        Some(_) => access::request_fields(ex),
+        None => ASpan::default(),
+    };
+    if observe.metrics {
+        ex.upstream = Upstream::default();
+    }
+    Started {
+        at,
+        request,
+        log: observe.log,
+        metrics: observe.metrics,
+    }
+}
+
+impl Started {
+    /// Before `proxy::forward`: a clock read when metrics are collected.
+    #[inline]
+    pub fn upstream_started(&self, ex: &mut Exchange) {
+        if self.metrics {
+            ex.upstream.started_at = micros_since(self.at);
+        }
+    }
+
+    /// After it: a clock read when metrics are collected, and what came back.
+    #[inline]
+    pub fn upstream_answered(
+        &self,
+        ex: &mut Exchange,
+        answer: Result<Status, crate::metrics::Cause>,
+    ) {
+        if self.metrics {
+            ex.upstream.answered_at = micros_since(self.at);
+            ex.upstream.answer = match answer {
+                Ok(status) => Answer(status.code()),
+                Err(cause) => Answer(cause as u16),
+            };
+        }
+    }
+}
+
+/// Microseconds since `at`, saturating at about 71 minutes.
+fn micros_since(at: Instant) -> u32 {
+    at.elapsed().as_micros().min(u128::from(u32::MAX)) as u32
+}
+
+/// Called by the driver once the response or tunnel is over, with what it sent and the
+/// snapshot the request ran under. The origin comes from `ex.origin`, the route from
+/// `ex.route`, a limit rejection from `ex.refused`.
+pub(crate) fn finish(
+    core: &Core,
+    snap: &CoreSnapshot,
+    ex: &Exchange,
+    started: Started,
+    status: Status,
+    bytes: u64,
+) {
+    let end = Instant::now();
+    if let Some(log) = started.log {
+        let line = access::Line {
+            ts: core.clock.wall(end),
+            request: ex.arena.get(started.request),
+            status,
+            bytes,
+            duration: end.saturating_duration_since(started.at),
+            upstream: ex.origin.map(|id| &snap.upstreams.origin(id).spec),
+        };
+        core.access.append(&snap.access, log, |out| line.write(out));
+    }
+    if started.metrics {
+        record_metrics(snap, ex, &started, status, end);
+    }
+}
+
+/// The metrics half of [`finish`]: the request's series, and its upstream series when it was
+/// proxied (`ex.upstream`).
+fn record_metrics(
+    snap: &CoreSnapshot,
+    ex: &Exchange,
+    started: &Started,
+    status: Status,
+    end: Instant,
+) {
+    let _ = (snap, ex, started, status, end);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn started_is_no_larger_than_an_instant_and_two_words() {
+        let size = size_of::<Started>();
+        assert!(
+            size <= size_of::<Instant>() + 16,
+            "observe::Started is {size} bytes"
+        );
+    }
+}

@@ -1,19 +1,25 @@
-//! Per-core state for reaching origins: idle connections, resolved names and TLS client
-//! configs. Accessed only by tasks of its core, synchronously, so a `RefCell` borrow never
-//! spans an await.
+//! Per-core state for reaching origins: idle connections, resolved names, requests in flight
+//! and failure counts per origin, per-pool balancing state, and TLS client configs. Accessed
+//! only by tasks of its core, synchronously, so a `RefCell` borrow never spans an await.
 //!
 //! Idle connections sit in one LIFO stack per origin: the most recently used connection is the
 //! warmest and the least likely to have been closed by the origin.
 //!
-//! Origins are indexed by the [`UpstreamId`]s of one plan. A request that started under an
-//! older plan still holds that plan's ids, which may name other origins now, so every access
-//! says which plan its id is from and one from another plan finds nothing here.
+//! Origins are indexed by the [`OriginId`]s of one `Upstreams` epoch. A request that started
+//! under an older epoch still holds that epoch's ids, which may name other origins now, so
+//! every access says which epoch its id is from and one from another epoch finds nothing here.
+//! Each origin's counters sit behind an `Rc`, so a [`Busy`] guard that outlives an epoch change
+//! still counts down the origin it counted up.
 
 use super::conn::UpstreamConn;
-use crate::plan::{Plan, UpstreamPlan};
+use crate::plan::{OriginId, OriginKey, PoolId};
+use crate::upstream::balance::PoolLocal;
+use crate::upstream::{Epoch, Origin, Upstreams};
 use smallvec::SmallVec;
 use std::cell::{Cell, OnceCell, RefCell, RefMut};
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,6 +28,9 @@ const NAME_TTL: Duration = Duration::from_secs(30);
 
 pub(crate) struct Pools {
     origins: RefCell<Origins>,
+    /// By `PoolId` of the core's current plan: reset when the plan changes (a cursor
+    /// restarting is harmless), kept across epochs of one plan.
+    pools: RefCell<Vec<PoolLocal>>,
     /// Client configs with and without certificate verification, built on first use.
     tls: [OnceCell<Arc<rustls::ClientConfig>>; 2],
     /// The time of the last sweep. Idle ages are measured against it, so checking a
@@ -31,16 +40,37 @@ pub(crate) struct Pools {
 
 #[derive(Default)]
 struct Origins {
-    /// Generation of the plan whose ids index `slots`: that of the first plan to use the
-    /// pools, then of each plan adopted.
-    generation: Option<u64>,
-    slots: Vec<Origin>,
+    /// The epoch whose ids index `slots`: that of the first table to use the pools, then of
+    /// each table adopted.
+    epoch: Option<Epoch>,
+    slots: Vec<Slot>,
 }
 
 #[derive(Default)]
-struct Origin {
+struct Slot {
     idle: Vec<UpstreamConn>,
     resolved: Option<Resolved>,
+    local: Rc<OriginLocal>,
+}
+
+/// This core's counters of one origin.
+#[derive(Debug, Default)]
+pub(crate) struct OriginLocal {
+    /// Checked-out connections of pool targets: requests in flight on this core.
+    pub in_flight: Cell<u32>,
+    /// Consecutive failed attempts on this core (passive health).
+    pub fails: Cell<u8>,
+}
+
+/// Held by a checked-out connection of a pool target; counts it in flight until it is checked
+/// in or dropped. `Target::Origin` connections carry none.
+#[derive(Debug)]
+pub(crate) struct Busy(Rc<OriginLocal>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.in_flight.set(self.0.in_flight.get() - 1);
+    }
 }
 
 struct Resolved {
@@ -52,6 +82,7 @@ impl Default for Pools {
     fn default() -> Self {
         Pools {
             origins: RefCell::default(),
+            pools: RefCell::default(),
             tls: Default::default(),
             now: Cell::new(Instant::now()),
         }
@@ -59,26 +90,27 @@ impl Default for Pools {
 }
 
 impl Pools {
-    /// The slot of `up`, an origin of the plan with `generation`. `None` when the pools are
-    /// indexed by another plan.
-    fn origin(&self, up: &UpstreamPlan, generation: u64) -> Option<RefMut<'_, Origin>> {
+    /// The slot of `id`, an origin of the table with `epoch`. `None` when the pools are
+    /// indexed by another epoch.
+    fn slot(&self, id: OriginId, epoch: Epoch) -> Option<RefMut<'_, Slot>> {
         let mut origins = self.origins.borrow_mut();
-        if *origins.generation.get_or_insert(generation) != generation {
+        if *origins.epoch.get_or_insert(epoch) != epoch {
             return None;
         }
-        let index = up.id.0 as usize;
+        let index = id.0 as usize;
         if origins.slots.len() <= index {
-            origins.slots.resize_with(index + 1, Origin::default);
+            origins.slots.resize_with(index + 1, Slot::default);
         }
         Some(RefMut::map(origins, |o| &mut o.slots[index]))
     }
 
-    /// Pops the newest idle connection to `up` on which the origin neither closed nor sent
+    /// Pops the newest idle connection to `id` on which the origin neither closed nor sent
     /// bytes meanwhile (read from the reactor's readiness, no syscall). Dead ones are closed
     /// on the way.
-    pub fn checkout(&self, up: &UpstreamPlan, generation: u64) -> Option<UpstreamConn> {
-        let mut origin = self.origin(up, generation)?;
-        while let Some(conn) = origin.idle.pop() {
+    pub fn checkout(&self, origin: &Origin, id: OriginId, epoch: Epoch) -> Option<UpstreamConn> {
+        let _ = origin;
+        let mut slot = self.slot(id, epoch)?;
+        while let Some(conn) = slot.idle.pop() {
             if !conn.io.hung_up_or_readable() {
                 return Some(conn);
             }
@@ -87,81 +119,111 @@ impl Pools {
     }
 
     /// Keeps a connection whose last response was fully read and allowed reuse, unless it
-    /// was dialled under another plan than the pools are indexed by. Over the origin's
-    /// `max_idle_per_core`, the oldest is closed.
-    pub fn checkin(&self, mut conn: UpstreamConn, up: &UpstreamPlan) {
-        let Some(mut origin) = self.origin(up, conn.generation) else {
+    /// was dialled under another epoch than the pools are indexed by. Over the origin's
+    /// `max_idle_per_core`, the oldest is closed. Drops the connection's busy guard.
+    pub fn checkin(&self, mut conn: UpstreamConn, origin: &Origin) {
+        conn.busy = None;
+        let Some(mut slot) = self.slot(conn.origin, conn.epoch) else {
             return;
         };
         conn.idle_since = self.now.get();
-        if origin.idle.len() >= usize::from(up.max_idle_per_core) {
-            origin.idle.remove(0);
+        if slot.idle.len() >= usize::from(origin.spec.max_idle_per_core) {
+            slot.idle.remove(0);
         }
-        origin.idle.push(conn);
+        slot.idle.push(conn);
+    }
+
+    /// The guard a pool target's connection carries while checked out: counts one request in
+    /// flight to `id` until dropped. `None` for another epoch.
+    pub fn busy(&self, id: OriginId, epoch: Epoch) -> Option<Busy> {
+        let slot = self.slot(id, epoch)?;
+        slot.local.in_flight.set(slot.local.in_flight.get() + 1);
+        Some(Busy(slot.local.clone()))
+    }
+
+    /// This core's counters of `id`; `None` for another epoch.
+    pub fn local(&self, id: OriginId, epoch: Epoch) -> Option<Rc<OriginLocal>> {
+        Some(self.slot(id, epoch)?.local.clone())
+    }
+
+    /// This core's state of a pool of the current plan.
+    pub fn pool(&self, id: PoolId) -> RefMut<'_, PoolLocal> {
+        let mut pools = self.pools.borrow_mut();
+        let index = id.0 as usize;
+        if pools.len() <= index {
+            pools.resize_with(index + 1, PoolLocal::default);
+        }
+        RefMut::map(pools, |p| &mut p[index])
+    }
+
+    /// A new plan: pool ids name other pools now, so their state starts over.
+    pub fn reset_pools(&self) {
+        self.pools.borrow_mut().clear();
     }
 
     /// Closes connections idle past their origin's limit, and those the origin closed. Run by
-    /// a core-local timer every few seconds, with the plan the core serves.
-    pub fn sweep(&self, plan: &Plan, now: Instant) {
+    /// a core-local timer every few seconds, with the table the core serves.
+    pub fn sweep(&self, upstreams: &Upstreams, now: Instant) {
         self.now.set(now);
         let mut origins = self.origins.borrow_mut();
-        if origins.generation != Some(plan.generation) {
+        if origins.epoch != Some(upstreams.epoch) {
             return;
         }
-        for (origin, up) in origins.slots.iter_mut().zip(plan.upstreams.iter()) {
-            origin.idle.retain(|conn| {
-                now.duration_since(conn.idle_since) < up.idle && !conn.io.hung_up_or_readable()
+        for (slot, origin) in origins.slots.iter_mut().zip(upstreams.origins()) {
+            slot.idle.retain(|conn| {
+                now.duration_since(conn.idle_since) < origin.spec.idle
+                    && !conn.io.hung_up_or_readable()
             });
         }
     }
 
-    /// On a new plan: re-indexes by the new origin ids, closing connections to origins that
-    /// are gone or whose address or TLS settings changed. Resolved names are forgotten.
-    pub fn adopt(&self, old: &Plan, new: &Plan) {
+    /// On a new table: re-indexes by origin identity, keeping each staying origin's idle
+    /// connections and counters and closing connections to origins that left. Resolved names
+    /// are forgotten. Busy guards of an origin that left count down its dropped counters,
+    /// which nothing reads any more.
+    pub fn adopt(&self, old: &Upstreams, new: &Upstreams) {
         let mut origins = self.origins.borrow_mut();
-        let indexed_by_old = origins.generation == Some(old.generation);
+        let indexed_by_old = origins.epoch == Some(old.epoch);
         let slots = std::mem::take(&mut origins.slots);
-        origins.generation = Some(new.generation);
+        origins.epoch = Some(new.epoch);
         origins
             .slots
-            .resize_with(new.upstreams.len(), Origin::default);
+            .resize_with(new.origins().len(), Slot::default);
         if !indexed_by_old {
             return;
         }
-        for (slot, was) in slots.into_iter().zip(old.upstreams.iter()) {
-            let Some(now) = new.upstreams.iter().find(|u| same_origin(was, u)) else {
+        let index: HashMap<OriginKey, usize> = new
+            .origins()
+            .iter()
+            .enumerate()
+            .map(|(i, o)| (o.spec.key(), i))
+            .collect();
+        for (slot, was) in slots.into_iter().zip(old.origins()) {
+            let Some(&now) = index.get(&was.spec.key()) else {
                 continue;
             };
-            let idle = slot.idle.into_iter().map(|mut conn| {
-                conn.upstream = now.id;
-                conn.generation = new.generation;
+            let kept = &mut origins.slots[now];
+            kept.local = slot.local;
+            kept.idle.extend(slot.idle.into_iter().map(|mut conn| {
+                conn.origin = OriginId(now as u16);
+                conn.epoch = new.epoch;
                 conn
-            });
-            origins.slots[now.id.0 as usize].idle.extend(idle);
+            }));
         }
     }
 
-    /// The addresses `up`'s name resolved to, while they are fresh.
-    pub fn resolved(
-        &self,
-        up: &UpstreamPlan,
-        generation: u64,
-    ) -> Option<SmallVec<[SocketAddr; 4]>> {
-        let origin = self.origin(up, generation)?;
-        let resolved = origin.resolved.as_ref()?;
+    /// The addresses `id`'s name resolved to, while they are fresh.
+    pub fn resolved(&self, id: OriginId, epoch: Epoch) -> Option<SmallVec<[SocketAddr; 4]>> {
+        let slot = self.slot(id, epoch)?;
+        let resolved = slot.resolved.as_ref()?;
         (resolved.at.elapsed() < NAME_TTL).then(|| resolved.addrs.clone())
     }
 
-    /// Remembers what `up`'s name resolved to (the address that took a connection first), or
+    /// Remembers what `id`'s name resolved to (the address that took a connection first), or
     /// forgets it with `None` after none did.
-    pub fn remember(
-        &self,
-        up: &UpstreamPlan,
-        generation: u64,
-        addrs: Option<SmallVec<[SocketAddr; 4]>>,
-    ) {
-        if let Some(mut origin) = self.origin(up, generation) {
-            origin.resolved = addrs.map(|addrs| Resolved {
+    pub fn remember(&self, id: OriginId, epoch: Epoch, addrs: Option<SmallVec<[SocketAddr; 4]>>) {
+        if let Some(mut slot) = self.slot(id, epoch) {
+            slot.resolved = addrs.map(|addrs| Resolved {
                 addrs,
                 at: Instant::now(),
             });
@@ -180,18 +242,15 @@ impl Pools {
     }
 }
 
-fn same_origin(a: &UpstreamPlan, b: &UpstreamPlan) -> bool {
-    let tls = |u: &UpstreamPlan| u.tls.as_ref().map(|t| (t.server_name.clone(), t.verify));
-    a.host == b.host && a.port == b.port && tls(a) == tls(b)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::net::{Socket, Transport};
+    use crate::plan::Plan;
     use crate::proxy::UpstreamIo;
     use crate::proxy::timer::Deadline;
     use crate::runtime::testing::plan_from;
+    use crate::upstream::Registry;
     use bytes::BytesMut;
     use std::net::{TcpListener, TcpStream};
 
@@ -217,6 +276,11 @@ mod tests {
         )
     }
 
+    /// The table of `origins`, as one registry builds them in turn.
+    fn table(registry: &mut Registry, origins: &[SocketAddr]) -> Arc<Upstreams> {
+        registry.build(&plan(1, origins))
+    }
+
     struct Peer {
         listener: TcpListener,
         addr: SocketAddr,
@@ -228,17 +292,17 @@ mod tests {
             let addr = listener.local_addr().unwrap();
             Peer { listener, addr }
         }
-        /// A connection to this peer as `plan`'s upstream `index`, and the peer's end of it.
-        async fn connect(&self, plan: &Plan, index: usize) -> (UpstreamConn, TcpStream) {
+        /// A connection to this peer as origin `index` of `table`, and the peer's end of it.
+        async fn connect(&self, table: &Upstreams, index: u16) -> (UpstreamConn, TcpStream) {
             let sock = Socket::connect(self.addr).await.unwrap();
             let (remote, _) = self.listener.accept().unwrap();
             let conn = UpstreamConn {
                 io: UpstreamIo::Plain(Transport::Plain(sock)),
                 buf: BytesMut::new(),
-                upstream: plan.upstreams[index].id,
-                generation: plan.generation,
+                origin: OriginId(index),
+                epoch: table.epoch,
+                busy: None,
                 idle_since: Instant::now(),
-                requests: 1,
                 watch: Deadline::default(),
             };
             (conn, remote)
@@ -270,28 +334,28 @@ mod tests {
     fn the_newest_idle_connection_is_used_first_and_the_oldest_dropped_over_the_cap() {
         block_on(async {
             let peer = Peer::new();
-            let plan = plan(1, &[peer.addr]);
-            let up = &plan.upstreams[0];
+            let up = table(&mut Registry::new(1), &[peer.addr]);
+            let (origin, epoch) = (up.origin(OriginId(0)), up.epoch);
             let pools = Pools::default();
-            assert!(pools.checkout(up, 1).is_none());
+            assert!(pools.checkout(origin, OriginId(0), epoch).is_none());
 
             let mut remotes = Vec::new();
             let mut locals = Vec::new();
-            for _ in 0..usize::from(up.max_idle_per_core) + 1 {
-                let (conn, remote) = peer.connect(&plan, 0).await;
+            for _ in 0..usize::from(origin.spec.max_idle_per_core) + 1 {
+                let (conn, remote) = peer.connect(&up, 0).await;
                 locals.push(conn.io_local_port());
                 remotes.push(remote);
-                pools.checkin(conn, up);
+                pools.checkin(conn, origin);
             }
-            let newest = pools.checkout(up, 1).unwrap();
+            let newest = pools.checkout(origin, OriginId(0), epoch).unwrap();
             assert_eq!(newest.io_local_port(), *locals.last().unwrap());
             let mut left = 1;
             let mut oldest_kept = newest.io_local_port();
-            while let Some(conn) = pools.checkout(up, 1) {
+            while let Some(conn) = pools.checkout(origin, OriginId(0), epoch) {
                 left += 1;
                 oldest_kept = conn.io_local_port();
             }
-            assert_eq!(left, usize::from(up.max_idle_per_core));
+            assert_eq!(left, usize::from(origin.spec.max_idle_per_core));
             assert_eq!(
                 oldest_kept, locals[1],
                 "the first one checked in was closed"
@@ -303,37 +367,43 @@ mod tests {
     fn a_connection_the_origin_closed_or_wrote_on_is_not_handed_out() {
         block_on(async {
             let peer = Peer::new();
-            let plan = plan(1, &[peer.addr]);
-            let up = &plan.upstreams[0];
+            let up = table(&mut Registry::new(1), &[peer.addr]);
+            let (origin, epoch) = (up.origin(OriginId(0)), up.epoch);
             let pools = Pools::default();
-            let (quiet, _quiet_remote) = peer.connect(&plan, 0).await;
+            let (quiet, _quiet_remote) = peer.connect(&up, 0).await;
             let quiet_port = quiet.io_local_port();
-            let (closed, closed_remote) = peer.connect(&plan, 0).await;
-            let (chatty, mut chatty_remote) = peer.connect(&plan, 0).await;
-            pools.checkin(quiet, up);
-            pools.checkin(closed, up);
-            pools.checkin(chatty, up);
+            let (closed, closed_remote) = peer.connect(&up, 0).await;
+            let (chatty, mut chatty_remote) = peer.connect(&up, 0).await;
+            pools.checkin(quiet, origin);
+            pools.checkin(closed, origin);
+            pools.checkin(chatty, origin);
             drop(closed_remote);
             std::io::Write::write_all(&mut chatty_remote, b"HTTP/1.1 408 Request Timeout\r\n\r\n")
                 .unwrap();
             tokio::time::sleep(Duration::from_millis(50)).await;
-            let conn = pools.checkout(up, 1).expect("the quiet connection");
+            let conn = pools
+                .checkout(origin, OriginId(0), epoch)
+                .expect("the quiet connection");
             assert_eq!(conn.io_local_port(), quiet_port);
-            assert!(pools.checkout(up, 1).is_none(), "the other two were closed");
+            assert!(
+                pools.checkout(origin, OriginId(0), epoch).is_none(),
+                "the other two were closed"
+            );
         });
     }
 
     #[test]
-    fn a_new_plan_re_indexes_idle_connections_by_origin() {
+    fn a_new_epoch_re_indexes_idle_connections_by_origin() {
         block_on(async {
             let (a, b, c) = (Peer::new(), Peer::new(), Peer::new());
-            let old = plan(1, &[a.addr, b.addr]);
-            let new = plan(2, &[c.addr, b.addr]);
+            let mut registry = Registry::new(1);
+            let old = table(&mut registry, &[a.addr, b.addr]);
+            let new = table(&mut registry, &[c.addr, b.addr]);
             let pools = Pools::default();
             let (to_a, mut a_remote) = a.connect(&old, 0).await;
             let (to_b, _b_remote) = b.connect(&old, 1).await;
-            pools.checkin(to_a, &old.upstreams[0]);
-            pools.checkin(to_b, &old.upstreams[1]);
+            pools.checkin(to_a, old.origin(OriginId(0)));
+            pools.checkin(to_b, old.origin(OriginId(1)));
 
             pools.adopt(&old, &new);
             let mut end = [0u8; 1];
@@ -343,46 +413,106 @@ mod tests {
                 "the connection to the origin that left is closed"
             );
             assert!(
-                pools.checkout(&new.upstreams[0], 2).is_none(),
+                pools
+                    .checkout(new.origin(OriginId(0)), OriginId(0), new.epoch)
+                    .is_none(),
                 "the new first origin has no connection, whatever sat at index 0 before"
             );
             assert!(
-                pools.checkout(&old.upstreams[1], 1).is_none(),
-                "a request still running under the old plan finds nothing by its ids"
+                pools
+                    .checkout(old.origin(OriginId(1)), OriginId(1), old.epoch)
+                    .is_none(),
+                "a request still running under the old epoch finds nothing by its ids"
             );
             let kept = pools
-                .checkout(&new.upstreams[1], 2)
+                .checkout(new.origin(OriginId(1)), OriginId(1), new.epoch)
                 .expect("b's connection");
             assert_eq!(port(&kept), b.addr.port());
-            assert_eq!((kept.upstream, kept.generation), (new.upstreams[1].id, 2));
+            assert_eq!((kept.origin, kept.epoch), (OriginId(1), new.epoch));
 
             let (stale, mut stale_remote) = a.connect(&old, 0).await;
-            pools.checkin(stale, &old.upstreams[0]);
+            pools.checkin(stale, old.origin(OriginId(0)));
             assert_eq!(
                 std::io::Read::read(&mut stale_remote, &mut end).unwrap(),
                 0,
-                "a connection dialled under the old plan is closed, not pooled under its old id"
+                "a connection dialled under the old epoch is closed, not pooled under its old id"
             );
-            assert!(pools.checkout(&new.upstreams[0], 2).is_none());
+            assert!(
+                pools
+                    .checkout(new.origin(OriginId(0)), OriginId(0), new.epoch)
+                    .is_none()
+            );
         });
+    }
+
+    #[test]
+    fn a_busy_guard_across_an_epoch_counts_down_its_own_origin() {
+        let (a, b, c): (SocketAddr, SocketAddr, SocketAddr) = (
+            "10.0.0.1:80".parse().unwrap(),
+            "10.0.0.2:80".parse().unwrap(),
+            "10.0.0.3:80".parse().unwrap(),
+        );
+        let mut registry = Registry::new(1);
+        let old = table(&mut registry, &[a, b]);
+        let new = table(&mut registry, &[c, b]);
+        let pools = Pools::default();
+        let on_a = pools.busy(OriginId(0), old.epoch).unwrap();
+        let on_b = pools.busy(OriginId(1), old.epoch).unwrap();
+        let on_b_too = pools.busy(OriginId(1), old.epoch).unwrap();
+        assert_eq!(
+            pools.local(OriginId(1), old.epoch).unwrap().in_flight.get(),
+            2
+        );
+
+        pools.adopt(&old, &new);
+        assert!(
+            pools.busy(OriginId(1), old.epoch).is_none(),
+            "ids of the old epoch find nothing"
+        );
+        let b_now = pools.local(OriginId(1), new.epoch).unwrap();
+        assert_eq!(
+            b_now.in_flight.get(),
+            2,
+            "b's requests stay in flight at its new index"
+        );
+        assert_eq!(
+            pools.local(OriginId(0), new.epoch).unwrap().in_flight.get(),
+            0
+        );
+        drop(on_b);
+        assert_eq!(b_now.in_flight.get(), 1);
+        drop(on_a);
+        assert_eq!(
+            pools.local(OriginId(0), new.epoch).unwrap().in_flight.get(),
+            0,
+            "a's guard counts down a's dropped counters, not c's"
+        );
+        drop(on_b_too);
+        assert_eq!(b_now.in_flight.get(), 0);
     }
 
     #[test]
     fn a_sweep_closes_connections_idle_past_the_origins_limit() {
         block_on(async {
             let peer = Peer::new();
-            let plan = plan(1, &[peer.addr]);
-            let up = &plan.upstreams[0];
+            let up = table(&mut Registry::new(1), &[peer.addr]);
+            let (origin, epoch) = (up.origin(OriginId(0)), up.epoch);
+            let idle = origin.spec.idle;
             let pools = Pools::default();
             let start = Instant::now();
-            pools.sweep(&plan, start);
-            let (conn, _remote) = peer.connect(&plan, 0).await;
-            pools.checkin(conn, up);
-            pools.sweep(&plan, start + up.idle - Duration::from_secs(1));
-            let conn = pools.checkout(up, 1).expect("still fresh");
-            pools.checkin(conn, up);
-            pools.sweep(&plan, start + 2 * up.idle);
-            assert!(pools.checkout(up, 1).is_none(), "closed by the sweep");
+            pools.sweep(&up, start);
+            let (conn, _remote) = peer.connect(&up, 0).await;
+            pools.checkin(conn, origin);
+            pools.sweep(&up, start + idle - Duration::from_secs(1));
+            let conn = pools
+                .checkout(origin, OriginId(0), epoch)
+                .expect("still fresh");
+            pools.checkin(conn, origin);
+            pools.sweep(&up, start + 2 * idle);
+            assert!(
+                pools.checkout(origin, OriginId(0), epoch).is_none(),
+                "closed by the sweep"
+            );
         });
     }
 

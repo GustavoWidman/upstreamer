@@ -4,25 +4,36 @@
 //! file catalog and coarse clock. It shares nothing mutable with other cores.
 //!
 //! The control thread (the process's main thread) owns the truth: it compiles plans, loads
-//! certificates, rotates ticket keys, and publishes a [`Generation`] to every core over a
-//! channel. A core installs it between requests: connections read [`Core::snapshot`] once per
-//! request (an `Rc` clone, no atomic), so a reload takes effect on the next request of every
-//! keep-alive connection, and an in-flight request finishes under the plan it started with.
+//! certificates, rotates ticket keys, follows discovery sources, and publishes a
+//! [`Generation`] to every core over a channel. A core installs it between requests:
+//! connections read [`Core::snapshot`] once per request (an `Rc` clone, no atomic), so a
+//! reload takes effect on the next request of every keep-alive connection, and an in-flight
+//! request finishes under the plan it started with.
+//!
+//! Cores share only immutable `Arc`s, with two named exceptions: the health cells inside
+//! `upstream::Upstreams` (relaxed loads on the request path, writes on health transitions) and
+//! the bucket tables inside `limit::Limiters` (one compare-and-swap per limited request).
+//! Metrics are not an exception: their counters are core-owned `Cell`s, published by the core
+//! itself once a second.
 
 pub(crate) mod control;
 pub(crate) mod slots;
 
 use crate::StartError;
 use crate::access;
+use crate::acme;
 use crate::exchange::{ConnInfo, ExchangePool, Proto, Scheme};
 use crate::files::catalog::Catalog;
+use crate::limit::Limiters;
 use crate::log::{debug, warning};
+use crate::metrics;
 use crate::net::buf::BufPool;
 use crate::net::listen::{self, Listener};
 use crate::net::{Socket, Transport};
 use crate::plan::{ListenerKey, ListenerKind, Plan, RegexId, ServerParams};
 use crate::proxy::pool::Pools;
 use crate::tls::{self, CertStore, TicketKeys};
+use crate::upstream::{Registry, Upstreams};
 use std::cell::{Cell, RefCell};
 use std::io;
 use std::net::SocketAddr;
@@ -32,49 +43,123 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-/// What the control thread publishes: immutable, shared by all cores.
+/// What the control thread publishes: immutable, shared by all cores. `Clone`, so a publish
+/// that changes one part (a ticket rotation, a discovery change) writes
+/// `Generation { part, ..(*current).clone() }`.
+#[derive(Clone)]
 pub(crate) struct Generation {
     pub plan: Arc<Plan>,
+    /// The origins and pool members of this epoch: a new `Arc` on every reload and every
+    /// discovery change.
+    pub upstreams: Arc<Upstreams>,
+    /// The plan's limit tables, carried across reloads by `LimitSpec`.
+    pub limits: Arc<Limiters>,
+    /// `Some` when the plan collects metrics: the counter layout of this plan and epoch, and
+    /// the process's hub (the same `Arc` in every generation).
+    pub metrics: Option<(Arc<metrics::Layout>, Arc<metrics::Hub>)>,
+    /// `Some` when the plan has in-process ACME: the validation answers of pending orders.
+    pub acme: Option<Arc<acme::Challenges>>,
     /// Present exactly when the plan has a TLS or QUIC listener.
     pub tls: Option<TlsState>,
     /// The plan's access log files, opened for this generation.
     pub access: Arc<access::Files>,
 }
 
+impl Generation {
+    /// A generation that carries nothing over from an earlier one: fresh health, empty limit
+    /// tables, a hub of its own.
+    pub fn standalone(plan: Plan, tls: Option<TlsState>, access: Arc<access::Files>) -> Generation {
+        let plan = Arc::new(plan);
+        let upstreams = Registry::new(1).build(&plan);
+        let metrics = plan.metrics.then(|| {
+            (
+                metrics::Layout::build(&plan, &upstreams),
+                metrics::Hub::new(allowed_cpus().len()),
+            )
+        });
+        Generation {
+            limits: Limiters::carry(&plan, None),
+            upstreams,
+            metrics,
+            acme: None,
+            tls,
+            access,
+            plan,
+        }
+    }
+}
+
 /// Certificates and ticket keys of a generation. Ticket keys are shared by every core, so a
 /// session ticket issued on one core resumes on another.
+#[derive(Clone)]
 pub(crate) struct TlsState {
     pub certs: Arc<CertStore>,
     pub tickets: Arc<TicketKeys>,
 }
 
 /// A core's view of one generation, built on the core when the generation arrives (so the
-/// rustls configs are this core's own).
+/// rustls configs and the metrics counters are this core's own).
 pub(crate) struct CoreSnapshot {
     pub plan: Arc<Plan>,
+    pub upstreams: Arc<Upstreams>,
+    pub limits: Arc<Limiters>,
+    /// This core's counters for this snapshot; folded into the core's retired totals when the
+    /// snapshot's last holder (the core, or a request still running under it) drops it.
+    pub metrics: Option<metrics::Counters>,
+    pub acme: Option<Arc<acme::Challenges>>,
     pub tls: Option<Arc<rustls::ServerConfig>>,
     pub quic: Option<Arc<rustls::ServerConfig>>,
     pub access: Arc<access::Files>,
+    /// What `tls` and `quic` were built from.
+    tls_state: Option<TlsState>,
 }
 
 impl CoreSnapshot {
-    fn new(generation: &Generation) -> CoreSnapshot {
+    /// Reuses `previous`'s rustls configs when the plan, the certificates and the ticket keys
+    /// are the same `Arc`s, so a discovery change rebuilds nothing TLS.
+    fn new(
+        generation: &Generation,
+        previous: Option<&CoreSnapshot>,
+        retired: &Rc<RefCell<metrics::Retired>>,
+    ) -> CoreSnapshot {
         let plan = generation.plan.clone();
-        let has = |kind| plan.listeners.iter().any(|l| l.key.kind == kind);
-        let (tls, quic) = match &generation.tls {
-            None => (None, None),
-            Some(state) => (
-                has(ListenerKind::Https)
-                    .then(|| tls::server_config(state.certs.clone(), state.tickets.clone())),
-                has(ListenerKind::Quic)
-                    .then(|| tls::quic_server_config(state.certs.clone(), state.tickets.clone())),
-            ),
+        let same_tls = previous.filter(|p| {
+            Arc::ptr_eq(&p.plan, &plan)
+                && match (&p.tls_state, &generation.tls) {
+                    (Some(a), Some(b)) => {
+                        Arc::ptr_eq(&a.certs, &b.certs) && Arc::ptr_eq(&a.tickets, &b.tickets)
+                    }
+                    (None, None) => true,
+                    _ => false,
+                }
+        });
+        let (tls, quic) = match (same_tls, &generation.tls) {
+            (Some(p), _) => (p.tls.clone(), p.quic.clone()),
+            (None, None) => (None, None),
+            (None, Some(state)) => {
+                let has = |kind| plan.listeners.iter().any(|l| l.key.kind == kind);
+                (
+                    has(ListenerKind::Https)
+                        .then(|| tls::server_config(state.certs.clone(), state.tickets.clone())),
+                    has(ListenerKind::Quic).then(|| {
+                        tls::quic_server_config(state.certs.clone(), state.tickets.clone())
+                    }),
+                )
+            }
         };
         CoreSnapshot {
             plan,
+            upstreams: generation.upstreams.clone(),
+            limits: generation.limits.clone(),
+            metrics: generation
+                .metrics
+                .as_ref()
+                .map(|(layout, _)| metrics::Counters::new(layout.clone(), retired.clone())),
+            acme: generation.acme.clone(),
             tls,
             quic,
             access: generation.access.clone(),
+            tls_state: generation.tls.clone(),
         }
     }
 }
@@ -103,10 +188,16 @@ impl RegexCaches {
     }
 }
 
+/// The process-wide origin of the health clock ([`Clock::mono`]), set once before the cores
+/// start, so every core counts the same seconds.
+pub(crate) static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
 /// Coarse clock: unix seconds and the formatted `Date` value, refreshed once per second by a
 /// core-local timer (no `clock_gettime` or formatting per response).
 pub(crate) struct Clock {
     pub unix: Cell<i64>,
+    /// Whole seconds since [`START`]: the health clock (ejections and probes).
+    pub mono: Cell<u32>,
     pub http_date: RefCell<[u8; 29]>,
     /// The system time and the monotonic time read together at the last tick, so a
     /// monotonic reading converts to wall time without another clock read.
@@ -118,6 +209,7 @@ impl Clock {
     pub fn new() -> Clock {
         let clock = Clock {
             unix: Cell::new(0),
+            mono: Cell::new(0),
             http_date: RefCell::new(*b"Thu, 01 Jan 1970 00:00:00 GMT"),
             anchor: Cell::new((Duration::ZERO, Instant::now())),
         };
@@ -129,7 +221,11 @@ impl Clock {
         let wall = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        self.anchor.set((wall, Instant::now()));
+        let now = Instant::now();
+        self.anchor.set((wall, now));
+        let start = *START.get_or_init(|| now);
+        self.mono
+            .set(now.saturating_duration_since(start).as_secs() as u32);
         let now = wall.as_secs() as i64;
         if now != self.unix.get() {
             self.unix.set(now);
@@ -215,6 +311,11 @@ pub(crate) struct Core {
     pub clock: Clock,
     /// This core's access log buffers; written when the core drops.
     pub access: access::Writer,
+    /// Totals of this core's dropped snapshots' metrics; live snapshots fold into it.
+    pub retired: Rc<RefCell<metrics::Retired>>,
+    /// Accepted connections and handshakes per listener, kept always: one `Cell` add per
+    /// connection and per handshake, never per request.
+    pub connections: metrics::ConnCounters,
     pub draining: Cell<bool>,
     /// Woken once, when draining starts.
     drain_started: Notify,
@@ -228,9 +329,10 @@ pub(crate) struct Core {
 impl Core {
     /// A core for `generation` with no listener bound yet.
     fn new(index: usize, generation: &Generation) -> Core {
+        let retired = Rc::default();
         Core {
             index,
-            snapshot: RefCell::new(Rc::new(CoreSnapshot::new(generation))),
+            snapshot: RefCell::new(Rc::new(CoreSnapshot::new(generation, None, &retired))),
             regex: RefCell::new(RegexCaches::for_plan(&generation.plan)),
             catalog: RefCell::default(),
             bufs: BufPool::default(),
@@ -239,6 +341,8 @@ impl Core {
             upstreams: Pools::default(),
             clock: Clock::new(),
             access: access::Writer::new(generation.access.clone()),
+            retired,
+            connections: metrics::ConnCounters::default(),
             draining: Cell::new(false),
             drain_started: Notify::new(),
             conns: Cell::new(0),
@@ -254,15 +358,22 @@ impl Core {
     /// upstream pools, binds listeners whose key is new and closes those whose key is gone
     /// (their connections keep running). Returns the listeners that could not be bound; they
     /// are retried by the next install that still lists them.
+    ///
+    /// When the plan is the same `Arc` (a discovery change, a ticket rotation), the regex
+    /// caches, the file catalog and the per-pool state stay; when only the upstream table
+    /// changed, the origin slots are re-indexed by identity.
     pub async fn install(self: &Rc<Self>, generation: &Generation) -> Vec<BindFailure> {
         let old = self.snapshot();
-        let new = Rc::new(CoreSnapshot::new(generation));
+        let new = Rc::new(CoreSnapshot::new(generation, Some(&old), &self.retired));
         if !Arc::ptr_eq(&old.plan, &new.plan) {
             *self.regex.borrow_mut() = RegexCaches::for_plan(&new.plan);
             self.catalog.borrow_mut().retain_immutable();
-            if !(old.plan.upstreams.is_empty() && new.plan.upstreams.is_empty()) {
-                self.upstreams.adopt(&old.plan, &new.plan);
-            }
+            self.upstreams.reset_pools();
+        }
+        if !Arc::ptr_eq(&old.upstreams, &new.upstreams)
+            && !(old.upstreams.origins().is_empty() && new.upstreams.origins().is_empty())
+        {
+            self.upstreams.adopt(&old.upstreams, &new.upstreams);
         }
         self.access.adopt(&new.access);
         *self.snapshot.borrow_mut() = new.clone();
@@ -416,6 +527,7 @@ async fn close(listeners: Vec<Bound>) {
 /// Accept loop of one QUIC endpoint: a local task per incoming connection.
 async fn quic_accept_loop(core: Rc<Core>, key: ListenerKey, endpoint: quinn::Endpoint) {
     while let Some(incoming) = endpoint.accept().await {
+        core.connections.accepted(key);
         let guard = core.track();
         let core = core.clone();
         tokio::task::spawn_local(async move {
@@ -549,6 +661,7 @@ fn worker_main(
         let _ = ready.send(Ok(()));
         tokio::task::spawn_local(tick(core.clone()));
         tokio::task::spawn_local(sweep(core.clone()));
+        tokio::task::spawn_local(crate::upstream::health::probe_loop(core.clone()));
         while let Some(msg) = rx.recv().await {
             match msg {
                 ToCore::Install(generation, done) => {
@@ -603,7 +716,8 @@ pub(crate) fn allowed_cpus() -> Vec<usize> {
     (0..n).collect()
 }
 
-/// Refreshes the core's clock every second, and writes the access log lines buffered since.
+/// Refreshes the core's clock every second, writes the access log lines buffered since, and
+/// publishes the core's metrics while its snapshot collects them.
 async fn tick(core: Rc<Core>) {
     let mut every = tokio::time::interval(Duration::from_secs(1));
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -615,6 +729,9 @@ async fn tick(core: Rc<Core>) {
         if dropped > 0 {
             warning!("core {}: {dropped} access log lines dropped", core.index);
         }
+        if core.snapshot().metrics.is_some() {
+            metrics::publish(&core);
+        }
     }
 }
 
@@ -625,8 +742,8 @@ async fn sweep(core: Rc<Core>) {
     loop {
         every.tick().await;
         let snap = core.snapshot();
-        if !snap.plan.upstreams.is_empty() {
-            core.upstreams.sweep(&snap.plan, Instant::now());
+        if !snap.upstreams.origins().is_empty() {
+            core.upstreams.sweep(&snap.upstreams, Instant::now());
         }
     }
 }
@@ -659,6 +776,7 @@ async fn accept_loop(core: Rc<Core>, listener: Listener) {
             proto: Proto::H1,
             listener: key,
         };
+        core.connections.accepted(key);
         let guard = core.track();
         tokio::task::spawn_local(connection(core.clone(), sock, info, guard));
     }
@@ -714,10 +832,11 @@ async fn handshake(core: &Core, sock: Socket, info: ConnInfo) -> Option<(Transpo
         let snap = core.snapshot();
         (snap.tls.clone()?, snap.plan.server.header_timeout)
     };
-    tls::accept_within(sock, config, timeout)
+    let accepted = tls::accept_within(sock, config, timeout)
         .await
-        .inspect_err(|e| debug!("core {}: TLS from {}: {e:?}", core.index, info.remote))
-        .ok()
+        .inspect_err(|e| debug!("core {}: TLS from {}: {e:?}", core.index, info.remote));
+    core.connections.handshake(info.listener, accepted.is_ok());
+    accepted.ok()
 }
 
 #[cfg(test)]
@@ -850,8 +969,10 @@ pub(crate) mod testing {
 
     /// The plan `config` compiles to.
     pub fn plan_from(generation: u64, config: &serde_json::Value) -> Plan {
-        let config = crate::config::parse_config(config.to_string().as_bytes())
-            .unwrap_or_else(|e| panic!("{}: {}", e.pointer, e.message));
+        let config =
+            crate::config::parse_config(crate::config::Format::Json, config.to_string().as_bytes())
+                .unwrap_or_else(|e| panic!("{}: {}", e.pointer, e.message))
+                .value;
         let sources = crate::plan::compile::FileSystem;
         match crate::plan::compile::compile(&config, &sources, generation) {
             Ok((plan, _)) => plan,
@@ -860,11 +981,11 @@ pub(crate) mod testing {
     }
 
     pub fn generation(generation: u64, addrs: &[SocketAddr]) -> Arc<Generation> {
-        Arc::new(Generation {
-            plan: Arc::new(plan(generation, addrs)),
-            tls: None,
-            access: Arc::default(),
-        })
+        Arc::new(Generation::standalone(
+            plan(generation, addrs),
+            None,
+            Arc::default(),
+        ))
     }
 
     /// A loopback address whose port was free a moment ago.
@@ -1071,11 +1192,7 @@ mod tests {
         );
         let (files, failures) = access::Files::open(&plan.access_logs);
         assert!(failures.is_empty(), "{failures:?}");
-        let generation = Arc::new(Generation {
-            plan: Arc::new(plan),
-            tls: None,
-            access: Arc::new(files),
-        });
+        let generation = Arc::new(Generation::standalone(plan, None, Arc::new(files)));
         let workers = spawn_workers(&[allowed_cpus()[0]], generation).unwrap();
         let mut conn = connect(addr);
         let warm_up = 2_000;
@@ -1238,5 +1355,71 @@ mod tests {
         assert_eq!(caches.caches.len(), 1);
         caches.get(&new, RegexId(1));
         assert_eq!(caches.caches.len(), 2);
+    }
+
+    #[test]
+    fn a_generation_with_the_same_plan_keeps_the_regex_caches_and_the_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("page.html");
+        std::fs::write(&file, "x").unwrap();
+        let root = dir.path().to_str().unwrap().as_bytes().to_vec();
+        let config = |addr: SocketAddr| {
+            serde_json::json!({
+                "version": 1,
+                "listen": { "http": [addr], "https": [] },
+                "sites": [{
+                    "name": "test",
+                    "hosts": ["*"],
+                    "routes": [{ "when": { "pathRegex": "^/(a)" }, "respond": { "body": "a" } }],
+                }],
+            })
+        };
+        let addr = free_addr();
+        let first = Arc::new(Generation::standalone(
+            plan_from(1, &config(addr)),
+            None,
+            Arc::default(),
+        ));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&runtime, async {
+            let core = Rc::new(Core::new(0, &first));
+            assert!(core.install(&first).await.is_empty());
+            core.regex.borrow_mut().get(&first.plan, RegexId(0));
+            let caches = core.regex.borrow().caches.as_ptr();
+            assert!(core.catalog.borrow_mut().probe(&root, b"page.html"));
+            std::fs::remove_file(&file).unwrap();
+
+            let epoch = Generation {
+                upstreams: Registry::new(1).build(&first.plan),
+                ..(*first).clone()
+            };
+            assert!(core.install(&epoch).await.is_empty());
+            assert!(Arc::ptr_eq(&core.snapshot().upstreams, &epoch.upstreams));
+            assert_eq!(
+                core.regex.borrow().caches.as_ptr(),
+                caches,
+                "the same plan keeps its regex caches"
+            );
+            assert!(
+                core.catalog.borrow_mut().probe(&root, b"page.html"),
+                "and the catalog's entries"
+            );
+
+            let reload = Generation::standalone(plan_from(2, &config(addr)), None, Arc::default());
+            assert!(core.install(&reload).await.is_empty());
+            assert_ne!(
+                core.regex.borrow().caches.as_ptr(),
+                caches,
+                "a new plan rebuilds them"
+            );
+            assert!(
+                !core.catalog.borrow_mut().probe(&root, b"page.html"),
+                "and drops mutable catalog entries"
+            );
+            core.drain(Instant::now()).await;
+        });
     }
 }

@@ -4,15 +4,17 @@
 //! cached forever for immutable /nix/store roots) and the coarse clock (`after`).
 //!
 //! It never does network IO and never awaits, so a core-local `RefCell` borrow of the caches
-//! for its duration cannot be held across an await.
+//! for its duration cannot be held across an await. Its one effect outside the exchange: a
+//! `limit` step takes a token from a table shared by every core.
 //!
 //! Allocation: none once the exchange's arena, field buffer, var and capture slots and pending
 //! op list have grown to the request's size (they are recycled with the exchange). Regex
 //! searches use the core's caches and a stack slot array. File probes go to
 //! [`Catalog::probe`].
 
-use crate::exchange::{ASpan, Exchange, PendingOp};
+use crate::exchange::{ASpan, Exchange, PendingOp, Refused, RefusedBy};
 use crate::files::catalog::Catalog;
+use crate::limit::{Admit, Limiters};
 use crate::msg::{HeaderName, Status};
 use crate::plan::cond::Test;
 use crate::plan::template::{MAX_CAPTURE, decoded_eq, query_values};
@@ -31,16 +33,31 @@ pub(crate) struct Effects<'c> {
     pub catalog: &'c mut Catalog,
     /// Unix seconds, from the core's coarse clock.
     pub now: i64,
+    /// The generation's limit tables, read only by `limit` steps.
+    pub limits: &'c Limiters,
 }
 
 /// The terminal decision, with every template already expanded into the exchange's arena.
 #[derive(Debug)]
 pub(crate) enum Outcome<'p> {
     Proxy(&'p ProxyPlan),
-    Files { plan: &'p FilesPlan, root: ASpan },
-    Respond { status: Status, body: ASpan },
-    Redirect { status: Status, location: ASpan },
+    Files {
+        plan: &'p FilesPlan,
+        root: ASpan,
+    },
+    Respond {
+        status: Status,
+        body: ASpan,
+    },
+    Redirect {
+        status: Status,
+        location: ASpan,
+    },
     Error(Status),
+    /// Answered by `metrics::serve`.
+    Metrics,
+    /// Answered by `acme::http01`.
+    AcmeChallenge,
 }
 
 /// Runs the site's routes. Reaching the end without a terminal step is `Error(404)`.
@@ -279,7 +296,22 @@ fn apply<'p>(
         Action::RequestHeaders(ops) => request_headers(ops, ex),
         Action::Encode(set) => ex.pending.encode = *set,
         Action::Block(block) => return run_block(plan, block, ex, fx),
-        Action::Answer(terminal) => return Flow::Answer(answer(terminal, ex)),
+        Action::Limit(limit) => {
+            if let Admit::Wait(retry_after) = fx.limits.admit(limit, ex) {
+                ex.refused = Some(Refused {
+                    by: RefusedBy::Limit,
+                    retry_after,
+                });
+                ex.route = limit.route;
+                return Flow::Answer(Outcome::Error(Status::TOO_MANY_REQUESTS));
+            }
+        }
+        Action::Answer(terminal, slot) => {
+            if let Some(slot) = slot {
+                ex.route = *slot;
+            }
+            return Flow::Answer(answer(terminal, ex));
+        }
     }
     Flow::Next
 }
@@ -329,6 +361,8 @@ fn answer<'p>(terminal: &'p Terminal, ex: &mut Exchange) -> Outcome<'p> {
             location: to.expand(ex),
         },
         Terminal::Error(status) => Outcome::Error(*status),
+        Terminal::Metrics => Outcome::Metrics,
+        Terminal::AcmeChallenge => Outcome::AcmeChallenge,
     }
 }
 
@@ -450,7 +484,9 @@ mod tests {
                 .collect(),
         };
         let bytes = fixtures.read(&dir.join(&table.config)).unwrap();
-        let config = crate::config::parse_config(&bytes).expect("the config fits the schema");
+        let config = crate::config::parse_config(crate::config::Format::Json, &bytes)
+            .expect("the config fits the schema")
+            .value;
         let (plan, _) = compile::compile(&config, &fixtures, 1).unwrap_or_else(|d| {
             panic!(
                 "{}: {:#?}",
@@ -508,7 +544,10 @@ mod tests {
         let text = |s: ASpan| String::from_utf8_lossy(ex.arena.get(s)).into_owned();
         match outcome {
             Outcome::Proxy(p) => {
-                let u = &plan.upstreams[p.upstream.0 as usize];
+                let crate::plan::Target::Origin(id) = p.to else {
+                    return "proxy pool".into();
+                };
+                let u = &plan.origins[id.0 as usize];
                 let scheme = if u.tls.is_some() { "https" } else { "http" };
                 let host = match u.addr {
                     OriginAddr::Ip(addr) => addr.to_string(),
@@ -534,14 +573,20 @@ mod tests {
                 format!("redirect {} {}", status.code(), text(*location))
             }
             Outcome::Error(status) => format!("error {}", status.code()),
+            Outcome::Metrics => "metrics".into(),
+            Outcome::AcmeChallenge => "acme challenge".into(),
         }
     }
+
+    static NO_LIMITS: std::sync::LazyLock<crate::limit::Limiters> =
+        std::sync::LazyLock::new(Default::default);
 
     fn effects<'a>(regex: &'a mut RegexCaches, catalog: &'a mut Catalog) -> Effects<'a> {
         Effects {
             regex,
             catalog,
             now: NOW,
+            limits: &NO_LIMITS,
         }
     }
 

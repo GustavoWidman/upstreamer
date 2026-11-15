@@ -2,14 +2,23 @@
 //! [`compile::compile`] on the control thread, shared read-only by every core through an `Arc`.
 //!
 //! Everything the config names by string is an index here: vars ([`VarId`]), regexes
-//! ([`RegexId`]), upstream origins ([`UpstreamId`]), sites ([`SiteId`]). `include`s are
-//! spliced, constant matchers folded, templates parsed into typed placeholders. So routing
+//! ([`RegexId`]), origins ([`OriginId`]), pools ([`PoolId`]), sites ([`SiteId`]). `include`s
+//! are spliced, constant matchers folded, templates parsed into typed placeholders. So routing
 //! never hashes a var name, never parses a template, and never sees a config type.
+//!
+//! What the config does not name is absent from the plan, so the request path never tests for
+//! it: a site without a `limit` step has no [`Action::Limit`]; a single origin without health
+//! settings is [`Target::Origin`]; a plan without a `metrics` step has `metrics == false`,
+//! stores no route slot and gives no site an [`Observe`] for metrics; a plan without
+//! `trustedProxies` has no `trust`; a plan without in-process ACME has no challenge step.
 
 pub(crate) mod compile;
 pub(crate) mod cond;
 pub(crate) mod host;
+pub(crate) mod load;
 pub(crate) mod template;
+
+pub(crate) use load::{check, load};
 
 pub(crate) use cond::Cond;
 pub(crate) use host::HostIndex;
@@ -20,6 +29,7 @@ use crate::msg::{HeaderName, Status};
 use smallvec::SmallVec;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -29,9 +39,31 @@ pub(crate) struct VarId(pub u16);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct RegexId(pub u16);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct UpstreamId(pub u16);
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct LogId(pub u16);
+
+/// One origin: an index into `upstream::Upstreams::origins`. The origins a config names come
+/// first, at the indices [`Plan::origins`] gives them, so a plan's ids are valid in every
+/// `Upstreams` built from that plan, whatever discovery adds after them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct OriginId(pub u16);
+
+/// A pool: an index into [`Plan::pools`] and `upstream::Upstreams::pools` alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct PoolId(pub u16);
+
+/// A discovery source: an index into [`Plan::sources`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct SourceId(pub u16);
+
+/// A `limit` step's bucket table: an index into [`Plan::limits`] and `limit::Limiters`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct LimitId(pub u16);
+
+/// A request series label (site, nearest named step): an index into [`Plan::routes`]. Every
+/// terminal and `limit` step of a site's main routes has one while the plan collects metrics;
+/// error-route steps have none and leave the request's slot as the main route set it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct RouteSlot(pub u16);
 
 #[derive(Debug)]
 pub(crate) struct Plan {
@@ -40,7 +72,22 @@ pub(crate) struct Plan {
     pub workers: Option<u16>,
     pub listeners: Box<[ListenerSpec]>,
     pub sites: Box<[SitePlan]>,
-    pub upstreams: Box<[UpstreamPlan]>,
+    /// The origins the config names, interned by identity ([`OriginSpec::key`]).
+    pub origins: Box<[OriginSpec]>,
+    /// Every distinct proxy target with more than one bare origin, interned by value.
+    pub pools: Box<[PoolPlan]>,
+    /// Discovery sources, interned by value. Empty in every build without discovery.
+    pub sources: Box<[SourceSpec]>,
+    /// Limit tables: what identifies each across reloads, and its size.
+    pub limits: Box<[LimitSpec]>,
+    /// Request series labels by [`RouteSlot`]. Slot 0 is ("", "") for requests no step took.
+    pub routes: Box<[RouteLabel]>,
+    /// Some site has a `metrics` step. Derived; nothing else switches collection on.
+    pub metrics: bool,
+    /// Whose forwarded client address is believed; `None` without `trustedProxies`.
+    pub trust: Option<crate::trust::TrustPlan>,
+    /// Certificates issued in process, one per site with `tls.acme`.
+    pub acme: Box<[crate::acme::AcmePlan]>,
     /// Shared, immutable compiled regexes. Each core keeps its own search caches
     /// (`runtime::RegexCaches`), so matching never contends.
     pub regexes: Box<[regex_automata::meta::Regex]>,
@@ -124,8 +171,23 @@ pub(crate) struct SitePlan {
     pub errors: Box<[ErrorRoutePlan]>,
     /// `h3=":443"; ma=86400` when the site serves HTTP/3; added to h1/h2 TLS responses.
     pub alt_svc: Option<Box<[u8]>>,
-    /// Where this site's requests are logged; `None` logs nothing.
-    pub access_log: Option<LogId>,
+    /// `Some` exactly when the site logs or the plan collects metrics; the pipeline tests
+    /// this one `Option` per request.
+    pub observe: Option<Observe>,
+}
+
+/// What happens to a finished request of a site: its access log line, its metrics, or both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Observe {
+    pub log: Option<LogId>,
+    pub metrics: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RouteLabel {
+    pub site: Box<str>,
+    /// The nearest enclosing named step's name, `""` when none.
+    pub route: Box<str>,
 }
 
 #[derive(Debug)]
@@ -169,7 +231,11 @@ pub(crate) enum Action {
     RequestHeaders(Box<[HeaderOp]>),
     Encode(EncodingSet),
     Block(Block),
-    Answer(Terminal),
+    /// Takes a token from a shared bucket or answers 429. Never inside error routes.
+    Limit(LimitPlan),
+    /// A terminal, with the series label it gives the request: `Some` in the main routes of a
+    /// plan that collects metrics, `None` otherwise (nothing is stored).
+    Answer(Terminal, Option<RouteSlot>),
 }
 
 /// Actions that answer the request. A step holding one ends routing when its `when` holds.
@@ -188,6 +254,51 @@ pub(crate) enum Terminal {
         to: Template,
     },
     Error(Status),
+    /// The Prometheus exposition of the whole process.
+    Metrics,
+    /// An ACME HTTP-01 token (`/.well-known/acme-challenge/<token>`), on the HTTP->HTTPS
+    /// redirect site of a plan with in-process ACME.
+    AcmeChallenge,
+}
+
+/// One `limit` step.
+#[derive(Debug)]
+pub(crate) struct LimitPlan {
+    pub table: LimitId,
+    pub key: KeyPlan,
+    /// The emission interval and the burst tolerance, in the table's time unit (see
+    /// `limit::Table`): a request is admitted while its key's theoretical arrival time stays
+    /// within `tolerance` of now.
+    pub interval: u64,
+    pub tolerance: u64,
+    /// The label of a 429 this step answers.
+    pub route: RouteSlot,
+}
+
+/// What a limit table is across reloads: the same site, step path and key template keep their
+/// buckets; anything else starts empty.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct LimitSpec {
+    pub site: Box<str>,
+    pub step: Box<str>,
+    pub key: Box<str>,
+    /// Bucket slots, a power of two of at least 8 (a constant key gets 8: one cache line).
+    pub slots: u32,
+    /// Bits of a slot word that hold the arrival time; the rest is the key's fingerprint.
+    pub unit_shift: u8,
+}
+
+/// A request key for a limit or a hash policy, specialised at compile time.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum KeyPlan {
+    /// `{remote_host}`: the client address's bytes are hashed, never formatted.
+    RemoteHost,
+    /// `{remote_net}`: an IPv4 address, or an IPv6 address's /64.
+    RemoteNet,
+    /// A constant: one bucket, one hash value.
+    Const(u64),
+    /// Anything else, expanded into the arena and hashed. An empty expansion is "no key".
+    Template(Template),
 }
 
 /// A header op from the config: set (`Some`) or remove (`None`). Names are validated and may
@@ -206,7 +317,7 @@ pub(crate) struct FileProbe {
 
 #[derive(Debug)]
 pub(crate) struct ProxyPlan {
-    pub upstream: UpstreamId,
+    pub to: Target,
     /// Defaults first (X-Forwarded-*), then the config's, so the config can override or remove
     /// a default.
     pub headers: Box<[HeaderOp]>,
@@ -215,10 +326,57 @@ pub(crate) struct ProxyPlan {
     pub tunnel_idle: Option<Duration>,
 }
 
-/// One origin. Proxy steps naming the same origin share its per-core connection pools.
-#[derive(Debug)]
-pub(crate) struct UpstreamPlan {
-    pub id: UpstreamId,
+/// Where a proxy step sends its requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Target {
+    /// One origin, no balancing, no health settings: pooled connections, one retry on a fresh
+    /// connection when a pooled one turns out dead.
+    Origin(OriginId),
+    /// Several origins, a discovered member set, or any health setting.
+    Pool(PoolId),
+}
+
+/// One balanced target. Interned by value: steps with equal targets share it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PoolPlan {
+    pub members: MembersPlan,
+    pub balance: BalancePlan,
+    /// Further attempts after a failed one, for replayable requests.
+    pub retries: u8,
+    /// Origin statuses that count as failed attempts.
+    pub fail_statuses: StatusSet,
+    /// `None`: passive checks off (`maxFails = 0`).
+    pub passive: Option<PassivePlan>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MembersPlan {
+    /// Origins from the config with their weights (weight 0 drains: never picked).
+    Static(Box<[(OriginId, u16)]>),
+    /// Whatever the source reports, weight 1 each.
+    Discovered(SourceId),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BalancePlan {
+    RoundRobin,
+    LeastRequests,
+    P2c,
+    Hash(KeyPlan),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PassivePlan {
+    pub max_fails: u8,
+    /// Whole seconds (the health clock's unit).
+    pub cooldown: u32,
+}
+
+/// One origin. Proxy steps naming the same origin share its per-core connection pools and its
+/// health. Static origins live in [`Plan::origins`]; discovered ones are built from
+/// [`SourceSpec`] by the upstream registry.
+#[derive(Debug, Clone)]
+pub(crate) struct OriginSpec {
     pub host: Box<str>,
     pub port: u16,
     /// Literal IPs are resolved at compile time; names (`storage`, `localhost`) when dialled,
@@ -228,15 +386,114 @@ pub(crate) struct UpstreamPlan {
     pub tls: Option<UpstreamTls>,
     pub idle: Duration,
     pub max_idle_per_core: u16,
+    /// The origin's active check, if a step gave it one.
+    pub probe: Option<ProbePlan>,
 }
 
-#[derive(Debug)]
+/// What makes two origins the same origin: the compiler interns by it, the registry carries
+/// health by it, the per-core pools keep idle connections across epochs by it. Derived from
+/// the spec by [`OriginSpec::key`], never stored beside it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct OriginKey {
+    pub https: bool,
+    pub host: Box<str>,
+    pub port: u16,
+    pub server_name: Option<Box<str>>,
+    pub verify: bool,
+}
+
+impl OriginSpec {
+    pub fn key(&self) -> OriginKey {
+        OriginKey {
+            https: self.tls.is_some(),
+            host: self.host.clone(),
+            port: self.port,
+            server_name: self.tls.as_ref().and_then(|t| t.server_name.clone()),
+            verify: self.tls.as_ref().is_none_or(|t| t.verify),
+        }
+    }
+}
+
+/// An origin's active health check.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ProbePlan {
+    /// `GET <path> HTTP/1.1`, `Host: <host>`, `Connection: close`, written once here.
+    pub request: Box<[u8]>,
+    pub interval: Duration,
+    pub timeout: Duration,
+    pub expect: StatusSet,
+    pub healthy_after: u8,
+    pub unhealthy_after: u8,
+}
+
+/// Statuses 100..=599 as a bitset: membership is one shift and mask.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct StatusSet([u64; 8]);
+
+impl StatusSet {
+    /// `None` for a code outside 100..=599.
+    pub fn insert(&mut self, code: u16) -> Option<()> {
+        let bit = usize::from(code.checked_sub(100).filter(|&b| b < 500)?);
+        self.0[bit / 64] |= 1 << (bit % 64);
+        Some(())
+    }
+    pub fn contains(&self, status: Status) -> bool {
+        let Some(bit) = status.code().checked_sub(100).filter(|&b| b < 500) else {
+            return false;
+        };
+        let bit = usize::from(bit);
+        self.0[bit / 64] & (1 << (bit % 64)) != 0
+    }
+}
+
+/// A discovery source and the settings its origins get.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(crate) enum SourceSpec {
+    Kubernetes(KubeSource),
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(crate) struct KubeSource {
+    /// What the watch observes: its identity across reloads (`discover::SourceKey`). Changing
+    /// a setting below keeps the watch and its last endpoints.
+    pub watch: Arc<KubeWatch>,
+    pub https: bool,
+    pub server_name: Option<Box<str>>,
+    pub verify: bool,
+    pub idle: Duration,
+    /// The probe every origin of this source gets.
+    pub probe: Option<ProbePlan>,
+    /// The label its origins' metrics aggregate under: `kubernetes:<ns>/<service>:<port>` or
+    /// `kubernetes:<ns>/<selector>:<port>`.
+    pub label: Box<str>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(crate) struct KubeWatch {
+    pub namespace: Box<str>,
+    pub select: KubeSelect,
+    pub port: KubePort,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(crate) enum KubeSelect {
+    Service(Box<str>),
+    Labels(Box<str>),
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(crate) enum KubePort {
+    Number(u16),
+    Name(Box<str>),
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum OriginAddr {
     Ip(SocketAddr),
     Name,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct UpstreamTls {
     /// `None` for IP origins (no SNI).
     pub server_name: Option<Box<str>>,
@@ -292,54 +549,6 @@ impl Diagnostic {
     pub fn is_error(&self) -> bool {
         self.severity == Severity::Error
     }
-
-    /// Fills `site` and `step` from the document the pointer points into, so a message about
-    /// `/sites/3/routes/1/when` names the site and step a person wrote.
-    pub(crate) fn locate(mut self, doc: &serde_json::Value) -> Diagnostic {
-        let (site, step) = locate(doc, &self.pointer);
-        self.site = site.or(self.site);
-        self.step = step;
-        self
-    }
-}
-
-fn locate(doc: &serde_json::Value, pointer: &str) -> (Option<String>, Option<String>) {
-    use serde_json::Value;
-    let mut site = None;
-    let mut steps: Vec<String> = Vec::new();
-    let mut node = doc;
-    let mut prev: Option<String> = None;
-    for (depth, raw) in pointer.split('/').skip(1).enumerate() {
-        let segment = raw.replace("~1", "/").replace("~0", "~");
-        let next = match node {
-            Value::Object(map) => map.get(&segment),
-            Value::Array(items) => segment.parse::<usize>().ok().and_then(|i| items.get(i)),
-            _ => None,
-        };
-        let Some(next) = next else { break };
-        if let Value::Array(_) = node {
-            let index = &segment;
-            match prev.as_deref() {
-                Some("sites") if depth == 1 => {
-                    site = Some(match next.get("name").and_then(Value::as_str) {
-                        Some(name) => name.to_owned(),
-                        None => format!("sites[{index}]"),
-                    });
-                }
-                Some("routes" | "firstOf") => {
-                    steps.push(match next.get("name").and_then(Value::as_str) {
-                        Some(name) => name.to_owned(),
-                        None => index.clone(),
-                    })
-                }
-                Some("errors") => steps.push(format!("errors[{index}]")),
-                _ => {}
-            }
-        }
-        prev = Some(segment);
-        node = next;
-    }
-    (site, (!steps.is_empty()).then(|| steps.join("/")))
 }
 
 impl std::fmt::Display for Diagnostic {
@@ -365,169 +574,6 @@ impl std::fmt::Display for Diagnostic {
         }
         f.write_str(&self.message)
     }
-}
-
-/// Reads, parses and compiles a config file: what `run` does at startup and reload, and what
-/// `check` does at build time. Every diagnostic names its file and is located (site and step).
-pub(crate) fn load(
-    path: &Path,
-    generation: u64,
-) -> Result<(Plan, Vec<Diagnostic>), Vec<Diagnostic>> {
-    let bytes = std::fs::read(path).map_err(|e| {
-        vec![Diagnostic::error(
-            Some(path),
-            "",
-            format!("cannot read: {e}"),
-        )]
-    })?;
-    let config = crate::config::parse_config(&bytes).map_err(|e| {
-        let mut message = e.message;
-        if e.line > 0 {
-            message.push_str(&format!(" (line {}, column {})", e.line, e.column));
-        }
-        vec![Diagnostic::error(Some(path), e.pointer, message)]
-    });
-    let doc = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
-    let in_config = |diagnostics: Vec<Diagnostic>| -> Vec<Diagnostic> {
-        diagnostics
-            .into_iter()
-            .map(|mut d| {
-                if d.file.is_none() {
-                    d.file = Some(path.to_path_buf());
-                }
-                match &doc {
-                    Some(doc) if d.file.as_deref() == Some(path) => d.locate(doc),
-                    _ => d,
-                }
-            })
-            .collect()
-    };
-    let config = config.map_err(in_config)?;
-    if config.version != 1 {
-        let message = format!(
-            "unsupported config version {}; this upstreamer reads version 1",
-            config.version
-        );
-        return Err(vec![Diagnostic::error(Some(path), "/version", message)]);
-    }
-    match compile::compile(&config, &compile::FileSystem, generation) {
-        Ok((plan, warnings)) => Ok((plan, in_config(warnings))),
-        Err(diagnostics) => Err(in_config(diagnostics)),
-    }
-}
-
-/// `upstreamer check`: parse + compile, never touching certificates, roots or sockets.
-///
-/// A config is compiled exactly as `run` compiles it (includes read and validated), and the
-/// ports its listeners need are compared with the ports the NixOS module opens. A fragment is
-/// compiled as if one site included it.
-pub(crate) fn check(input: crate::CheckInput) -> Result<crate::CheckReport, Vec<Diagnostic>> {
-    let (path, expect, fragment) = match input {
-        crate::CheckInput::Config { path, expect } => (path, expect, false),
-        crate::CheckInput::Fragment(path) => (path, None, true),
-    };
-    let (plan, warnings) = if fragment {
-        let bytes = std::fs::read(&path).map_err(|e| {
-            vec![Diagnostic::error(
-                Some(&path),
-                "",
-                format!("cannot read: {e}"),
-            )]
-        })?;
-        let path = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
-        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
-            "version": 1,
-            "sites": [{ "name": "", "hosts": ["*"], "routes": [{ "include": path }] }],
-        }))
-        .expect("the wrapper fits the schema");
-        compile::compile(&config, &OneFile { path, bytes }, 0)?
-    } else {
-        load(&path, 0)?
-    };
-    if let Some(expect) = expect {
-        ports_match(&plan, &expect)
-            .map_err(|message| vec![Diagnostic::error(Some(&path), "", message)])?;
-    }
-    let sites = &plan.sites[..plan.user_sites as usize];
-    Ok(crate::CheckReport {
-        sites: if fragment { 0 } else { sites.len() },
-        steps: sites
-            .iter()
-            .map(|s| {
-                count_steps(&s.routes)
-                    + s.errors
-                        .iter()
-                        .map(|e| count_steps(&e.routes))
-                        .sum::<usize>()
-            })
-            .sum(),
-        warnings,
-    })
-}
-
-/// One file already read; any other include comes from the file system.
-struct OneFile {
-    path: PathBuf,
-    bytes: Vec<u8>,
-}
-
-impl compile::Sources for OneFile {
-    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
-        if path == self.path {
-            Ok(self.bytes.clone())
-        } else {
-            std::fs::read(path)
-        }
-    }
-}
-
-/// The firewall the NixOS module derived must open exactly the ports the listeners use.
-fn ports_match(plan: &Plan, expect: &crate::ExpectedPorts) -> Result<(), String> {
-    let set = |ports: &mut dyn Iterator<Item = u16>| -> Vec<u16> {
-        let mut v: Vec<u16> = ports.collect();
-        v.sort_unstable();
-        v.dedup();
-        v
-    };
-    let ports = |udp: bool| {
-        set(&mut plan
-            .listeners
-            .iter()
-            .filter(|l| (l.key.kind == ListenerKind::Quic) == udp)
-            .map(|l| l.key.addr.port()))
-    };
-    let (tcp, udp) = (ports(false), ports(true));
-    let (want_tcp, want_udp) = (
-        set(&mut expect.tcp.iter().copied()),
-        set(&mut expect.udp.iter().copied()),
-    );
-    if tcp == want_tcp && udp == want_udp {
-        return Ok(());
-    }
-    let list = |v: &[u16]| match v {
-        [] => "none".to_owned(),
-        v => v.iter().map(u16::to_string).collect::<Vec<_>>().join(", "),
-    };
-    Err(format!(
-        "the firewall opens TCP {} and UDP {}, but the sites listen on TCP {} and UDP {}",
-        list(&want_tcp),
-        list(&want_udp),
-        list(&tcp),
-        list(&udp),
-    ))
-}
-
-fn count_steps(block: &Block) -> usize {
-    block
-        .steps
-        .iter()
-        .map(|step| {
-            1 + match &step.action {
-                Action::Block(nested) => count_steps(nested),
-                _ => 0,
-            }
-        })
-        .sum()
 }
 
 impl Plan {

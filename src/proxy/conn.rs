@@ -3,7 +3,7 @@
 use super::timer::Deadline;
 use super::tls::ClientStream;
 use crate::net::Transport;
-use crate::plan::UpstreamId;
+use crate::plan::OriginId;
 use bytes::BytesMut;
 use std::future::poll_fn;
 use std::io::{self, IoSlice};
@@ -22,11 +22,12 @@ pub(crate) struct UpstreamConn {
     /// Bytes read from the origin and not yet consumed. Lent from the core's buffer pool
     /// while checked out; an idle connection holds an empty buffer without an allocation.
     pub buf: BytesMut,
-    pub upstream: UpstreamId,
-    /// Generation of the plan `upstream` indexes.
-    pub generation: u64,
+    pub origin: OriginId,
+    /// The `Upstreams` epoch `origin` indexes.
+    pub epoch: crate::upstream::Epoch,
+    /// `Some` while a pool target's request holds the connection.
+    pub busy: Option<super::pool::Busy>,
     pub idle_since: Instant,
-    pub requests: u32,
     /// Response-header timeout, then tunnel idle timeout.
     pub watch: Deadline,
 }

@@ -45,6 +45,9 @@ pub(crate) struct CertStore {
     exact: HashMap<Box<str>, Slot>,
     /// `*.example.com` stored as `example.com`; matched one label deep.
     wildcard: HashMap<Box<str>, Slot>,
+    /// The answers of in-process ACME validations (TLS-ALPN-01, RFC 8737); `None` without
+    /// in-process ACME.
+    pub acme: Option<Arc<crate::acme::Challenges>>,
 }
 
 /// One name's certificate.
@@ -292,6 +295,11 @@ pub(crate) struct Resolver {
 
 impl ResolvesServerCert for Resolver {
     fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        if let Some(acme) = &self.store.acme
+            && let Some(key) = acme.tls_alpn(&hello)
+        {
+            return Some(key);
+        }
         let name = hello.server_name()?;
         self.store.get(name).map(|slot| slot.key.clone())
     }
@@ -429,7 +437,11 @@ pub(crate) fn server_config(
 ) -> Arc<rustls::ServerConfig> {
     let versions: &[&rustls::SupportedProtocolVersion] =
         &[&rustls::version::TLS13, &rustls::version::TLS12];
-    let mut config = base_server_config(store, tickets, versions, &[b"h2", b"http/1.1"]);
+    let alpn: &[&[u8]] = match store.acme {
+        Some(_) => &[b"h2", b"http/1.1", crate::acme::ALPN],
+        None => &[b"h2", b"http/1.1"],
+    };
+    let mut config = base_server_config(store, tickets, versions, alpn);
     // The record layer (and kTLS) take the traffic keys over from rustls after the handshake.
     config.enable_secret_extraction = true;
     Arc::new(config)
@@ -698,6 +710,10 @@ async fn handshake(
             Next::Traffic if !conn.is_handshaking() => {
                 let proto = match conn.alpn_protocol() {
                     Some(b"h2") => Proto::H2,
+                    // A TLS-ALPN-01 validation ends with the handshake (RFC 8737 section 3).
+                    Some(crate::acme::ALPN) => {
+                        return Err(io::Error::from(io::ErrorKind::ConnectionAborted).into());
+                    }
                     _ => Proto::H1,
                 };
                 return Ok((conn, proto));

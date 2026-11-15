@@ -45,13 +45,13 @@ mod wake;
 #[cfg(test)]
 mod tests;
 
-use crate::access::{self, Started};
 use crate::body::{Body, RequestBody};
 use crate::exchange::{ConnInfo, Exchange};
 use crate::log::debug;
 use crate::msg::{Known, Method, ResponseHead, Status};
 use crate::net::Transport;
 use crate::net::buf::SMALL;
+use crate::observe::{self, Started};
 use crate::pipeline::{self, Response};
 use crate::proxy::timer::Deadline;
 use crate::runtime::{Core, CoreSnapshot};
@@ -648,7 +648,7 @@ impl Drop for Request<'_> {
             return;
         };
         if let Some((Some(log), status)) = self.answered.take() {
-            access::record(self.core, self.snap, &ex, log, status, self.sent);
+            observe::finish(self.core, self.snap, &ex, log, status, self.sent);
         }
         self.core.exchanges.put(ex);
     }

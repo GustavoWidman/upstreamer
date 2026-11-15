@@ -4,6 +4,7 @@
 //!
 //! ```text
 //!  NixOS module ──JSON──▶ config (wire schema, serde) ──compile──▶ plan::Plan (immutable, Arc)
+//!  people ───────TOML──▶ (the same schema)
 //!                                                                   │ published by runtime::control
 //!                                                                   ▼ to every core as CoreSnapshot
 //!  per core (one OS thread, one current-thread tokio runtime, nothing shared but read-only Arcs):
@@ -38,14 +39,20 @@
 #![allow(dead_code, unused_variables, unused_macros)]
 
 mod access;
+mod acme;
 mod body;
 mod config;
+mod discover;
 mod encode;
 mod exchange;
 mod files;
+mod key;
+mod limit;
 mod log;
+mod metrics;
 mod msg;
 mod net;
+mod observe;
 mod pipeline;
 mod plan;
 mod proto;
@@ -53,11 +60,14 @@ mod proxy;
 mod route;
 mod runtime;
 mod tls;
+mod trust;
+mod upstream;
 
 use std::fmt;
 use std::path::PathBuf;
 
 pub use plan::Diagnostic;
+pub use plan::load::Costs;
 
 /// Codec entry points for the fuzz targets and benchmarks; not part of the API.
 #[cfg(feature = "internals")]
@@ -145,6 +155,8 @@ pub struct CheckReport {
     pub sites: usize,
     pub steps: usize,
     pub warnings: Vec<Diagnostic>,
+    /// What the config's pools, health checks, limits and metrics cost at run time.
+    pub costs: Costs,
 }
 
 /// Compiles the config exactly as `run` would, minus the parts that touch the host (binding,

@@ -114,6 +114,7 @@ impl Status {
     pub const NOT_FOUND: Status = Status(404);
     pub const RANGE_NOT_SATISFIABLE: Status = Status(416);
     pub const MISDIRECTED: Status = Status(421);
+    pub const TOO_MANY_REQUESTS: Status = Status(429);
     pub const HEADER_FIELDS_TOO_LARGE: Status = Status(431);
     pub const INTERNAL_SERVER_ERROR: Status = Status(500);
     pub const BAD_GATEWAY: Status = Status(502);

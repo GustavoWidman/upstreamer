@@ -1534,6 +1534,7 @@ dependencies = [
  "socket2",
  "tempfile",
  "tokio",
+ "toml_edit",
  "zstd",
 ]
 

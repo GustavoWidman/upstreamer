@@ -10,12 +10,22 @@
 //! the running generation (logged, `STATUS=` set); certificate problems keep the previous
 //! certificate per name. Running reload twice with the same inputs publishes an equivalent
 //! generation.
+//!
+//! The control thread also keeps what outlives generations ([`Live`]): the upstream registry
+//! (health cells, last discovered endpoints), the discovery feed, the metrics hub and the ACME
+//! client. A generation is published one way, [`publish`], whatever caused it: a reload, a
+//! ticket rotation, a discovery change or a certificate issued in process.
 
-use super::{BindFailure, Generation, TlsState, ToCore, Worker};
+use super::{BindFailure, Generation, START, TlsState, ToCore, Worker};
 use crate::access::{self, OpenFailure};
+use crate::acme;
+use crate::discover::Feed;
+use crate::limit::Limiters;
 use crate::log::{error, info, warning};
+use crate::metrics::{self, Hub};
 use crate::plan::{Diagnostic, ListenerKind, Plan};
 use crate::tls::{self, CertProblem, TicketKeys};
+use crate::upstream::Registry;
 use crate::{RunOptions, StartError};
 use std::os::unix::net::UnixDatagram;
 use std::path::PathBuf;
@@ -42,6 +52,32 @@ pub(crate) fn run(opts: RunOptions) -> Result<(), StartError> {
     )
 }
 
+/// What the control thread keeps across generations.
+pub(crate) struct Live {
+    pub registry: Registry,
+    pub discovery: Feed,
+    pub hub: Arc<Hub>,
+    pub acme: acme::Manager,
+}
+
+impl Live {
+    pub fn new(cores: usize) -> Live {
+        Live {
+            registry: Registry::new(cores.min(usize::from(u16::MAX)) as u16),
+            discovery: Feed::new(),
+            hub: Hub::new(cores),
+            acme: acme::Manager::new(),
+        }
+    }
+
+    /// After a generation with a new plan is published: follow its discovery sources and
+    /// issue its certificates.
+    fn adopted(&mut self, generation: &Generation) {
+        self.discovery.set_sources(&generation.plan);
+        self.acme.set_plan(&generation.plan);
+    }
+}
+
 /// Starts the cores, then serves signals until SIGTERM or SIGINT. Blocks the calling thread.
 pub(crate) fn serve(
     load: &mut LoadPlan<'_>,
@@ -58,13 +94,17 @@ pub(crate) fn serve(
         let mut terminate = signal(SignalKind::terminate()).map_err(StartError::Runtime)?;
         let mut interrupt = signal(SignalKind::interrupt()).map_err(StartError::Runtime)?;
 
+        START.get_or_init(Instant::now);
         let mut generation = 1;
-        let (current, warnings, problems) =
-            rebuild(load, None, generation).map_err(StartError::Config)?;
+        let (plan, warnings) = load(generation).map_err(StartError::Config)?;
+        let cpus = assign_cpus(workers.or(plan.workers));
+        let mut live = Live::new(cpus.len());
+        let (current, problems) = assemble(plan, None, &mut live);
         report(&warnings, &problems);
         let mut current = Arc::new(current);
-        let cpus = assign_cpus(workers.or(current.plan.workers));
+        live.hub.control().generation = generation;
         let workers = super::spawn_workers(&cpus, current.clone())?;
+        live.adopted(&current);
         info!(
             "serving generation {generation} on {} cores, {} listeners",
             workers.len(),
@@ -80,22 +120,47 @@ pub(crate) fn serve(
             tokio::select! {
                 _ = hangup.recv() => {
                     generation += 1;
-                    reload(load, &mut current, generation, &workers, notifier).await;
+                    reload(load, &mut current, generation, &workers, notifier, &mut live).await;
                 }
                 _ = rotate.tick() => {
                     if let Some(tls) = &current.tls {
                         let next = Arc::new(Generation {
-                            plan: current.plan.clone(),
                             tls: Some(TlsState {
                                 certs: tls.certs.clone(),
                                 tickets: Arc::new(tls.tickets.rotated()),
                             }),
-                            access: current.access.clone(),
+                            ..(*current).clone()
                         });
                         log_bind_failures(&publish(&workers, next.clone()).await);
                         current = next;
                     }
                 }
+                found = live.discovery.recv() => {
+                    if let Some(upstreams) = live.registry.discovered(&current.plan, found) {
+                        // The same plan `Arc`: cores keep their regex caches and file catalog
+                        // and re-index their origin slots by identity.
+                        let metrics = current.metrics.as_ref().map(|(_, hub)| {
+                            (metrics::Layout::build(&current.plan, &upstreams), hub.clone())
+                        });
+                        let next = Arc::new(Generation {
+                            upstreams,
+                            metrics,
+                            ..(*current).clone()
+                        });
+                        log_bind_failures(&publish(&workers, next.clone()).await);
+                        current = next;
+                    }
+                    notifier.notify(&format!("STATUS={}", status_line(&current, &live)));
+                }
+                event = live.acme.recv() => match event {
+                    acme::Event::Issued => {
+                        if let Some(next) = reload_certificates(&current) {
+                            let next = Arc::new(next);
+                            log_bind_failures(&publish(&workers, next.clone()).await);
+                            current = next;
+                        }
+                    }
+                },
                 _ = terminate.recv() => break,
                 _ = interrupt.recv() => break,
             }
@@ -111,9 +176,10 @@ async fn reload(
     generation: u64,
     workers: &[Worker],
     notifier: &Notifier,
+    live: &mut Live,
 ) {
     notifier.notify(&format!("RELOADING=1\nMONOTONIC_USEC={}", monotonic_usec()));
-    let status = match rebuild(load, Some(current), generation) {
+    let status = match rebuild(load, Some(current), generation, live) {
         Ok((next, warnings, problems)) => {
             report(&warnings, &problems);
             let next = Arc::new(next);
@@ -123,8 +189,14 @@ async fn reload(
                 warning!("a changed worker count applies at the next restart");
             }
             *current = next;
+            live.adopted(current);
+            {
+                let mut control = live.hub.control();
+                control.generation = generation;
+                control.reloads_ok += 1;
+            }
             info!("serving generation {generation}");
-            let mut status = format!("serving generation {generation}");
+            let mut status = status_line(current, live);
             if let Some(f) = failures.first() {
                 status.push_str(&format!("; cannot bind {}: {}", f.addr, f.error));
             }
@@ -138,6 +210,7 @@ async fn reload(
             status
         }
         Err(diagnostics) => {
+            live.hub.control().reloads_rejected += 1;
             for d in &diagnostics {
                 error!("reload rejected: {d}");
             }
@@ -163,20 +236,31 @@ pub(crate) struct Problems {
 }
 
 /// Builds the next generation from disk, opening every access log file anew. `Err` keeps the
-/// current one.
+/// current one and changes nothing in `live`.
 pub(crate) fn rebuild(
     load: &mut LoadPlan<'_>,
     current: Option<&Generation>,
     generation: u64,
+    live: &mut Live,
 ) -> Result<(Generation, Vec<Diagnostic>, Problems), Vec<Diagnostic>> {
     let (plan, warnings) = load(generation)?;
+    let (next, problems) = assemble(plan, current, live);
+    Ok((next, warnings, problems))
+}
+
+/// The generation of a compiled plan: certificates (the previous one kept per name on a
+/// problem), the upstream table (health carried by identity), limit tables carried by spec,
+/// metrics when the plan collects them, and the plan's access log files opened anew.
+fn assemble(plan: Plan, current: Option<&Generation>, live: &mut Live) -> (Generation, Problems) {
     let previous = current.and_then(|g| g.tls.as_ref());
+    let acme = live.acme.challenges(&plan);
     let (tls, problems) = if plan
         .listeners
         .iter()
         .any(|l| l.key.kind != ListenerKind::Http)
     {
-        let (certs, problems) = tls::load(&plan.certs, previous.map(|t| &*t.certs));
+        let (mut certs, problems) = tls::load(&plan.certs, previous.map(|t| &*t.certs));
+        certs.acme = acme.clone();
         let tickets = previous.map_or_else(
             || Arc::new(TicketKeys::generate(TICKET_LIFETIME_SECS)),
             |t| t.tickets.clone(),
@@ -187,20 +271,60 @@ pub(crate) fn rebuild(
         (None, Vec::new())
     };
     let (files, logs) = access::Files::open(&plan.access_logs);
-    let plan = Arc::new(plan);
+    let upstreams = live.registry.build(&plan);
+    let limits = Limiters::carry(&plan, current.map(|g| (&*g.plan, &*g.limits)));
+    let metrics = plan
+        .metrics
+        .then(|| (metrics::Layout::build(&plan, &upstreams), live.hub.clone()));
     let next = Generation {
-        plan,
+        plan: Arc::new(plan),
+        upstreams,
+        limits,
+        metrics,
+        acme,
         tls,
         access: Arc::new(files),
     };
-    Ok((
+    (
         next,
-        warnings,
         Problems {
             certs: problems,
             logs,
         },
-    ))
+    )
+}
+
+/// The current generation with its certificates read again (the ACME client wrote new ones).
+/// `None` when it serves no TLS.
+fn reload_certificates(current: &Generation) -> Option<Generation> {
+    let tls = current.tls.as_ref()?;
+    let (mut certs, problems) = tls::load(&current.plan.certs, Some(&tls.certs));
+    certs.acme = current.acme.clone();
+    report(
+        &[],
+        &Problems {
+            certs: problems,
+            logs: Vec::new(),
+        },
+    );
+    Some(Generation {
+        tls: Some(TlsState {
+            certs: Arc::new(certs),
+            tickets: tls.tickets.clone(),
+        }),
+        ..current.clone()
+    })
+}
+
+/// `serving generation N`, naming the discovery sources that never synced or lost their API.
+fn status_line(current: &Generation, live: &Live) -> String {
+    let mut status = format!("serving generation {}", current.plan.generation);
+    for (source, endpoints) in live.registry.sources() {
+        if !endpoints.synced {
+            status.push_str(&format!("; discovery source {source:?} not synced"));
+        }
+    }
+    status
 }
 
 fn report(warnings: &[Diagnostic], problems: &Problems) {

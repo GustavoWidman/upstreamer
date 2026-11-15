@@ -8,9 +8,9 @@
 
 use crate::encode::EncodingSet;
 use crate::msg::{Known, RequestHead, ResponseHead, Status};
-use crate::plan::{ListenerKey, SiteId, VarId};
+use crate::plan::{ListenerKey, OriginId, RouteSlot, SiteId, VarId};
 use smallvec::SmallVec;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 /// Span into [`Arena`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -100,10 +100,29 @@ pub(crate) struct ErrorInfo {
     pub status: Status,
 }
 
+/// This proxy refused the request itself: a `limit` step (429), or a pool with no origin to
+/// pick (503). `finalize` turns it into `Retry-After`, `{err.retry_after}` reads it, and
+/// metrics count a `Limit` as a rejection, so no consumer guesses the cause from the status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Refused {
+    pub by: RefusedBy,
+    /// Seconds until a retry could be admitted, at least 1.
+    pub retry_after: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RefusedBy {
+    Limit,
+    NoOrigin,
+}
+
 #[derive(Debug)]
 pub(crate) struct Exchange {
     pub req: RequestHead,
     pub conn: ConnInfo,
+    /// The client's address: the peer's, or the one a trusted proxy forwarded. What
+    /// `{remote_host}`, access logs, rate-limit keys and hash keys read.
+    pub client: IpAddr,
     pub site: Option<SiteId>,
     /// Indexed by [`VarId`]; sized to the plan's var count when the exchange starts.
     pub vars: SmallVec<[Option<ASpan>; 8]>,
@@ -114,6 +133,14 @@ pub(crate) struct Exchange {
     pub arena: Arena,
     pub pending: Pending,
     pub error: Option<ErrorInfo>,
+    /// The series label of the step that answered; slot 0 until one does. Stored only in a
+    /// plan that collects metrics.
+    pub route: RouteSlot,
+    /// The origin of the last proxy attempt.
+    pub origin: Option<OriginId>,
+    pub refused: Option<Refused>,
+    /// The upstream attempt as metrics see it; written only while metrics are collected.
+    pub upstream: crate::observe::Upstream,
     /// Scratch for serialising heads this exchange writes (upstream request, h1 response);
     /// recycled with the exchange.
     pub out: Vec<u8>,
@@ -128,12 +155,17 @@ impl Exchange {
         let mut ex = Exchange {
             req: RequestHead::new(),
             conn,
+            client: conn.remote.ip(),
             site: None,
             vars: SmallVec::new(),
             captures: SmallVec::new(),
             arena: Arena::default(),
             pending: Pending::default(),
             error: None,
+            route: RouteSlot(0),
+            origin: None,
+            refused: None,
+            upstream: Default::default(),
             out: Vec::new(),
             spare_head: None,
         };
@@ -145,6 +177,7 @@ impl Exchange {
     pub fn begin(&mut self, conn: ConnInfo, vars: u16) {
         self.req.clear();
         self.conn = conn;
+        self.client = conn.remote.ip();
         self.site = None;
         self.vars.clear();
         self.vars.resize(vars as usize, None);
@@ -153,6 +186,9 @@ impl Exchange {
         self.pending.ops.clear();
         self.pending.encode = EncodingSet::default();
         self.error = None;
+        self.route = RouteSlot(0);
+        self.origin = None;
+        self.refused = None;
         self.out.clear();
     }
     /// A response head with this exchange's recycled buffer (proxied and local responses).
@@ -261,12 +297,24 @@ mod tests {
         ex.error = Some(ErrorInfo {
             status: Status::NOT_FOUND,
         });
+        ex.client = "203.0.113.9".parse().unwrap();
+        ex.route = RouteSlot(3);
+        ex.origin = Some(OriginId(1));
+        ex.refused = Some(Refused {
+            by: RefusedBy::Limit,
+            retry_after: 2,
+        });
         let addr = &*ex as *const Exchange;
         pool.put(ex);
         let ex = pool.take(conn(), 3);
         assert_eq!(&*ex as *const Exchange, addr);
         assert_eq!(ex.vars.as_slice(), &[None, None, None]);
         assert!(ex.error.is_none());
+        assert_eq!(ex.client, conn().remote.ip());
+        assert_eq!(
+            (ex.route, ex.origin, ex.refused),
+            (RouteSlot(0), None, None)
+        );
         assert_eq!(ex.req.path().as_bytes(), b"");
     }
 }

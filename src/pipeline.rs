@@ -2,13 +2,13 @@
 //! It owns three decisions nothing else makes: which site, how an error becomes a response
 //! (error routes), and the final header edit order ([`finalize`]).
 
-use crate::access::{self, Started};
 use crate::body::{Body, RequestBody};
 use crate::encode::{self, Decision};
 use crate::exchange::{ASpan, ErrorInfo, Exchange, Proto, Scheme};
 use crate::files;
 use crate::log::debug;
 use crate::msg::{Fields, Known, Method, ResponseHead, Status};
+use crate::observe::{self, Started};
 use crate::plan::SitePlan;
 use crate::proxy;
 use crate::proxy::Upgrade;
@@ -38,9 +38,12 @@ pub(crate) struct Response {
 ///    through `route::run_error` and `answer` once more; an error there answers bare.
 /// 5. [`finalize`].
 ///
-/// A response for a request that matched no site leaves `ex.site` unset. For a site with an
-/// access log, the request's record comes back with the response; the driver completes it
-/// with [`access::record`] once the response is sent.
+/// A response for a request that matched no site leaves `ex.site` unset. For a site that logs
+/// or a plan that collects metrics, the request's record comes back with the response; the
+/// driver completes it with [`observe::finish`] once the response is sent.
+///
+/// A plan with `trustedProxies` resolves the client address first, so the record, the
+/// routes and every key see it.
 pub(crate) async fn handle(
     core: &Core,
     snap: &CoreSnapshot,
@@ -56,7 +59,10 @@ pub(crate) async fn handle(
         return (bare(ex, status), None);
     };
     ex.site = Some(site_id);
-    let mut log = site.access_log.map(|log| access::start(log, ex));
+    if let Some(trust) = &plan.trust {
+        crate::trust::resolve(trust, ex);
+    }
+    let mut log = site.observe.as_ref().map(|o| observe::start(o, ex));
 
     let outcome = {
         let mut regex = core.regex.borrow_mut();
@@ -65,6 +71,7 @@ pub(crate) async fn handle(
             regex: &mut regex,
             catalog: &mut catalog,
             now: core.clock.unix.get(),
+            limits: &snap.limits,
         };
         route::run(plan, site, ex, &mut fx)
     };
@@ -98,14 +105,20 @@ async fn answer(
     match outcome {
         Outcome::Proxy(plan) => {
             if let Some(log) = log {
-                log.proxied_to(plan.upstream);
+                log.upstream_started(ex);
             }
-            proxy::forward(core, snap, plan, ex, body)
-                .await
-                .map_err(|e| {
-                    debug!("core {}: upstream of {:?}: {e:?}", core.index, ex.site);
-                    e.status()
-                })
+            let resp = proxy::forward(core, snap, plan, ex, body).await;
+            if let Some(log) = log {
+                let answer = match &resp {
+                    Ok(r) => Ok(r.head.status),
+                    Err(e) => Err(e.cause()),
+                };
+                log.upstream_answered(ex, answer);
+            }
+            resp.map_err(|e| {
+                debug!("core {}: upstream of {:?}: {e:?}", core.index, ex.site);
+                e.status()
+            })
         }
         Outcome::Files { plan, root } => {
             files::serve(plan, root, ex, &mut core.catalog.borrow_mut())
@@ -113,6 +126,8 @@ async fn answer(
         Outcome::Respond { status, body } => Ok(respond(ex, status, body)),
         Outcome::Redirect { status, location } => redirect(ex, status, location),
         Outcome::Error(status) => Err(status),
+        Outcome::Metrics => Ok(crate::metrics::serve(core, snap, ex)),
+        Outcome::AcmeChallenge => crate::acme::http01(snap, ex),
     }
 }
 
@@ -133,6 +148,7 @@ async fn answer_error(
             regex: &mut regex,
             catalog: &mut catalog,
             now: core.clock.unix.get(),
+            limits: &snap.limits,
         };
         route::run_error(&snap.plan, site, ex, &mut fx)
     };
@@ -195,9 +211,11 @@ fn redirect(ex: &mut Exchange, status: Status, location: ASpan) -> Result<Respon
 ///    site header or step op can still change it,
 /// 1. site headers,
 /// 2. pending step ops in step order (the error route's alone when one answered),
-/// 3. a 304 loses Content-Type (RFC 9110 §15.4.5), whoever set it,
-/// 4. dynamic compression, decided from the head as the ops left it,
-/// 5. `Vary: Accept-Encoding` if another Accept-Encoding could have changed the answer (a
+/// 3. `Retry-After` on a 429 or 503 this proxy refused itself (a `limit` step, a pool with no
+///    origin to pick), unless an op set one,
+/// 4. a 304 loses Content-Type (RFC 9110 §15.4.5), whoever set it,
+/// 5. dynamic compression, decided from the head as the ops left it,
+/// 6. `Vary: Accept-Encoding` if another Accept-Encoding could have changed the answer (a
 ///    sidecar, or dynamic compression), merged into the Vary the ops set.
 ///
 /// Framing headers are never touched here; the driver writes them.
@@ -228,6 +246,10 @@ pub(crate) fn finalize(site: &SitePlan, ex: &mut Exchange, resp: &mut Response) 
         }
     }
 
+    if let Some(refused) = ex.refused {
+        retry_after(fields, resp.head.status, refused.retry_after);
+    }
+
     if resp.head.status == Status::NOT_MODIFIED {
         fields.remove_known(Known::ContentType);
     }
@@ -244,6 +266,25 @@ pub(crate) fn finalize(site: &SitePlan, ex: &mut Exchange, resp: &mut Response) 
     if resp.head.vary_accept_encoding {
         vary_accept_encoding(&mut resp.head.fields);
     }
+}
+
+fn retry_after(fields: &mut Fields, status: Status, seconds: u32) {
+    let refusal = status == Status::TOO_MANY_REQUESTS || status == Status::SERVICE_UNAVAILABLE;
+    if !refusal || fields.live().any(|(name, _, _)| name == b"retry-after") {
+        return;
+    }
+    let mut digits = [0u8; 10];
+    let mut at = digits.len();
+    let mut n = seconds;
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    fields.push(b"retry-after", &digits[at..]);
 }
 
 /// Removes every field of a name the router resolved (lowercase, with its tag).
@@ -304,7 +345,7 @@ mod tests {
             },
             errors: Box::new([]),
             alt_svc: None,
-            access_log: None,
+            observe: None,
         }
     }
 
@@ -408,5 +449,41 @@ mod tests {
             None,
             "too short to compress for anyone"
         );
+    }
+
+    #[test]
+    fn a_refused_request_says_when_to_retry_unless_an_op_did() {
+        use crate::exchange::{Refused, RefusedBy};
+        let refused = |status: u16, op: Option<&str>| {
+            let mut ex = exchange("GET", &[]);
+            ex.refused = Some(Refused {
+                by: RefusedBy::Limit,
+                retry_after: 30,
+            });
+            if let Some(value) = op {
+                let name = ex.arena.push(b"retry-after");
+                let value = ex.arena.push(value.as_bytes());
+                ex.pending.ops.push(PendingOp {
+                    name,
+                    tag: Known::Other,
+                    value: Some(value),
+                });
+            }
+            let mut resp = bare(&mut ex, Status::new(status).unwrap());
+            finalize(&site(), &mut ex, &mut resp);
+            field(&resp, "retry-after").map(str::to_owned)
+        };
+        assert_eq!(refused(429, None).as_deref(), Some("30"));
+        assert_eq!(refused(503, None).as_deref(), Some("30"));
+        assert_eq!(refused(429, Some("120")).as_deref(), Some("120"));
+        assert_eq!(
+            refused(200, None),
+            None,
+            "an error route that answers 200 is not a refusal"
+        );
+        let mut ex = exchange("GET", &[]);
+        let mut resp = bare(&mut ex, Status::SERVICE_UNAVAILABLE);
+        finalize(&site(), &mut ex, &mut resp);
+        assert_eq!(field(&resp, "retry-after"), None, "a 503 from an origin");
     }
 }

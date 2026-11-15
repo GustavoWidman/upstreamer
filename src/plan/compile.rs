@@ -10,7 +10,8 @@
 //!    has N groups).
 //! 4. Compile matchers to [`Cond`]; fold constants (e.g. `value` of a constant template) and
 //!    order every `all` cheapest test first.
-//! 5. Intern origins to [`UpstreamId`] (conflicting `idle` on one origin is an error).
+//! 5. Intern origins to [`OriginId`] by [`OriginKey`] (conflicting `idle` on one origin is an
+//!    error), and balanced targets to [`PoolId`]s by value (`upstream.rs`).
 //! 6. Validate header names (framing and hop-by-hop headers rejected), statuses, redirect
 //!    codes.
 //! 7. Flag unreachable steps after one that always answers (warning).
@@ -18,17 +19,30 @@
 //!    http3), each plain site on its http addresses, and one synthetic redirect site on the
 //!    http addresses for every TLS site with redirectHttp. Duplicate host on one listener is
 //!    an error.
+//! 9. Label every terminal and `limit` step with a [`RouteSlot`] (`labels.rs`), kept only
+//!    when some site serves `metrics`.
+//!
+//! Each feature's lowering lives in a child module: `upstream.rs` (proxy targets),
+//! `limit.rs` (`limit` steps), `key.rs` (request keys), `labels.rs` (route slots, `metrics`,
+//! `Observe`), `trust.rs` (`trustedProxies`), `acme.rs` (`tls.acme`).
+
+mod acme;
+mod key;
+mod labels;
+mod limit;
+mod trust;
+mod upstream;
 
 use super::cond::{Glob, MethodSet, PathPatterns, Test};
 use super::host::{HostIndex, HostPattern};
 use super::template::{self, Captures, Part, Placeholder, Scope};
 use super::{
     Action, Block, BlockKind, CertSource, Cond, Diagnostic, ErrorRoutePlan, FileProbe, FilesPlan,
-    HeaderOp, ListenerKey, ListenerKind, ListenerSpec, LogId, OriginAddr, Plan, ProxyPlan, RegexId,
-    ServerParams, Severity, SiteId, SitePlan, Step, Template, Terminal, UpstreamId, UpstreamPlan,
-    UpstreamTls, VarId,
+    HeaderOp, LimitSpec, ListenerKey, ListenerKind, ListenerSpec, LogId, Observe, OriginAddr, Plan,
+    ProxyPlan, RegexId, RouteLabel, RouteSlot, ServerParams, Severity, SiteId, SitePlan, Step,
+    Template, Terminal, VarId,
 };
-use crate::config::{self, Config, OneOrMany};
+use crate::config::{self, Config, Document, Format, OneOrMany};
 use crate::encode::{Encoding, EncodingSet};
 use crate::msg::{HeaderName, Status};
 use regex_automata::meta::Regex;
@@ -58,7 +72,7 @@ const DEFAULT_IDLE: Duration = Duration::from_secs(120);
 /// closes the surplus when they finish together and dials again for the next burst, so the
 /// cap sits above the concurrency one core serves (an HTTP/2 client multiplexes up to
 /// `max_streams` requests over each of its connections).
-const MAX_IDLE_PER_CORE: u16 = 256;
+pub(crate) const MAX_IDLE_PER_CORE: u16 = 256;
 const ALT_SVC_MAX_AGE: u32 = 86400;
 
 /// Compiles a parsed config. `generation` is stamped into the plan. On error, every
@@ -72,34 +86,44 @@ pub(crate) fn compile(
     sources: &dyn Sources,
     generation: u64,
 ) -> Result<(Plan, Vec<Diagnostic>), Vec<Diagnostic>> {
-    let mut c = Compiler {
-        sources,
-        diags: Vec::new(),
-        vars: Vec::new(),
-        regexes: Vec::new(),
-        upstreams: Vec::new(),
-        includes: Vec::new(),
-        fragments: Vec::new(),
-        access_logs: Vec::new(),
-        site: Site::default(),
-    };
+    let mut c = Compiler::new(sources);
+    if let Some(spec) = &config.trusted_proxies {
+        let at = Where {
+            file: None,
+            ptr: "/trustedProxies".to_owned(),
+        };
+        c.trust = c.trusted_proxies(spec, &at);
+    }
     let mut sites: Vec<SitePlan> = Vec::new();
     for (i, site) in config.sites.iter().enumerate() {
-        sites.push(c.site(site, &format!("/sites/{i}")));
+        sites.push(c.site(site, &config.listen, &format!("/sites/{i}")));
     }
     let derived = c.listeners(config, &mut sites);
+    c.observe(&mut sites);
     c.limits(&config.limits);
     c.locate_fragment_diagnostics();
     if c.diags.iter().any(Diagnostic::is_error) {
         return Err(c.diags);
     }
     let server = server_params(config);
+    let upstream::Upstreams {
+        origins,
+        pools,
+        sources,
+    } = c.upstreams;
     let plan = Plan {
         generation,
         workers: config.workers,
         listeners: derived.listeners.into(),
         sites: sites.into(),
-        upstreams: c.upstreams.into_iter().map(|(_, u)| u).collect(),
+        origins: origins.into(),
+        pools: pools.into(),
+        sources: sources.into(),
+        limits: c.limits.into(),
+        routes: c.routes.into(),
+        metrics: c.metrics,
+        trust: c.trust,
+        acme: c.acme.into(),
         regexes: c.regexes.into_iter().map(|(_, r)| r).collect(),
         var_count: c.vars.len() as u16,
         var_names: c.vars.into(),
@@ -131,14 +155,24 @@ struct Compiler<'s> {
     vars: Vec<Box<str>>,
     /// Interned by pattern.
     regexes: Vec<(String, Regex)>,
-    /// Interned by origin identity.
-    upstreams: Vec<(OriginKey, UpstreamPlan)>,
+    /// Origins by identity, pools and discovery sources by value.
+    upstreams: upstream::Upstreams,
     /// The include files being spliced, outermost first (cycle detection).
     includes: Vec<PathBuf>,
-    /// Every fragment read, to locate diagnostics inside it.
-    fragments: Vec<(PathBuf, Vec<u8>)>,
+    /// Every fragment read, with its document when it parses, to locate diagnostics inside it.
+    fragments: Vec<(PathBuf, Option<Document>)>,
     /// Interned by path.
     access_logs: Vec<PathBuf>,
+    /// Limit tables, by `LimitId`.
+    limits: Vec<LimitSpec>,
+    /// Request series labels, by `RouteSlot`; slot 0 is ("", "").
+    routes: Vec<RouteLabel>,
+    /// A `metrics` step was compiled.
+    metrics: bool,
+    /// `trustedProxies`, compiled before the sites because proxy steps read it.
+    trust: Option<crate::trust::TrustPlan>,
+    /// One per site whose certificate comes from in-process ACME.
+    acme: Vec<crate::acme::AcmePlan>,
     site: Site,
 }
 
@@ -155,6 +189,13 @@ struct Site {
     assigned: Vec<VarId>,
     /// Vars already reported as read before any `set`.
     warned: Vec<VarId>,
+    /// Names of the steps enclosing the one being compiled, itself included: the nearest is
+    /// a request's series label.
+    named: Vec<Box<str>>,
+    /// Enclosing steps (itself included) that have a `when`.
+    guarded: u32,
+    /// An address the site listens on that is not loopback, if any.
+    exposed: Option<SocketAddr>,
 }
 
 /// A value's location: its file (`None`: the config) and JSON pointer.
@@ -182,14 +223,6 @@ struct Ctx {
     in_error_route: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct OriginKey {
-    https: bool,
-    host: Box<str>,
-    port: u16,
-    verify: bool,
-}
-
 /// A matcher after constant folding.
 enum Folded {
     Always,
@@ -198,6 +231,28 @@ enum Folded {
 }
 
 impl<'s> Compiler<'s> {
+    fn new(sources: &'s dyn Sources) -> Compiler<'s> {
+        Compiler {
+            sources,
+            diags: Vec::new(),
+            vars: Vec::new(),
+            regexes: Vec::new(),
+            upstreams: upstream::Upstreams::default(),
+            includes: Vec::new(),
+            fragments: Vec::new(),
+            access_logs: Vec::new(),
+            limits: Vec::new(),
+            routes: vec![RouteLabel {
+                site: "".into(),
+                route: "".into(),
+            }],
+            metrics: false,
+            trust: None,
+            acme: Vec::new(),
+            site: Site::default(),
+        }
+    }
+
     /// The head parser tokenises into a fixed table of field slots, so a larger limit could
     /// never be honoured.
     fn limits(&mut self, limits: &config::Limits) {
@@ -234,21 +289,30 @@ impl<'s> Compiler<'s> {
     }
 
     fn locate_fragment_diagnostics(&mut self) {
-        for (path, bytes) in &self.fragments {
-            let Ok(doc) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-                continue;
-            };
+        for (path, doc) in &self.fragments {
+            let Some(doc) = doc else { continue };
             for d in self.diags.iter_mut() {
                 if d.file.as_deref() == Some(path) && d.step.is_none() {
-                    *d = d.clone().locate(&doc);
+                    *d = d.clone().locate(doc);
                 }
             }
         }
     }
 
-    fn site(&mut self, site: &config::Site, ptr: &str) -> SitePlan {
+    fn site(
+        &mut self,
+        site: &config::Site,
+        listen: &config::ListenDefaults,
+        ptr: &str,
+    ) -> SitePlan {
+        let addrs = match (&site.listen, &site.tls) {
+            (Some(addrs), _) => addrs,
+            (None, None) => &listen.http,
+            (None, Some(_)) => &listen.https,
+        };
         self.site = Site {
             name: site.name.clone(),
+            exposed: addrs.iter().copied().find(|a| !a.ip().is_loopback()),
             ..Site::default()
         };
         let at = Where {
@@ -272,7 +336,10 @@ impl<'s> Compiler<'s> {
             routes,
             errors: errors.into(),
             alt_svc: None,
-            access_log,
+            observe: access_log.map(|log| Observe {
+                log: Some(log),
+                metrics: false,
+            }),
         }
     }
 
@@ -362,7 +429,7 @@ impl<'s> Compiler<'s> {
             let ends = out[before..].iter().any(|s| {
                 s.when.is_none()
                     && match kind {
-                        BlockKind::Seq => matches!(s.action, Action::Answer(_)),
+                        BlockKind::Seq => matches!(s.action, Action::Answer(..)),
                         BlockKind::First => true,
                     }
             });
@@ -398,6 +465,9 @@ impl<'s> Compiler<'s> {
             Some(m) => self.matcher(m, &at.at("when"), &mut when_scope, Some(&mut sources)),
         };
         let mut reads = std::mem::take(&mut when_scope.reads);
+        let named = step.name.as_deref().map(|n| self.site.named.push(n.into()));
+        let guarded = step.when.is_some();
+        self.site.guarded += u32::from(guarded);
         let mut scope = Scope {
             vars: &mut vars,
             captures: match &*sources {
@@ -410,6 +480,10 @@ impl<'s> Compiler<'s> {
             reads: Vec::new(),
         };
         let action = self.action(&step.action, ctx, at, &mut scope);
+        self.site.guarded -= u32::from(guarded);
+        if named.is_some() {
+            self.site.named.pop();
+        }
         let uses_captures = scope.uses_captures;
         reads.append(&mut scope.reads);
         self.vars = vars;
@@ -526,8 +600,18 @@ impl<'s> Compiler<'s> {
             A::Include(path) => {
                 Action::Block(self.nested(scope, |c| c.include(path, ctx, &at.at("include")))?)
             }
-            A::Proxy(spec) => Action::Answer(Terminal::Proxy(self.proxy(spec, at, scope)?)),
-            A::Files(spec) => Action::Answer(Terminal::Files(self.files(spec, at, scope)?)),
+            A::Limit(spec) => {
+                let route = self.route_slot();
+                Action::Limit(self.limit(spec, route, ctx, &at.at("limit"), scope)?)
+            }
+            A::Proxy(spec) => {
+                let proxy = self.proxy(spec, at, scope)?;
+                Action::Answer(Terminal::Proxy(proxy), self.slot(ctx))
+            }
+            A::Files(spec) => {
+                let files = self.files(spec, at, scope)?;
+                Action::Answer(Terminal::Files(files), self.slot(ctx))
+            }
             A::Respond(spec) => {
                 let at = at.at("respond");
                 let status = match spec.status {
@@ -547,7 +631,7 @@ impl<'s> Compiler<'s> {
                     Some(body) => self.template(body, &at.at("body"), scope)?,
                     None => Template::literal(b""),
                 };
-                Action::Answer(Terminal::Respond { status, body })
+                Action::Answer(Terminal::Respond { status, body }, self.slot(ctx))
             }
             A::Redirect(spec) => {
                 let at = at.at("redirect");
@@ -566,10 +650,10 @@ impl<'s> Compiler<'s> {
                     self.error(&at.at("to"), "a redirect needs a location");
                     return None;
                 }
-                Action::Answer(Terminal::Redirect { status, to })
+                Action::Answer(Terminal::Redirect { status, to }, self.slot(ctx))
             }
             A::Error(code) => match error_status(*code) {
-                Some(s) => Action::Answer(Terminal::Error(s)),
+                Some(s) => Action::Answer(Terminal::Error(s), self.slot(ctx)),
                 None => {
                     self.error(
                         &at.at("error"),
@@ -578,6 +662,10 @@ impl<'s> Compiler<'s> {
                     return None;
                 }
             },
+            A::Metrics(_) => {
+                self.metrics(&at.at("metrics"));
+                Action::Answer(Terminal::Metrics, self.slot(ctx))
+            }
         })
     }
 
@@ -703,10 +791,15 @@ impl<'s> Compiler<'s> {
             file: Some(path.to_path_buf()),
             ptr: String::new(),
         };
-        self.fragments.push((path.to_path_buf(), bytes.clone()));
-        let fragment = match config::parse_fragment(&bytes) {
-            Ok(f) => f,
+        let format = Format::of(path);
+        let fragment = match config::parse_fragment(format, &bytes) {
+            Ok(config::Parsed { value, doc }) => {
+                self.fragments.push((path.to_path_buf(), Some(doc)));
+                value
+            }
             Err(e) => {
+                let doc = config::document(format, &bytes);
+                self.fragments.push((path.to_path_buf(), doc));
                 let mut message = e.message;
                 if e.line > 0 {
                     message.push_str(&format!(" (line {}, column {})", e.line, e.column));
@@ -749,76 +842,19 @@ impl<'s> Compiler<'s> {
         let at = at.at("proxy");
         let default_timeouts = config::ProxyTimeouts::default();
         let no_headers = BTreeMap::new();
-        let (to, to_at, skip_verify, headers, timeouts) = match spec {
-            config::ProxySpec::To(to) => (to, at.clone(), false, &no_headers, &default_timeouts),
-            config::ProxySpec::Full(full) => (
-                &full.to,
-                at.at("to"),
-                full.tls_skip_verify,
-                &full.headers,
-                &full.timeouts,
-            ),
-        };
-        let origin = match parse_origin(to) {
-            Ok(o) => o,
-            Err(message) => {
-                self.error(&to_at, message);
-                return None;
-            }
-        };
-        if skip_verify && !origin.https {
-            self.error(
-                &at.at("tlsSkipVerify"),
-                "tlsSkipVerify applies to an https upstream",
-            );
-            return None;
-        }
-        let key = OriginKey {
-            https: origin.https,
-            host: origin.host.clone(),
-            port: origin.port,
-            verify: !skip_verify,
+        let (headers, timeouts) = match spec {
+            config::ProxySpec::To(_) => (&no_headers, &default_timeouts),
+            config::ProxySpec::Full(full) => (&full.headers, &full.timeouts),
         };
         let idle = timeouts.idle.map_or(DEFAULT_IDLE, |d| d.0);
-        let upstream = match self.upstreams.iter().find(|(k, _)| *k == key) {
-            Some((_, u)) if u.idle != idle => {
-                let (theirs, ours) = (fmt_duration(u.idle), fmt_duration(idle));
-                self.error(
-                    &at.at("timeouts").at("idle"),
-                    format!(
-                        "origin {to} already has idle timeout {theirs} from another proxy step, not {ours}; one origin has one idle timeout"
-                    ),
-                );
-                return None;
-            }
-            Some((_, u)) => u.id,
-            None => {
-                let id = UpstreamId(self.upstreams.len() as u16);
-                let tls = origin.https.then(|| UpstreamTls {
-                    server_name: match origin.addr {
-                        OriginAddr::Ip(_) => None,
-                        OriginAddr::Name => Some(origin.host.clone()),
-                    },
-                    verify: !skip_verify,
-                });
-                self.upstreams.push((
-                    key,
-                    UpstreamPlan {
-                        id,
-                        host: origin.host,
-                        port: origin.port,
-                        addr: origin.addr,
-                        tls,
-                        idle,
-                        max_idle_per_core: MAX_IDLE_PER_CORE,
-                    },
-                ));
-                id
-            }
-        };
+        let to = self.target(spec, idle, &at, scope)?;
         let mut ops: Vec<HeaderOp> = Vec::new();
+        let forwarded_for = match self.trust {
+            Some(_) => Placeholder::ForwardedFor,
+            None => Placeholder::RemoteHost,
+        };
         for (name, ph) in [
-            ("x-forwarded-for", Placeholder::RemoteHost),
+            ("x-forwarded-for", forwarded_for),
             ("x-forwarded-proto", Placeholder::Scheme),
             ("x-forwarded-host", Placeholder::Host),
         ] {
@@ -831,7 +867,7 @@ impl<'s> Compiler<'s> {
         }
         ops.extend(self.header_ops(headers, &at.at("headers"), scope));
         Some(ProxyPlan {
-            upstream,
+            to,
             headers: ops.into(),
             dial_timeout: timeouts.dial.map_or(DEFAULT_DIAL, |d| d.0),
             response_header_timeout: timeouts.response_header.map(|d| d.0),
@@ -1018,7 +1054,7 @@ impl<'s> Compiler<'s> {
             parts.push(Folded::Cond(Cond::Test(Test::File(probe))));
         }
         if let Some(after) = m.after {
-            parts.push(Folded::Cond(Cond::Test(Test::After(after))));
+            parts.push(Folded::Cond(Cond::Test(Test::After(after.0))));
         }
         for (key, list) in [("all", &m.all), ("any", &m.any), ("none", &m.none)] {
             let Some(list) = list else { continue };
@@ -1116,25 +1152,43 @@ impl<'s> Compiler<'s> {
                             ..e.clone()
                         }));
                     }
-                    let names = site.hosts.iter().map(|h| h.to_ascii_lowercase().into());
-                    match certs
-                        .iter_mut()
-                        .find(|c| c.cert == tls.cert && c.key == tls.key)
-                    {
-                        Some(c) => {
-                            let mut all = std::mem::take(&mut c.names).into_vec();
-                            for name in names {
-                                if !all.contains(&name) {
-                                    all.push(name);
-                                }
-                            }
-                            c.names = all.into();
-                        }
-                        None => certs.push(CertSource {
-                            cert: tls.cert.clone(),
-                            key: tls.key.clone(),
-                            names: names.collect(),
+                    let names: Vec<Box<str>> = site
+                        .hosts
+                        .iter()
+                        .map(|h| h.to_ascii_lowercase().into())
+                        .collect();
+                    let tls_at = at.at("tls");
+                    let source = match (&tls.cert, &tls.key, &tls.acme) {
+                        (Some(cert), Some(key), None) => Some(CertSource {
+                            cert: cert.clone(),
+                            key: key.clone(),
+                            names: names.into(),
                         }),
+                        (None, None, Some(acme)) => self.acme_certificate(
+                            &site.name,
+                            names,
+                            acme,
+                            config.acme.as_ref(),
+                            tls,
+                            &tls_at.at("acme"),
+                        ),
+                        (_, _, Some(_)) => {
+                            self.error(
+                                &tls_at,
+                                "a TLS site takes `cert` and `key`, or `acme`, not both",
+                            );
+                            None
+                        }
+                        (_, _, None) => {
+                            self.error(
+                                &tls_at,
+                                "a TLS site needs `cert` and `key` files, or `acme`",
+                            );
+                            None
+                        }
+                    };
+                    if let Some(source) = source {
+                        add_cert(&mut certs, source);
                     }
                 }
             }
@@ -1145,7 +1199,9 @@ impl<'s> Compiler<'s> {
             for e in &mut redirect_hosts {
                 e.site = id;
             }
-            sites.push(redirect_site(https_port));
+            let acme_http01 = self.acme.iter().any(crate::acme::AcmePlan::answers_http01);
+            let site = redirect_site(https_port, acme_http01, self.redirect_slots());
+            sites.push(site);
             for &addr in &config.listen.http {
                 add(&mut listeners, addr, ListenerKind::Http, &redirect_hosts);
             }
@@ -1192,6 +1248,25 @@ impl<'s> Compiler<'s> {
     }
 }
 
+/// Adds a certificate source, merging its names into an earlier one with the same files.
+fn add_cert(certs: &mut Vec<CertSource>, source: CertSource) {
+    match certs
+        .iter_mut()
+        .find(|c| c.cert == source.cert && c.key == source.key)
+    {
+        Some(c) => {
+            let mut all = std::mem::take(&mut c.names).into_vec();
+            for name in source.names {
+                if !all.contains(&name) {
+                    all.push(name);
+                }
+            }
+            c.names = all.into();
+        }
+        None => certs.push(source),
+    }
+}
+
 /// Puts `entries` on the listener for `addr` and `kind`, creating it on first use.
 fn add(
     listeners: &mut Vec<(ListenerKey, Vec<HostEntry>)>,
@@ -1228,9 +1303,13 @@ pub(crate) fn kind_name(kind: ListenerKind) -> &'static str {
     }
 }
 
+/// Where an ACME CA fetches HTTP-01 tokens (RFC 8555 section 8.3).
+const ACME_CHALLENGE_PREFIX: &[u8] = b"/.well-known/acme-challenge/";
+
 /// The site every TLS site's names reach on the http addresses: `308` to the same host and
-/// target on https.
-fn redirect_site(https_port: u16) -> SitePlan {
+/// target on https, after answering ACME HTTP-01 tokens when in-process ACME uses them.
+/// `slots` labels its two steps (the redirect, the token).
+fn redirect_site(https_port: u16, acme_http01: bool, slots: [Option<RouteSlot>; 2]) -> SitePlan {
     let mut parts = vec![
         Part::Lit((*b"https://").into()),
         Part::Ph(Placeholder::Host),
@@ -1239,25 +1318,45 @@ fn redirect_site(https_port: u16) -> SitePlan {
         parts.push(Part::Lit(format!(":{https_port}").into_bytes().into()));
     }
     parts.push(Part::Ph(Placeholder::Uri));
+    let mut steps = Vec::new();
+    if acme_http01 {
+        steps.push(Step {
+            name: Some("acme_challenge".into()),
+            when: Some(Cond::Test(Test::Path(PathPatterns {
+                exact: Box::new([]),
+                prefix: Box::new([ACME_CHALLENGE_PREFIX.into()]),
+                suffix: Box::new([]),
+                glob: Box::new([]),
+            }))),
+            action: Action::Answer(Terminal::AcmeChallenge, slots[1]),
+        });
+    }
+    steps.push(Step {
+        name: Some("redirect_http".into()),
+        when: None,
+        action: Action::Answer(
+            Terminal::Redirect {
+                status: Status::PERMANENT_REDIRECT,
+                to: Template::from_parts(parts),
+            },
+            slots[0],
+        ),
+    });
     SitePlan {
-        name: "HTTP->HTTPS redirect".into(),
+        name: REDIRECT_SITE.into(),
         headers: Box::new([]),
         routes: Block {
             kind: BlockKind::Seq,
-            steps: Box::new([Step {
-                name: Some("redirect_http".into()),
-                when: None,
-                action: Action::Answer(Terminal::Redirect {
-                    status: Status::PERMANENT_REDIRECT,
-                    to: Template::from_parts(parts),
-                }),
-            }]),
+            steps: steps.into(),
         },
         errors: Box::new([]),
         alt_svc: None,
-        access_log: None,
+        observe: None,
     }
 }
+
+/// The name of the synthetic HTTP->HTTPS redirect site, in logs and metrics labels.
+const REDIRECT_SITE: &str = "HTTP->HTTPS redirect";
 
 fn mark_captures(cond: &mut Cond, regex: RegexId) {
     match cond {
@@ -1441,6 +1540,7 @@ fn describe(w: &Where) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan::{KeyPlan, OriginId, Target};
     use std::collections::HashMap;
 
     struct Files(HashMap<PathBuf, String>);
@@ -1458,7 +1558,9 @@ mod tests {
         json: &str,
         files: &[(&str, &str)],
     ) -> Result<(Plan, Vec<Diagnostic>), Vec<Diagnostic>> {
-        let config = config::parse_config(json.as_bytes()).expect("schema");
+        let config = config::parse_config(Format::Json, json.as_bytes())
+            .expect("schema")
+            .value;
         let files = Files(
             files
                 .iter()
@@ -1687,7 +1789,7 @@ mod tests {
         .expect("a valid config");
         let logs: Vec<Option<u16>> = plan.sites[..4]
             .iter()
-            .map(|s| s.access_log.map(|l| l.0))
+            .map(|s| s.observe.and_then(|o| o.log).map(|l| l.0))
             .collect();
         assert_eq!(logs, [Some(0), None, Some(1), Some(0)]);
         assert_eq!(
@@ -1699,7 +1801,7 @@ mod tests {
         );
         assert_eq!(plan.sites.len(), 5);
         assert_eq!(
-            plan.sites[4].access_log, None,
+            plan.sites[4].observe, None,
             "the HTTP->HTTPS redirect site logs nothing"
         );
     }
@@ -1713,6 +1815,256 @@ mod tests {
         assert_eq!(
             errors,
             ["/sites/0/accessLog: the access log path access.log is not absolute"]
+        );
+    }
+
+    /// Every terminal of `block`, with its slot's (site, route) label.
+    fn labels<'p>(plan: &'p Plan, block: &'p Block, out: &mut Vec<Option<(&'p str, &'p str)>>) {
+        for step in block.steps.iter() {
+            match &step.action {
+                Action::Answer(_, slot) => out.push(slot.map(|s| {
+                    let label = &plan.routes[s.0 as usize];
+                    (&*label.site, &*label.route)
+                })),
+                Action::Block(nested) => labels(plan, nested, out),
+                _ => {}
+            }
+        }
+    }
+
+    fn labelled(metrics: bool) -> Plan {
+        let metrics_site = if metrics {
+            r#",{"name":"m","hosts":["*"],"listen":["127.0.0.1:9100"],
+                 "routes":[{"name":"scrape","metrics":{}}]}"#
+        } else {
+            ""
+        };
+        let json = format!(
+            r#"{{"version":1,"sites":[
+                {{"name":"a","hosts":["a.example"],
+                  "routes":[{{"name":"api","routes":[
+                                {{"when":{{"path":"/x"}},"respond":{{}}}},
+                                {{"name":"up","when":{{"path":"/up"}},"proxy":"http://127.0.0.1:9"}}]}},
+                            {{"error":404}}],
+                  "errors":[{{"routes":[{{"respond":{{}}}}]}}]}}{metrics_site}]}}"#
+        );
+        compile_json(&json, &[]).expect("a valid config").0
+    }
+
+    #[test]
+    fn terminals_are_labelled_by_their_nearest_named_step_when_metrics_are_collected() {
+        let plan = labelled(true);
+        assert!(plan.metrics);
+        let mut found = Vec::new();
+        labels(&plan, &plan.sites[0].routes, &mut found);
+        assert_eq!(
+            found,
+            [Some(("a", "api")), Some(("a", "up")), Some(("a", ""))]
+        );
+        let mut errors = Vec::new();
+        labels(&plan, &plan.sites[0].errors[0].routes, &mut errors);
+        assert_eq!(
+            errors,
+            [None],
+            "an error route keeps the failed route's label"
+        );
+        let mut scrape = Vec::new();
+        labels(&plan, &plan.sites[1].routes, &mut scrape);
+        assert_eq!(scrape, [Some(("m", "scrape"))]);
+        assert!(matches!(
+            plan.sites[1].routes.steps[0].action,
+            Action::Answer(Terminal::Metrics, _)
+        ));
+        assert!(
+            plan.sites.iter().all(|s| s.observe
+                == Some(Observe {
+                    log: None,
+                    metrics: true
+                })),
+            "every site observes metrics"
+        );
+        assert_eq!(
+            &*plan.routes[0].site, "",
+            "slot 0 is the unlabelled request"
+        );
+    }
+
+    #[test]
+    fn without_a_metrics_step_no_slot_is_stored_and_no_site_observes() {
+        let plan = labelled(false);
+        assert!(!plan.metrics);
+        let mut found = Vec::new();
+        labels(&plan, &plan.sites[0].routes, &mut found);
+        assert_eq!(found, [None, None, None]);
+        assert!(plan.sites.iter().all(|s| s.observe.is_none()));
+    }
+
+    #[test]
+    fn metrics_open_to_any_address_warn_unless_a_when_guards_them() {
+        let (_, warnings) = compile_json(
+            &site(r#"[{"name":"m","metrics":{}}]"#).replace(
+                r#""hosts":["a.example"]"#,
+                r#""hosts":["a.example"],"listen":["0.0.0.0:9100"]"#,
+            ),
+            &[],
+        )
+        .unwrap();
+        let warnings: Vec<String> = warnings.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            warnings,
+            [
+                "warning: /sites/0/routes/0/metrics: metrics are served to anyone who reaches 0.0.0.0:9100; add a `when` or listen on loopback"
+            ]
+        );
+        for guarded in [
+            r#"[{"when":{"path":"/metrics"},"metrics":{}}]"#,
+            r#"[{"when":{"header":{"x-token":"t"}},"routes":[{"metrics":{}}]}]"#,
+        ] {
+            let (_, warnings) = compile_json(
+                &site(guarded).replace(
+                    r#""hosts":["a.example"]"#,
+                    r#""hosts":["a.example"],"listen":["0.0.0.0:9100"]"#,
+                ),
+                &[],
+            )
+            .unwrap();
+            assert!(warnings.is_empty(), "{guarded}: {warnings:?}");
+        }
+    }
+
+    #[test]
+    fn a_single_origin_is_target_origin_and_shares_its_origin() {
+        let (plan, _) = compile_json(
+            &site(
+                r#"[{"when":{"path":"/a"},"proxy":"http://127.0.0.1:9000"},
+                    {"proxy":{"to":"http://127.0.0.1:9000/","headers":{"X-A":false}}}]"#,
+            ),
+            &[],
+        )
+        .unwrap();
+        let targets: Vec<Target> = plan.sites[0]
+            .routes
+            .steps
+            .iter()
+            .map(|s| match &s.action {
+                Action::Answer(Terminal::Proxy(p), _) => p.to,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(targets, [Target::Origin(OriginId(0)); 2]);
+        assert_eq!(plan.origins.len(), 1);
+        assert!(plan.pools.is_empty() && plan.sources.is_empty() && plan.limits.is_empty());
+        let Action::Answer(Terminal::Proxy(p), _) = &plan.sites[0].routes.steps[1].action else {
+            unreachable!()
+        };
+        let removed = p.headers.iter().find(|h| &*h.name.name == b"x-a").unwrap();
+        assert!(removed.value.is_none(), "`false` removes the header");
+    }
+
+    #[test]
+    fn features_not_built_yet_fail_at_their_pointer() {
+        let cases = [
+            (
+                r#"[{"proxy":{"to":["http://a:1","http://b:1"]}}]"#,
+                "/sites/0/routes/0/proxy/to: a list of origins is not supported by this upstreamer yet",
+            ),
+            (
+                r#"[{"proxy":{"to":"http://a:1","balance":"p2c"}}]"#,
+                "/sites/0/routes/0/proxy/balance: `balance` is not supported by this upstreamer yet",
+            ),
+            (
+                r#"[{"proxy":{"to":{"kubernetes":{"namespace":"n","service":"s","port":80}}}}]"#,
+                "/sites/0/routes/0/proxy/to/kubernetes: this upstreamer is built without Kubernetes support; use the `kubernetes` package",
+            ),
+            (
+                r#"[{"limit":{"rate":"5/s"}}]"#,
+                "/sites/0/routes/0/limit: `limit` is not supported by this upstreamer yet",
+            ),
+        ];
+        for (routes, want) in cases {
+            assert_eq!(errors(&site(routes), &[]), [want], "{routes}");
+        }
+        let e = errors(
+            r#"{"version":1,"trustedProxies":{"from":["cloudflare"],"header":"CF-Connecting-IP"},"sites":[]}"#,
+            &[],
+        );
+        assert_eq!(
+            e,
+            ["/trustedProxies: `trustedProxies` is not supported by this upstreamer yet"]
+        );
+    }
+
+    #[test]
+    fn a_tls_site_names_files_or_acme_and_not_both() {
+        let tls = |tls: &str| {
+            errors(
+                &format!(
+                    r#"{{"version":1,"sites":[{{"name":"a","hosts":["a.example"],"tls":{tls}}}]}}"#
+                ),
+                &[],
+            )
+        };
+        assert_eq!(
+            tls(r#"{"cert":"/c.pem"}"#),
+            ["/sites/0/tls: a TLS site needs `cert` and `key` files, or `acme`"]
+        );
+        assert_eq!(
+            tls(r#"{"cert":"/c.pem","key":"/k.pem","acme":{"email":"ops@example.com"}}"#),
+            ["/sites/0/tls: a TLS site takes `cert` and `key`, or `acme`, not both"]
+        );
+        assert_eq!(
+            tls(r#"{"acme":{"email":"ops@example.com"}}"#),
+            ["/sites/0/tls/acme: in-process ACME is not supported by this upstreamer yet"]
+        );
+    }
+
+    #[test]
+    fn keys_are_specialised_and_read_the_request_alone() {
+        let files = Files(HashMap::new());
+        let mut c = Compiler::new(&files);
+        let at = Where {
+            file: None,
+            ptr: "/k".into(),
+        };
+        let mut vars = Vec::new();
+        let mut key = |c: &mut Compiler<'_>, src: &str, captures: Captures| {
+            let mut scope = Scope {
+                vars: &mut vars,
+                captures,
+                in_error_route: true,
+                uses_captures: false,
+                reads: Vec::new(),
+            };
+            c.key(src, &at, &mut scope)
+        };
+        assert_eq!(
+            key(&mut c, "{remote_host}", Captures::None),
+            Some(KeyPlan::RemoteHost)
+        );
+        assert_eq!(
+            key(&mut c, "{remote_net}", Captures::None),
+            Some(KeyPlan::RemoteNet)
+        );
+        assert_eq!(
+            key(&mut c, "all", Captures::None),
+            Some(KeyPlan::Const(crate::key::constant(b"all")))
+        );
+        assert!(matches!(
+            key(&mut c, "{header.x-api-key}:{remote_net}", Captures::None),
+            Some(KeyPlan::Template(_))
+        ));
+        assert!(c.diags.is_empty(), "{:?}", c.diags);
+        assert_eq!(key(&mut c, "{re.1}", Captures::Groups(2)), None);
+        assert_eq!(key(&mut c, "{err.status_code}", Captures::None), None);
+        assert_eq!(key(&mut c, "", Captures::None), None);
+        let messages: Vec<&str> = c.diags.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                "`{re.1}` cannot be read in a key, which is computed from the request alone (at byte 0 of \"{re.1}\")",
+                "`{err.status_code}` has a value only inside an error route (`errors`) (at byte 0 of \"{err.status_code}\")",
+                "a key that is always empty never selects a bucket or an origin",
+            ]
         );
     }
 }

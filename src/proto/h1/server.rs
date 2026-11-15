@@ -39,13 +39,13 @@
 //! - Body relays: in place in whichever read buffer the bytes arrived in; long bodies and
 //!   tunnels move to a 64 KiB pool buffer (sendfile for files on kernel-plaintext sockets).
 
-use crate::access;
 use crate::body::{Body, RequestBody};
 use crate::exchange::{ConnInfo, Exchange};
 use crate::files::FileBody;
 use crate::msg::{Known, Method, ResponseHead, Status, Version};
 use crate::net::Transport;
 use crate::net::buf::{LARGE, SMALL};
+use crate::observe;
 use crate::pipeline;
 use crate::pipeline::Response;
 use crate::proto::h1::codec::{self, Framing, Limits, OutFraming, ParseError, Parsed};
@@ -163,7 +163,7 @@ async fn request(
     )
     .await;
     if let Some(log) = log {
-        access::record(core, &snap, &ex, log, status, sent);
+        observe::finish(core, &snap, &ex, log, status, sent);
     }
     core.exchanges.put(ex);
     match written {

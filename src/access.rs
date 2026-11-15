@@ -7,12 +7,12 @@
 //!    created when missing) at startup and at every reload, so the reload that follows a
 //!    logrotate rename starts a new file. A file that cannot be opened is reported in the
 //!    reload status and the lines meant for it are counted as dropped.
-//! 2. Once the pipeline knows the request's site logs, [`start`] reads the monotonic clock and
-//!    formats the request's fields, as received, into the exchange's arena. A site without a
-//!    log does neither.
-//! 3. Once the response or tunnel is over, the driver calls [`record`] with the status and the
-//!    body bytes it sent. The core's [`Writer`] appends the whole line to its buffer for that
-//!    file.
+//! 2. Once the pipeline knows the request's site logs, `observe::start` reads the monotonic
+//!    clock and [`request_fields`] formats the request's fields, as received, into the
+//!    exchange's arena. A site without a log does neither.
+//! 3. Once the response or tunnel is over, the driver calls `observe::finish` with the status
+//!    and the body bytes it sent, which writes a [`Line`]. The core's [`Writer`] appends the
+//!    whole line to its buffer for that file.
 //! 4. A buffer goes out in one `write(2)` when it passes [`FLUSH_AT`], on the core's 1 s clock
 //!    tick, before the core adopts another generation's files, and when the core stops. A
 //!    buffer only ever holds whole lines and the file is in append mode, so lines from
@@ -35,7 +35,8 @@
 //! (one line in the file). Field order is fixed; every field is always present.
 //!
 //! - `ts`: when the response or tunnel ended, UTC, RFC 3339 with milliseconds.
-//! - `remote_ip`, `remote_port`: the peer of the connection.
+//! - `remote_ip`: the client (the peer, or the address a trusted proxy forwarded).
+//! - `remote_port`: the port of the connection's peer.
 //! - `host`: the host the site was chosen by (lowercase, without port).
 //! - `method`, `target`: as the client sent them (`target` before any rewrite or prefix strip).
 //! - `proto`: `HTTP/1.0`, `HTTP/1.1`, `HTTP/2` or `HTTP/3`.
@@ -51,15 +52,14 @@
 
 use crate::exchange::{ASpan, Exchange};
 use crate::msg::{Status, Version};
-use crate::plan::{LogId, UpstreamId, UpstreamPlan};
-use crate::runtime::{Core, CoreSnapshot};
+use crate::plan::{LogId, OriginSpec};
 use std::cell::{Cell, RefCell};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// A buffer is written once it holds this many bytes.
 pub(crate) const FLUSH_AT: usize = 32 * 1024;
@@ -110,35 +110,21 @@ impl Files {
     }
 }
 
-/// What the pipeline noted about a request of a logging site, until the driver records it.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Started {
-    log: LogId,
-    at: Instant,
-    /// The request's fields, formatted, in the exchange's arena.
-    request: ASpan,
-    upstream: Option<UpstreamId>,
-}
-
-impl Started {
-    /// A proxy step is forwarding the request to `upstream`.
-    pub fn proxied_to(&mut self, upstream: UpstreamId) {
-        self.upstream = Some(upstream);
-    }
-}
-
-/// Starts the record of a request whose site logs to `log`: reads the clock and formats the
-/// request's fields into the arena while they are still as the client sent them.
-pub(crate) fn start(log: LogId, ex: &mut Exchange) -> Started {
-    let at = Instant::now();
+/// Formats the request's fields into the arena while they are still as the client sent them:
+/// the middle of its line, from `remote_ip` to `referer`.
+pub(crate) fn request_fields(ex: &mut Exchange) -> ASpan {
     let Exchange {
-        req, conn, arena, ..
+        req,
+        conn,
+        client,
+        arena,
+        ..
     } = ex;
-    let request = arena.build(|out| {
+    arena.build(|out| {
         let _ = write!(
             out,
             "\"remote_ip\":\"{}\",\"remote_port\":{},\"host\":",
-            conn.remote.ip(),
+            client,
             conn.remote.port()
         );
         push_str(out, req.host());
@@ -153,54 +139,24 @@ pub(crate) fn start(log: LogId, ex: &mut Exchange) -> Started {
         push_opt(out, field(b"user-agent").map(|(_, v, _)| v));
         out.extend_from_slice(b",\"referer\":");
         push_opt(out, field(b"referer").map(|(_, v, _)| v));
-    });
-    Started {
-        log,
-        at,
-        request,
-        upstream: None,
-    }
-}
-
-/// Records a finished request: `status` sent and `bytes` of body after the head. Called by the
-/// driver once the response (or tunnel) is over, with the snapshot the request ran under.
-pub(crate) fn record(
-    core: &Core,
-    snap: &CoreSnapshot,
-    ex: &Exchange,
-    started: Started,
-    status: Status,
-    bytes: u64,
-) {
-    let end = Instant::now();
-    let upstream = started
-        .upstream
-        .map(|id| &snap.plan.upstreams[id.0 as usize]);
-    let fields = Line {
-        ts: core.clock.wall(end),
-        request: ex.arena.get(started.request),
-        status,
-        bytes,
-        duration: end.saturating_duration_since(started.at),
-        upstream,
-    };
-    core.access
-        .append(&snap.access, started.log, |out| fields.write(out));
+    })
 }
 
 /// One line's fields.
-struct Line<'a> {
+pub(crate) struct Line<'a> {
     /// Since the Unix epoch.
-    ts: Duration,
-    request: &'a [u8],
-    status: Status,
-    bytes: u64,
-    duration: Duration,
-    upstream: Option<&'a UpstreamPlan>,
+    pub ts: Duration,
+    /// What [`request_fields`] formatted.
+    pub request: &'a [u8],
+    pub status: Status,
+    pub bytes: u64,
+    pub duration: Duration,
+    /// The origin of the last proxy attempt: for a discovered origin, the pod's own address.
+    pub upstream: Option<&'a OriginSpec>,
 }
 
 impl Line<'_> {
-    fn write(&self, out: &mut Vec<u8>) {
+    pub fn write(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(b"{\"ts\":\"");
         push_ts(out, self.ts);
         out.extend_from_slice(b"\",");
@@ -252,7 +208,7 @@ impl Writer {
     }
 
     /// Appends the line `line` writes for `log` of `files`, the files the request ran under.
-    fn append(&self, files: &Arc<Files>, log: LogId, line: impl FnOnce(&mut Vec<u8>)) {
+    pub(crate) fn append(&self, files: &Arc<Files>, log: LogId, line: impl FnOnce(&mut Vec<u8>)) {
         let Some(file) = files.get(log) else {
             self.dropped.set(self.dropped.get() + 1);
             return;
@@ -482,11 +438,11 @@ mod tests {
         ex
     }
 
-    fn line(ex: &Exchange, started: Started, upstream: Option<&UpstreamPlan>) -> (String, Value) {
+    fn line(ex: &Exchange, request: ASpan, upstream: Option<&OriginSpec>) -> (String, Value) {
         let mut out = Vec::new();
         Line {
             ts: Duration::from_millis(784_111_777_123),
-            request: ex.arena.get(started.request),
+            request: ex.arena.get(request),
             status: Status::new(502).unwrap(),
             bytes: 1234,
             duration: Duration::from_micros(1_500_042),
@@ -506,19 +462,18 @@ mod tests {
             ("Referer", "https://example.com/\x01"),
             ("User-Agent", "second"),
         ]);
-        let mut started = start(LogId(0), &mut ex);
+        let request = request_fields(&mut ex);
         ex.req.strip_prefix(b"/api");
-        started.proxied_to(UpstreamId(0));
-        let up = UpstreamPlan {
-            id: UpstreamId(0),
+        let up = OriginSpec {
             host: "::1".into(),
             port: 8080,
             addr: OriginAddr::Name,
             tls: None,
             idle: Duration::from_secs(1),
             max_idle_per_core: 1,
+            probe: None,
         };
-        let (text, value) = line(&ex, started, Some(&up));
+        let (text, value) = line(&ex, request, Some(&up));
         let keys = [
             "ts",
             "remote_ip",
@@ -563,8 +518,8 @@ mod tests {
     #[test]
     fn absent_fields_and_no_upstream_are_null() {
         let mut ex = exchange(&[]);
-        let started = start(LogId(0), &mut ex);
-        let (_, value) = line(&ex, started, None);
+        let request = request_fields(&mut ex);
+        let (_, value) = line(&ex, request, None);
         assert_eq!(value["user_agent"], Value::Null);
         assert_eq!(value["referer"], Value::Null);
         assert_eq!(value["upstream"], Value::Null);

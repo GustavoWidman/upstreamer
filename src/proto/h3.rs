@@ -12,11 +12,11 @@
 //! arrive, then closes with H3_NO_ERROR. Reload swaps the endpoint's server config, so the
 //! socket and every open connection stay.
 
-use crate::access;
 use crate::body::{Body, RequestBody};
 use crate::exchange::{ConnInfo, Exchange, Proto, Scheme};
 use crate::log::debug;
 use crate::msg::{Known, Method, ResponseHead, Status};
+use crate::observe;
 use crate::pipeline::{self, Response};
 use crate::plan::{ListenerKey, ServerParams};
 use crate::runtime::Core;
@@ -231,7 +231,7 @@ async fn stream(
         send.stop_stream(Code::H3_INTERNAL_ERROR);
     }
     if let Some(log) = log {
-        access::record(&core, &snap, &ex, log, status, sent);
+        observe::finish(&core, &snap, &ex, log, status, sent);
     }
     core.exchanges.put(ex);
 }
@@ -452,14 +452,11 @@ mod tests {
             }),
         );
         let certs = Arc::new(tls::load(&plan.certs, None).0);
-        Arc::new(Generation {
-            plan: Arc::new(plan),
-            tls: Some(TlsState {
-                certs,
-                tickets: Arc::new(TicketKeys::generate(3600)),
-            }),
-            access: Arc::default(),
-        })
+        let tls = TlsState {
+            certs,
+            tickets: Arc::new(TicketKeys::generate(3600)),
+        };
+        Arc::new(Generation::standalone(plan, Some(tls), Arc::default()))
     }
 
     /// A free port for both TCP and UDP on loopback.
