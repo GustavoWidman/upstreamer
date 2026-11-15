@@ -147,6 +147,17 @@ in
     def get(name, ca="-k"):
         return server.succeed(f"curl -sf {ca} https://{name}/")
 
+    def get_verified(name):
+        # pebble dates a certificate from the acme machine's clock, which the server's does not
+        # follow (test machines run no time sync), so a new certificate can start a second in
+        # the server's future. Its chain on disk verifies once it has started.
+        server.wait_until_succeeds(
+            f"openssl verify -CAfile /tmp/ca.pem -untrusted /var/lib/acme/{name}/chain.pem"
+            f" /var/lib/acme/{name}/cert.pem",
+            timeout=10,
+        )
+        return get(name, "--cacert /tmp/ca.pem")
+
     def unit(prop):
         return server.succeed(f"systemctl show upstreamer.service -P {prop}").strip()
 
@@ -181,7 +192,7 @@ in
         issued = on_disk("good.example.test")
         wait_served("good.example.test", lambda f: f == issued, "the issued certificate")
         server.succeed("curl -sf https://acme.test:15000/roots/0 > /tmp/ca.pem")
-        assert get("good.example.test", "--cacert /tmp/ca.pem") == "backend"
+        assert get_verified("good.example.test") == "backend"
         assert unit("MainPID") == first_pid, "reloaded, not restarted"
 
     with subtest("a forced renewal swaps the chain without dropping a keep-alive connection"):
@@ -208,7 +219,7 @@ in
         server.fail("systemctl restart acme-order-renew-bad.example.test.service")
         server.succeed("systemctl reload upstreamer.service")
         assert served("good.example.test", "fingerprint -sha256") == renewed
-        assert get("good.example.test", "--cacert /tmp/ca.pem") == "backend"
+        assert get_verified("good.example.test") == "backend"
         assert not serving_pebble("bad.example.test")
         assert get("bad.example.test") == "backend"
         server.fail("systemctl is-failed upstreamer.service")
