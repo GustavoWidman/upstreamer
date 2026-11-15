@@ -20,9 +20,11 @@
 //!   next frame is read, so a reset frees nothing that is still running (CVE-2023-44487).
 //! - Frames that cost more than they carry are paid from one budget ([`BUDGET_BURST`],
 //!   refilled at [`BUDGET_PER_SECOND`]): a reset of a stream still being answered, PING and
-//!   SETTINGS (each needs a reply), CONTINUATION, PRIORITY, DATA without data, unknown
-//!   frames, and every stream error. A connection that overdraws it ends with
-//!   ENHANCE_YOUR_CALM.
+//!   SETTINGS (each needs a reply), CONTINUATION, PRIORITY, DATA without data on a stream
+//!   in progress, unknown frames, and every stream error. A connection that overdraws it
+//!   ends with ENHANCE_YOUR_CALM. Frames that are dropped without a reply (on a stream that
+//!   lingers or was reset from this side) cost what parsing their header costs, and are
+//!   not charged.
 //! - A field block: [`MAX_HEADER_LIST`] bytes on the wire across HEADERS and CONTINUATION
 //!   (connection error past it), and the same decoded, counted as RFC 9113 6.5.2 does (431
 //!   past it; the block is still decoded, because the compression state depends on it, but
