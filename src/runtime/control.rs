@@ -12,6 +12,7 @@
 //! generation.
 
 use super::{BindFailure, Generation, TlsState, ToCore, Worker};
+use crate::access::{self, OpenFailure};
 use crate::log::{error, info, warning};
 use crate::plan::{Diagnostic, ListenerKind, Plan};
 use crate::tls::{self, CertProblem, TicketKeys};
@@ -89,6 +90,7 @@ pub(crate) fn serve(
                                 certs: tls.certs.clone(),
                                 tickets: Arc::new(tls.tickets.rotated()),
                             }),
+                            access: current.access.clone(),
                         });
                         log_bind_failures(&publish(&workers, next.clone()).await);
                         current = next;
@@ -122,13 +124,18 @@ async fn reload(
             }
             *current = next;
             info!("serving generation {generation}");
-            match failures.first() {
-                None => format!("serving generation {generation}"),
-                Some(f) => format!(
-                    "serving generation {generation}; cannot bind {}: {}",
-                    f.addr, f.error
-                ),
+            let mut status = format!("serving generation {generation}");
+            if let Some(f) = failures.first() {
+                status.push_str(&format!("; cannot bind {}: {}", f.addr, f.error));
             }
+            if let Some(f) = problems.logs.first() {
+                status.push_str(&format!(
+                    "; cannot open access log {}: {}",
+                    f.path.display(),
+                    f.error
+                ));
+            }
+            status
         }
         Err(diagnostics) => {
             for d in &diagnostics {
@@ -148,12 +155,21 @@ async fn reload(
     notifier.notify(&format!("READY=1\nSTATUS={status}"));
 }
 
-/// Builds the next generation from disk. `Err` keeps the current one.
+/// What a generation was built with although part of it failed: certificates kept from the
+/// previous generation or made up, and access logs that could not be opened.
+#[derive(Default)]
+pub(crate) struct Problems {
+    pub certs: Vec<CertProblem>,
+    pub logs: Vec<OpenFailure>,
+}
+
+/// Builds the next generation from disk, opening every access log file anew. `Err` keeps the
+/// current one.
 pub(crate) fn rebuild(
     load: &mut LoadPlan<'_>,
     current: Option<&Generation>,
     generation: u64,
-) -> Result<(Generation, Vec<Diagnostic>, Vec<CertProblem>), Vec<Diagnostic>> {
+) -> Result<(Generation, Vec<Diagnostic>, Problems), Vec<Diagnostic>> {
     let (plan, warnings) = load(generation)?;
     let previous = current.and_then(|g| g.tls.as_ref());
     let (tls, problems) = if plan
@@ -171,15 +187,35 @@ pub(crate) fn rebuild(
     } else {
         (None, Vec::new())
     };
+    let (files, logs) = access::Files::open(&plan.access_logs);
     let plan = Arc::new(plan);
-    Ok((Generation { plan, tls }, warnings, problems))
+    let next = Generation {
+        plan,
+        tls,
+        access: Arc::new(files),
+    };
+    Ok((
+        next,
+        warnings,
+        Problems {
+            certs: problems,
+            logs,
+        },
+    ))
 }
 
-fn report(warnings: &[Diagnostic], problems: &[CertProblem]) {
+fn report(warnings: &[Diagnostic], problems: &Problems) {
     for w in warnings {
         warning!("{w}");
     }
-    for p in problems {
+    for f in &problems.logs {
+        warning!(
+            "access log {}: {}; its lines are dropped until a reload opens it",
+            f.path.display(),
+            f.error
+        );
+    }
+    for p in &problems.certs {
         warning!(
             "certificate {}: {}; previous certificate kept for {:?}, self-signed for {:?}",
             p.source,

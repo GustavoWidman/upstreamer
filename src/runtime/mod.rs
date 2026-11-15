@@ -12,6 +12,7 @@
 pub(crate) mod control;
 
 use crate::StartError;
+use crate::access;
 use crate::exchange::{ConnInfo, ExchangePool, Proto, Scheme};
 use crate::files::catalog::Catalog;
 use crate::log::{debug, warning};
@@ -35,6 +36,8 @@ pub(crate) struct Generation {
     pub plan: Arc<Plan>,
     /// Present exactly when the plan has a TLS or QUIC listener.
     pub tls: Option<TlsState>,
+    /// The plan's access log files, opened for this generation.
+    pub access: Arc<access::Files>,
 }
 
 /// Certificates and ticket keys of a generation. Ticket keys are shared by every core, so a
@@ -50,6 +53,7 @@ pub(crate) struct CoreSnapshot {
     pub plan: Arc<Plan>,
     pub tls: Option<Arc<rustls::ServerConfig>>,
     pub quic: Option<Arc<rustls::ServerConfig>>,
+    pub access: Arc<access::Files>,
 }
 
 impl CoreSnapshot {
@@ -65,7 +69,12 @@ impl CoreSnapshot {
                     .then(|| tls::quic_server_config(state.certs.clone(), state.tickets.clone())),
             ),
         };
-        CoreSnapshot { plan, tls, quic }
+        CoreSnapshot {
+            plan,
+            tls,
+            quic,
+            access: generation.access.clone(),
+        }
     }
 }
 
@@ -98,6 +107,9 @@ impl RegexCaches {
 pub(crate) struct Clock {
     pub unix: Cell<i64>,
     pub http_date: RefCell<[u8; 29]>,
+    /// The system time and the monotonic time read together at the last tick, so a
+    /// monotonic reading converts to wall time without another clock read.
+    anchor: Cell<(Duration, Instant)>,
 }
 
 impl Clock {
@@ -106,20 +118,43 @@ impl Clock {
         let clock = Clock {
             unix: Cell::new(0),
             http_date: RefCell::new(*b"Thu, 01 Jan 1970 00:00:00 GMT"),
+            anchor: Cell::new((Duration::ZERO, Instant::now())),
         };
         clock.tick();
         clock
     }
     /// Refreshes `unix` and `http_date` (IMF-fixdate) from the system clock.
     pub fn tick(&self) {
-        let now = std::time::SystemTime::now()
+        let wall = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64);
+            .unwrap_or_default();
+        self.anchor.set((wall, Instant::now()));
+        let now = wall.as_secs() as i64;
         if now != self.unix.get() {
             self.unix.set(now);
             *self.http_date.borrow_mut() = imf_fixdate(now);
         }
     }
+    /// The time since the Unix epoch at `at`, a monotonic reading taken after the last tick.
+    pub fn wall(&self, at: Instant) -> Duration {
+        let (wall, anchor) = self.anchor.get();
+        wall + at.saturating_duration_since(anchor)
+    }
+}
+
+/// The proleptic Gregorian (year, month, day) of a day count since 1970-01-01 (Howard
+/// Hinnant's algorithm).
+pub(crate) fn civil(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month, day)
 }
 
 /// `Sun, 06 Nov 1994 08:49:37 GMT` (RFC 9110 section 5.6.7) for unix seconds `t`.
@@ -131,16 +166,7 @@ fn imf_fixdate(t: i64) -> [u8; 29] {
     ];
     let days = t.div_euclid(86_400);
     let secs = t.rem_euclid(86_400);
-    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
+    let (year, month, day) = civil(days);
 
     let mut out = *b"Thu, 01 Jan 1970 00:00:00 GMT";
     out[..3].copy_from_slice(DAYS[days.rem_euclid(7) as usize]);
@@ -184,6 +210,8 @@ pub(crate) struct Core {
     pub exchanges: ExchangePool,
     pub upstreams: Pools,
     pub clock: Clock,
+    /// This core's access log buffers; written when the core drops.
+    pub access: access::Writer,
     pub draining: Cell<bool>,
     /// Woken once, when draining starts.
     drain_started: Notify,
@@ -206,6 +234,7 @@ impl Core {
             exchanges: ExchangePool::default(),
             upstreams: Pools::default(),
             clock: Clock::new(),
+            access: access::Writer::new(generation.access.clone()),
             draining: Cell::new(false),
             drain_started: Notify::new(),
             conns: Cell::new(0),
@@ -231,6 +260,7 @@ impl Core {
                 self.upstreams.adopt(&old.plan, &new.plan);
             }
         }
+        self.access.adopt(&new.access);
         *self.snapshot.borrow_mut() = new.clone();
         self.sync_listeners(&new).await
     }
@@ -569,13 +599,18 @@ pub(crate) fn allowed_cpus() -> Vec<usize> {
     (0..n).collect()
 }
 
-/// Refreshes the core's clock every second.
+/// Refreshes the core's clock every second, and writes the access log lines buffered since.
 async fn tick(core: Rc<Core>) {
     let mut every = tokio::time::interval(Duration::from_secs(1));
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         every.tick().await;
         core.clock.tick();
+        core.access.flush();
+        let dropped = core.access.take_dropped();
+        if dropped > 0 {
+            warning!("core {}: {dropped} access log lines dropped", core.index);
+        }
     }
 }
 
@@ -709,6 +744,8 @@ pub(crate) mod testing {
         pub requests: u64,
         /// Allocations the core's thread had made when it answered the latest request.
         pub allocations: u64,
+        /// Access log writes the core had made by then.
+        pub log_writes: u64,
     }
 
     /// By listening port and core index. Tests listen on ports of their own, so cores of
@@ -719,12 +756,14 @@ pub(crate) mod testing {
     /// written.
     pub fn observe(core: &Core, info: &ConnInfo) {
         let allocations = thread_allocations();
+        let log_writes = core.access.writes();
         let mut all = SERVED.lock().unwrap();
         let key = (info.local_port, core.index);
         match all.iter_mut().find(|(port, core, _)| (*port, *core) == key) {
             Some((_, _, served)) => {
                 served.requests += 1;
                 served.allocations = allocations;
+                served.log_writes = log_writes;
             }
             None => all.push((
                 key.0,
@@ -732,6 +771,7 @@ pub(crate) mod testing {
                 Served {
                     requests: 1,
                     allocations,
+                    log_writes,
                 },
             )),
         }
@@ -777,6 +817,7 @@ pub(crate) mod testing {
         Arc::new(Generation {
             plan: Arc::new(plan(generation, addrs)),
             tls: None,
+            access: Arc::default(),
         })
     }
 
@@ -948,6 +989,65 @@ mod tests {
             after - before
         );
         assert_eq!(after - before, 0, "allocations on the core thread");
+    }
+
+    #[test]
+    fn a_logged_request_allocates_nothing_and_its_line_is_written_in_a_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("access.log");
+        let addr = free_addr();
+        let plan = plan_from(
+            9,
+            &serde_json::json!({
+                "version": 1,
+                "listen": { "http": [addr], "https": [] },
+                "sites": [{
+                    "name": "test",
+                    "hosts": ["*"],
+                    "accessLog": path,
+                    "routes": [{ "respond": { "body": "gen=000009\n" } }],
+                }],
+            }),
+        );
+        let (files, failures) = access::Files::open(&plan.access_logs);
+        assert!(failures.is_empty(), "{failures:?}");
+        let generation = Arc::new(Generation {
+            plan: Arc::new(plan),
+            tls: None,
+            access: Arc::new(files),
+        });
+        let workers = spawn_workers(&[allowed_cpus()[0]], generation).unwrap();
+        let mut conn = connect(addr);
+        let warm_up = 2_000;
+        for _ in 0..warm_up {
+            get(&mut conn).unwrap();
+        }
+        let before = served(addr.port(), 0);
+        let requests = 20_000;
+        for _ in 0..requests {
+            assert_eq!(get(&mut conn).unwrap(), 9);
+        }
+        let after = served(addr.port(), 0);
+        stop(workers, Instant::now());
+        let allocations = after.allocations - before.allocations;
+        let writes = after.log_writes - before.log_writes;
+        println!("{requests} logged requests: {allocations} allocations, {writes} log writes");
+        assert_eq!(allocations, 0, "allocations on the core thread");
+        assert!(
+            writes > 0 && writes * 50 <= requests,
+            "{writes} writes for {requests} lines"
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("a whole JSON line"))
+            .collect();
+        assert_eq!(
+            lines.len() as u64,
+            warm_up + requests,
+            "written when the core stopped"
+        );
+        assert!(lines.iter().all(|l| l["status"] == 200 && l["bytes"] == 11));
     }
 
     /// Load for `strace -c -f` on Linux: one core, keep-alive requests from a blocking client.

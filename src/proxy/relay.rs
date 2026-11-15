@@ -219,7 +219,7 @@ pub(crate) enum RelayEnd {
 /// Response body, origin -> h1 client. `head` goes out in one writev with the body bytes that
 /// arrived with the origin's head. While it waits for more of the body it watches the client:
 /// when the client closes, the relay ends, so the origin's connection closes too. Bytes the
-/// client sends meanwhile stay in `client_buf`.
+/// client sends meanwhile stay in `client_buf`. `sent` counts the bytes written after the head.
 pub(crate) async fn copy_response(
     core: &Core,
     mut head: &[u8],
@@ -227,6 +227,7 @@ pub(crate) async fn copy_response(
     rewrite: Rewrite,
     client: &mut Transport,
     client_buf: &mut BytesMut,
+    sent: &mut u64,
 ) -> RelayEnd {
     let UpstreamBody { conn, track, .. } = body;
     let mut data: SmallVec<[Range<usize>; 4]> = SmallVec::new();
@@ -246,8 +247,9 @@ pub(crate) async fn copy_response(
             data: &data,
             last: track.ended(),
         };
-        if part.write(rewrite, client).await.is_err() {
-            return RelayEnd::Broken;
+        match part.write(rewrite, client).await {
+            Ok(n) => *sent += n,
+            Err(_) => return RelayEnd::Broken,
         }
         head = &[];
         conn.buf.advance(taken);
@@ -285,7 +287,8 @@ struct Part<'a> {
 }
 
 impl Part<'_> {
-    async fn write(&self, rewrite: Rewrite, client: &mut Transport) -> io::Result<()> {
+    /// Returns the bytes written after the head.
+    async fn write(&self, rewrite: Rewrite, client: &mut Transport) -> io::Result<u64> {
         let mut size = [0u8; 18];
         let mut slices: SmallVec<[IoSlice<'_>; 6]> = SmallVec::new();
         match rewrite {
@@ -303,10 +306,12 @@ impl Part<'_> {
                 slices.extend(framed(self.head, self.bytes, true, self.last, &mut size));
             }
         }
-        if slices.iter().all(|s| s.is_empty()) {
-            return Ok(());
+        let len: usize = slices.iter().map(|s| s.len()).sum();
+        if len == 0 {
+            return Ok(0);
         }
-        client.write_all_vectored(&mut slices).await
+        client.write_all_vectored(&mut slices).await?;
+        Ok((len - self.head.len()) as u64)
     }
 }
 
@@ -395,25 +400,36 @@ pub(crate) async fn closed(client: &mut Transport, buf: &mut BytesMut) {
 }
 
 /// After a 101: bytes both ways until either side closes and what it sent is delivered, or
-/// nothing moved for `idle`. Bytes already read from either side go first.
+/// nothing moved for `idle`. Bytes already read from either side go first. `to_client` counts
+/// the bytes delivered to the client.
 pub(crate) async fn tunnel(
     client: &mut Transport,
     client_buf: &mut BytesMut,
     up: &mut UpstreamConn,
     idle: Option<Duration>,
+    to_client: &mut u64,
 ) -> io::Result<()> {
     let UpstreamConn { io, buf, watch, .. } = up;
     let (mut client_done, mut origin_done) = (false, false);
+    let mut to_origin = 0;
     watch.set(idle);
     poll_fn(|cx| {
         loop {
             let mut moved = false;
-            let to_origin = pump(cx, client, io, client_buf, &mut client_done, &mut moved)?;
-            let to_client = pump(cx, io, client, buf, &mut origin_done, &mut moved)?;
+            let up = pump(
+                cx,
+                client,
+                io,
+                client_buf,
+                &mut client_done,
+                &mut moved,
+                &mut to_origin,
+            )?;
+            let down = pump(cx, io, client, buf, &mut origin_done, &mut moved, to_client)?;
             if moved {
                 watch.set(idle);
             }
-            match (to_origin, to_client) {
+            match (up, down) {
                 (Poll::Ready(()), Poll::Ready(())) => return Poll::Ready(Ok(())),
                 // One direction is over: the other delivers what it holds, then ends too.
                 (Poll::Ready(()), Poll::Pending) if !origin_done => origin_done = true,
@@ -429,8 +445,8 @@ pub(crate) async fn tunnel(
     .await
 }
 
-/// Moves bytes one way through `buf`. Ready once `done` (the source ended, or the tunnel is
-/// closing) and everything read was written.
+/// Moves bytes one way through `buf`, adding what it writes to `count`. Ready once `done` (the
+/// source ended, or the tunnel is closing) and everything read was written.
 fn pump<R, W>(
     cx: &mut Context<'_>,
     from: &mut R,
@@ -438,6 +454,7 @@ fn pump<R, W>(
     buf: &mut BytesMut,
     done: &mut bool,
     moved: &mut bool,
+    count: &mut u64,
 ) -> Poll<io::Result<()>>
 where
     R: AsyncRead + Unpin,
@@ -450,6 +467,7 @@ where
                 return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
             }
             buf.advance(n);
+            *count += n as u64;
             *moved = true;
         }
         ready!(Pin::new(&mut *to).poll_flush(cx))?;

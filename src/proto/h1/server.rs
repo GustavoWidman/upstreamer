@@ -39,6 +39,7 @@
 //! - Body relays: in place in whichever read buffer the bytes arrived in; long bodies and
 //!   tunnels move to a 64 KiB pool buffer (sendfile for files on kernel-plaintext sockets).
 
+use crate::access;
 use crate::body::{Body, RequestBody};
 use crate::exchange::{ConnInfo, Exchange};
 use crate::files::FileBody;
@@ -106,7 +107,7 @@ pub(crate) async fn serve(core: Rc<Core>, mut io: Transport, info: ConnInfo) {
         // The connection is lent to the pipeline as the request body; the borrow ends when
         // `handle` returns, before the response is written on the same connection.
         let mut state = BodyState::new(head.framing, head.expect_continue);
-        let resp = pipeline::handle(
+        let (resp, log) = pipeline::handle(
             &core,
             &snap,
             &mut ex,
@@ -120,10 +121,16 @@ pub(crate) async fn serve(core: Rc<Core>, mut io: Transport, info: ConnInfo) {
         #[cfg(test)]
         crate::runtime::testing::observe(&core, &info);
 
+        let status = resp.head.status;
+        let mut sent = 0;
         let written = write_response(
             &core, &snap, &mut io, &mut buf, &mut state, &mut ex, resp, &head, &mut watch,
+            &mut sent,
         )
         .await;
+        if let Some(log) = log {
+            access::record(&core, &snap, &ex, log, status, sent);
+        }
         core.exchanges.put(ex);
         match written {
             Ok(()) if !buf.is_empty() => carry = Some(buf),
@@ -267,7 +274,8 @@ async fn answer_bad(core: &Core, io: &mut Transport, ex: &mut Exchange, close: &
 /// `body.rs`). `Ok` keeps the connection for the next request. It closes when either side
 /// asked to, when the request matched no site, when the response is delimited by the close,
 /// when the core is draining, and when the request body was neither read nor is short enough
-/// to drain.
+/// to drain. `sent` counts the body bytes written after the head (for a tunnel, the bytes
+/// relayed to the client), whether or not the response got out whole.
 #[expect(
     clippy::too_many_arguments,
     reason = "the connection's pieces are borrowed separately"
@@ -282,6 +290,7 @@ async fn write_response(
     resp: Response,
     request: &HeadInfo,
     watch: &mut Deadline,
+    sent: &mut u64,
 ) -> Result<(), Close> {
     let Response {
         head,
@@ -315,7 +324,7 @@ async fn write_response(
                         .put(std::mem::replace(buf, core.bufs.take_large()));
                 }
             }
-            let _ = relay::tunnel(io, buf, &mut upgrade.conn, upgrade.idle).await;
+            let _ = relay::tunnel(io, buf, &mut upgrade.conn, upgrade.idle, sent).await;
         }
         core.bufs.put(std::mem::take(&mut upgrade.conn.buf));
         return Err(Close::Done);
@@ -370,17 +379,22 @@ async fn write_response(
         }
         Body::Empty => io.write_all_vectored(&mut [IoSlice::new(out)]).await,
         Body::Bytes(bytes) => {
-            io.write_all_vectored(&mut [IoSlice::new(out), IoSlice::new(&bytes)])
-                .await
+            let written = io
+                .write_all_vectored(&mut [IoSlice::new(out), IoSlice::new(&bytes)])
+                .await;
+            if written.is_ok() {
+                *sent = bytes.len() as u64;
+            }
+            written
         }
-        Body::File(file) => send_file(core, io, out, file).await,
+        Body::File(file) => send_file(core, io, out, file, sent).await,
         Body::Upstream(mut upstream) => {
             let rewrite = match (upstream.track.framing(), version) {
                 (Framing::Chunked, Version::Http10) => Rewrite::Unchunk,
                 (Framing::UntilClose, Version::Http11) => Rewrite::Chunk,
                 _ => Rewrite::Raw,
             };
-            let end = relay::copy_response(core, out, &mut upstream, rewrite, io, buf).await;
+            let end = relay::copy_response(core, out, &mut upstream, rewrite, io, buf, sent).await;
             upstream.finish(core);
             match end {
                 RelayEnd::Complete => Ok(()),
@@ -388,7 +402,7 @@ async fn write_response(
             }
         }
         mut stream @ Body::Encoded(_) => {
-            send_stream(core, io, out, &mut stream, version != Version::Http10).await
+            send_stream(core, io, out, &mut stream, version != Version::Http10, sent).await
         }
     };
     sent.map_err(Close::Io)?;
@@ -431,41 +445,53 @@ fn head_only_framing(local: bool, head: &ResponseHead, body: &Body) -> OutFramin
 }
 
 /// A file body after `head`: sendfile on a kernel-plaintext socket, read and written
-/// otherwise.
-async fn send_file(core: &Core, io: &mut Transport, head: &[u8], file: FileBody) -> io::Result<()> {
+/// otherwise. `sent` counts the body bytes written.
+async fn send_file(
+    core: &Core,
+    io: &mut Transport,
+    head: &[u8],
+    file: FileBody,
+    sent: &mut u64,
+) -> io::Result<()> {
     let sock = match io {
         Transport::Plain(sock) | Transport::Ktls(sock) => sock,
         Transport::Tls(_) => {
-            return send_stream(core, io, head, &mut Body::File(file), false).await;
+            return send_stream(core, io, head, &mut Body::File(file), false, sent).await;
         }
     };
     sock.write_all_vectored(&mut [IoSlice::new(head)]).await?;
     let len = file.range.end - file.range.start;
-    match sock
+    let n = sock
         .sendfile(file.file.as_fd(), file.range.start, len)
-        .await?
-    {
-        sent if sent == len => Ok(()),
-        _ => Err(io::ErrorKind::UnexpectedEof.into()),
+        .await?;
+    *sent = n;
+    if n == len {
+        Ok(())
+    } else {
+        Err(io::ErrorKind::UnexpectedEof.into())
     }
 }
 
 /// A body read chunk by chunk after `head`, each chunk written before the next is read.
-/// `chunked` frames the chunks; without it the body's length or the close delimits it.
+/// `chunked` frames the chunks; without it the body's length or the close delimits it. `sent`
+/// counts the bytes written after the head, chunk syntax included.
 async fn send_stream(
     core: &Core,
     io: &mut Transport,
     mut head: &[u8],
     body: &mut Body,
     chunked: bool,
+    sent: &mut u64,
 ) -> io::Result<()> {
     let mut size = [0u8; 18];
     loop {
         let chunk = body.next_chunk(core).await?;
         let data = chunk.as_deref().unwrap_or_default();
         let mut slices = relay::framed(head, data, chunked, chunk.is_none(), &mut size);
-        if slices.iter().any(|s| !s.is_empty()) {
+        let len: usize = slices.iter().map(|s| s.len()).sum();
+        if len > 0 {
             io.write_all_vectored(&mut slices).await?;
+            *sent += (len - head.len()) as u64;
         }
         head = &[];
         if chunk.is_none() {

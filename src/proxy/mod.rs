@@ -563,6 +563,7 @@ mod tests {
         Arc::new(Generation {
             plan: Arc::new(plan),
             tls: None,
+            access: Arc::default(),
         })
     }
 

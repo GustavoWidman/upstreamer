@@ -12,6 +12,7 @@
 //! arrive, then closes with H3_NO_ERROR. Reload swaps the endpoint's server config, so the
 //! socket and every open connection stay.
 
+use crate::access;
 use crate::body::{Body, RequestBody};
 use crate::exchange::{ConnInfo, Exchange, Proto, Scheme};
 use crate::log::debug;
@@ -207,14 +208,14 @@ async fn stream(
     // Once per request, as on h1: a reload applies to the next request of every connection.
     let snap = core.snapshot();
     let mut ex = core.exchanges.take(info, snap.plan.var_count);
-    let resp = match head(&mut ex, &parts, &snap.plan.server) {
+    let (resp, log) = match head(&mut ex, &parts, &snap.plan.server) {
         Err(status) => {
             recv.stop_sending(Code::H3_NO_ERROR);
-            pipeline::bare(&mut ex, status)
+            (pipeline::bare(&mut ex, status), None)
         }
         Ok(declared) => match request_body(recv, declared).await {
             Ok(body) => pipeline::handle(&core, &snap, &mut ex, body).await,
-            Err(BodyError::Malformed) => pipeline::bare(&mut ex, Status::BAD_REQUEST),
+            Err(BodyError::Malformed) => (pipeline::bare(&mut ex, Status::BAD_REQUEST), None),
             Err(BodyError::Gone) => {
                 core.exchanges.put(ex);
                 return;
@@ -223,9 +224,14 @@ async fn stream(
     };
     #[cfg(test)]
     crate::runtime::testing::observe(&core, &info);
-    if let Err(e) = respond(&core, &mut send, &mut ex, resp).await {
+    let status = resp.head.status;
+    let mut sent = 0;
+    if let Err(e) = respond(&core, &mut send, &mut ex, resp, &mut sent).await {
         debug!("core {}: h3 response to {}: {e}", core.index, info.remote);
         send.stop_stream(Code::H3_INTERNAL_ERROR);
+    }
+    if let Some(log) = log {
+        access::record(&core, &snap, &ex, log, status, sent);
     }
     core.exchanges.put(ex);
 }
@@ -350,12 +356,14 @@ impl Drop for H3Body {
     }
 }
 
-/// Sends the response head, then the body chunk by chunk, then the end of the stream.
+/// Sends the response head, then the body chunk by chunk, then the end of the stream. `sent`
+/// counts the body bytes handed to the stream.
 async fn respond(
     core: &Core,
     send: &mut SendStream,
     ex: &mut Exchange,
     resp: Response,
+    sent: &mut u64,
 ) -> Result<(), String> {
     let Response {
         head,
@@ -388,7 +396,9 @@ async fn respond(
         }
     } else {
         while let Some(chunk) = body.next_chunk(core).await.map_err(|e| e.to_string())? {
+            let len = chunk.len() as u64;
             send.send_data(chunk).await.map_err(|e| e.to_string())?;
+            *sent += len;
         }
     }
     send.finish().await.map_err(|e| e.to_string())
@@ -448,6 +458,7 @@ mod tests {
                 certs,
                 tickets: Arc::new(TicketKeys::generate(3600)),
             }),
+            access: Arc::default(),
         })
     }
 

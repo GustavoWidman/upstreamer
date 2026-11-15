@@ -18,6 +18,7 @@
 //! the HPACK decoder produced), and the response's `HeaderMap`, where each value is a copied
 //! `HeaderValue`. The lib test `allocations_per_stream` measures the total.
 
+use crate::access;
 use crate::body::{Body, RequestBody};
 use crate::exchange::ConnInfo;
 use crate::log::debug;
@@ -167,10 +168,10 @@ async fn stream(
     let snap = core.snapshot();
     let mut ex = core.exchanges.take(info, snap.plan.var_count);
     let (parts, recv) = req.into_parts();
-    let resp = match admit(&parts, snap.plan.server.max_header_fields) {
-        Err(status) => pipeline::bare(&mut ex, status),
+    let (resp, log) = match admit(&parts, snap.plan.server.max_header_fields) {
+        Err(status) => (pipeline::bare(&mut ex, status), None),
         Ok(()) if ex.req.fill_from_http(&parts).is_err() => {
-            pipeline::bare(&mut ex, Status::BAD_REQUEST)
+            (pipeline::bare(&mut ex, Status::BAD_REQUEST), None)
         }
         Ok(()) => {
             let body = request_body(&parts.headers, recv);
@@ -190,6 +191,7 @@ async fn stream(
     let Response {
         head, body, local, ..
     } = resp;
+    let status = head.status;
     let head_only = ex.req.method == Method::Head || !head.status.has_body();
     let length = if head_only {
         head_only_length(local, &head, &body)
@@ -208,14 +210,18 @@ async fn stream(
         }
     }
     ex.recycle(head);
-    core.exchanges.put(ex);
 
     let empty = head_only || length == Some(0);
+    let mut sent = 0;
     match respond.send_response(out, empty) {
-        Ok(send) if !empty => send_body(&core, body, send).await,
+        Ok(send) if !empty => send_body(&core, body, send, &mut sent).await,
         Ok(_) => discard(&core, body),
         Err(e) => debug!("core {}: h2 response to {}: {e}", core.index, info.remote),
     }
+    if let Some(log) = log {
+        access::record(&core, &snap, &ex, log, status, sent);
+    }
+    core.exchanges.put(ex);
 }
 
 /// Requests the pipeline never sees: more fields than the config allows (h1 has the same
@@ -278,8 +284,9 @@ async fn or_reset<T>(
 
 /// Sends a response body as DATA frames, waiting for window capacity per chunk. The next
 /// chunk is read only once the previous one is in the stream's window, so an event stream's
-/// events go out as they arrive and a slow client slows the origin down.
-async fn send_body(core: &Core, mut body: Body, mut send: SendStream<Bytes>) {
+/// events go out as they arrive and a slow client slows the origin down. `sent` counts the
+/// bytes handed to the stream.
+async fn send_body(core: &Core, mut body: Body, mut send: SendStream<Bytes>, sent: &mut u64) {
     loop {
         let next = or_reset(body.next_chunk(core), |cx| send.poll_reset(cx)).await;
         let chunk = match next {
@@ -297,9 +304,11 @@ async fn send_body(core: &Core, mut body: Body, mut send: SendStream<Bytes>) {
         };
         // A body of known length ends with its last byte, in the frame that carries it.
         let last = body.len() == Some(0);
+        let len = chunk.len() as u64;
         if send_data(&mut send, chunk, last).await.is_err() {
             return;
         }
+        *sent += len;
         if last {
             discard(core, body);
             return;
@@ -405,6 +414,7 @@ mod tests {
                 certs: Arc::new(certs),
                 tickets: Arc::new(TicketKeys::generate(3600)),
             }),
+            access: Arc::default(),
         })
     }
 

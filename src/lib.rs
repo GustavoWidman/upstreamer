@@ -37,6 +37,7 @@
 // Modules whose bodies are still `todo!()` leave parameters and items unused.
 #![allow(dead_code, unused_variables, unused_macros)]
 
+mod access;
 mod body;
 mod config;
 mod encode;

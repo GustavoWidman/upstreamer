@@ -2,6 +2,7 @@
 //! It owns three decisions nothing else makes: which site, how an error becomes a response
 //! (error routes), and the final header edit order ([`finalize`]).
 
+use crate::access::{self, Started};
 use crate::body::{Body, RequestBody};
 use crate::encode::{self, Decision};
 use crate::exchange::{ASpan, ErrorInfo, Exchange, Proto, Scheme};
@@ -37,22 +38,25 @@ pub(crate) struct Response {
 ///    through `route::run_error` and `answer` once more; an error there answers bare.
 /// 5. [`finalize`].
 ///
-/// A response for a request that matched no site leaves `ex.site` unset.
+/// A response for a request that matched no site leaves `ex.site` unset. For a site with an
+/// access log, the request's record comes back with the response; the driver completes it
+/// with [`access::record`] once the response is sent.
 pub(crate) async fn handle(
     core: &Core,
     snap: &CoreSnapshot,
     ex: &mut Exchange,
     body: RequestBody<'_>,
-) -> Response {
+) -> (Response, Option<Started>) {
     let plan = &*snap.plan;
     let Some((site_id, site)) = plan.site_for(&ex.conn.listener, ex.req.host()) else {
         let status = match ex.conn.scheme {
             Scheme::Https => Status::MISDIRECTED,
             Scheme::Http => Status::NOT_FOUND,
         };
-        return bare(ex, status);
+        return (bare(ex, status), None);
     };
     ex.site = Some(site_id);
+    let mut log = site.access_log.map(|log| access::start(log, ex));
 
     let outcome = {
         let mut regex = core.regex.borrow_mut();
@@ -67,10 +71,10 @@ pub(crate) async fn handle(
     encode::strip_etag_suffix(ex.pending.encode, &mut ex.req);
 
     let from_files = matches!(outcome, Outcome::Files { .. });
-    let mut resp = match answer(core, snap, outcome, ex, body).await {
+    let mut resp = match answer(core, snap, outcome, ex, body, &mut log).await {
         Ok(resp) => resp,
         Err(status) => {
-            let mut resp = answer_error(core, snap, site, ex, status).await;
+            let mut resp = answer_error(core, snap, site, ex, status, &mut log).await;
             // The file server's 405 names the methods it does answer (RFC 9110 §15.5.6).
             if from_files && resp.head.status.code() == 405 {
                 resp.head.fields.push(b"allow", b"GET, HEAD");
@@ -79,7 +83,7 @@ pub(crate) async fn handle(
         }
     };
     finalize(site, ex, &mut resp);
-    resp
+    (resp, log)
 }
 
 /// Executes an outcome. Error statuses come back as `Err` so `handle` routes them.
@@ -89,14 +93,20 @@ async fn answer(
     outcome: Outcome<'_>,
     ex: &mut Exchange,
     body: RequestBody<'_>,
+    log: &mut Option<Started>,
 ) -> Result<Response, Status> {
     match outcome {
-        Outcome::Proxy(plan) => proxy::forward(core, snap, plan, ex, body)
-            .await
-            .map_err(|e| {
-                debug!("core {}: upstream of {:?}: {e:?}", core.index, ex.site);
-                e.status()
-            }),
+        Outcome::Proxy(plan) => {
+            if let Some(log) = log {
+                log.proxied_to(plan.upstream);
+            }
+            proxy::forward(core, snap, plan, ex, body)
+                .await
+                .map_err(|e| {
+                    debug!("core {}: upstream of {:?}: {e:?}", core.index, ex.site);
+                    e.status()
+                })
+        }
         Outcome::Files { plan, root } => {
             files::serve(plan, root, ex, &mut core.catalog.borrow_mut())
         }
@@ -113,6 +123,7 @@ async fn answer_error(
     site: &SitePlan,
     ex: &mut Exchange,
     status: Status,
+    log: &mut Option<Started>,
 ) -> Response {
     ex.error = Some(ErrorInfo { status });
     let outcome = {
@@ -126,7 +137,7 @@ async fn answer_error(
         route::run_error(&snap.plan, site, ex, &mut fx)
     };
     match outcome {
-        Some(outcome) => match answer(core, snap, outcome, ex, RequestBody::Empty).await {
+        Some(outcome) => match answer(core, snap, outcome, ex, RequestBody::Empty, log).await {
             Ok(resp) => resp,
             Err(_) => bare(ex, status),
         },
