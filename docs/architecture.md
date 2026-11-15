@@ -29,8 +29,15 @@ Data moves through these types, in the order a request meets them:
 7. `pipeline::finalize` applies the header edits in one fixed order, and the driver writes the
    `pipeline::Response`. Its `body::Body` is a closed enum, so each driver picks the cheapest
    transfer for each kind of body: writev, sendfile, an in-place relay, or DATA frames.
-8. For a site with an access log, the pipeline also returns an `access::Started`, and the
-   driver completes it with `access::record` once the response or tunnel is over.
+8. For a site that logs, or under a plan that collects metrics, the pipeline also returns an
+   `observe::Started`, and the driver completes it with `observe::finish` once the response or
+   tunnel is over.
+
+Features the config does not name are absent from the plan, so the request path never tests
+for them. A single origin without health settings is `plan::Target::Origin`; a site without a
+`limit` step has no `plan::Action::Limit`; a plan without a `metrics` step stores no route
+slot and gives no site an `Observe` for metrics; a plan without `trustedProxies` has no
+`trust`; a plan without in-process ACME has no challenge step.
 
 ## Modules
 
@@ -40,9 +47,16 @@ command line.
 
 | file | owns |
 |---|---|
-| `src/config.rs` | the JSON schema and its parsers, with errors that carry the JSON pointer of the failing value |
-| `src/plan/mod.rs` | the compiled plan's types, `Diagnostic`, and `check` |
-| `src/plan/compile.rs` | config to plan: includes, var interning, templates, matchers, origins, listeners |
+| `src/config/mod.rs` | the schema and its parsers (JSON or TOML by extension), with errors that carry the JSON pointer of the failing value |
+| `src/config/toml.rs` | TOML to the JSON value of the same document, with positions for diagnostics |
+| `src/config/trust.rs`, `src/config/acme.rs` | the schema of `trustedProxies` and of in-process ACME |
+| `src/plan/mod.rs` | the compiled plan's types and `Diagnostic` |
+| `src/plan/load.rs` | reading a config into a plan for `run` and `check`, locating diagnostics, `check`'s costs |
+| `src/plan/compile.rs` | config to plan: includes, var interning, templates, matchers, listeners |
+| `src/plan/compile/upstream.rs` | proxy targets: origins by identity, pools by value |
+| `src/plan/compile/limit.rs`, `src/plan/compile/key.rs` | `limit` steps, and the request keys of limits and hash balancing |
+| `src/plan/compile/labels.rs` | route slots, the `metrics` step, each site's `Observe` |
+| `src/plan/compile/trust.rs`, `src/plan/compile/acme.rs` | `trustedProxies`, and a site's `tls.acme` |
 | `src/plan/cond.rs` | compiled matchers |
 | `src/plan/host.rs` | host to site lookup per listener |
 | `src/plan/template.rs` | template parsing and expansion |
@@ -56,8 +70,17 @@ command line.
 | `src/proto/h1/client.rs` | the upstream request head |
 | `src/proto/h2/` | the HTTP/2 connection engine (frames, HPACK, flow control, limits) and its driver |
 | `src/proto/h3.rs` | the HTTP/3 driver on the `quinn` and `h3` crates |
-| `src/proxy/mod.rs` | forwarding to an origin, dialling, the retry rule |
-| `src/proxy/pool.rs` | per-core idle upstream connections |
+| `src/proxy/mod.rs` | forwarding to a target (one origin or a pool), dialling, the retry rule |
+| `src/proxy/pool.rs` | per-core idle upstream connections, requests in flight and failures per origin, per-pool state, by `Upstreams` epoch |
+| `src/upstream/mod.rs` | `Upstreams` (the origins and pool members of an epoch) and the control thread's `Registry` |
+| `src/upstream/balance.rs`, `health.rs`, `tables.rs`, `maglev.rs` | picking an origin, health cells and probes, per-policy member tables |
+| `src/key.rs` | request keys for hash balancing and limits |
+| `src/limit.rs` | rate-limit tables shared by every core |
+| `src/metrics/` | per-snapshot counters, the hub cores publish to, the exposition |
+| `src/observe.rs` | what a finished request records: its access log line and its metrics |
+| `src/discover/` | discovery sources (Kubernetes behind the `kubernetes` feature) |
+| `src/trust.rs` | the client address a trusted proxy forwards |
+| `src/acme/` | in-process ACME: the client on the control thread and the validation answers |
 | `src/proxy/relay.rs` | body relays and upgraded tunnels |
 | `src/files/mod.rs` | the static file server |
 | `src/files/catalog.rs` | the per-core cache of file facts, descriptors and small files |
@@ -69,8 +92,8 @@ command line.
 | `src/net/listen.rs` | per-core listening sockets |
 | `src/net/buf.rs` | per-core buffer pools |
 | `src/runtime/mod.rs` | cores, generations, snapshots |
-| `src/runtime/control.rs` | startup, reload, shutdown, systemd notification |
-| `src/access.rs` | access log lines, the files of a generation, and each core's buffered writer |
+| `src/runtime/control.rs` | startup, reload, discovery and ACME publishes, shutdown, systemd notification |
+| `src/access.rs` | access log line format, the files of a generation, and each core's buffered writer |
 | `src/log.rs` | logging to stderr with journald priority prefixes |
 
 ## Seams
@@ -83,12 +106,19 @@ only together with every module that uses it.
   Producers fill a request head with `set_line`, `push_field` and `set_host`.
 - `exchange`: `Exchange`, `ConnInfo`, `Arena`, `ASpan`, `Pending`, `ExchangePool`.
 - `body`: `Body` and `RequestBody`.
-- `config`: every schema type, `parse_config` and `parse_fragment`.
+- `config`: every schema type, `Format`, `parse_config(format, bytes)` and
+  `parse_fragment(format, bytes)`.
 - `plan`: `Plan`, `SitePlan`, `Block`, `Step`, `Action`, `Terminal`, the `*Plan` types,
-  `ListenerKey`, `CertSource`, `ServerParams` and the id types.
-- `pipeline::handle(core, snapshot, exchange, body) -> (Response, Option<access::Started>)`,
-  which every driver calls, and `access::record(core, snapshot, exchange, started, status,
+  `Target`, `OriginSpec` and `OriginKey`, `KeyPlan`, `RouteSlot`, `Observe`, `ListenerKey`,
+  `CertSource`, `ServerParams` and the id types.
+- `pipeline::handle(core, snapshot, exchange, body) -> (Response, Option<observe::Started>)`,
+  which every driver calls, and `observe::finish(core, snapshot, exchange, started, status,
   bytes)`, which it calls once the response is sent.
+- `upstream::{Upstreams, Origin, Members, Registry}`, `proxy::pool::{Pools, OriginLocal, Busy}`,
+  `proxy::dial(core, upstreams, id, timeout)`.
+- `runtime::{Generation, CoreSnapshot}` and `runtime::control::Live`: what each feature
+  publishes to the cores and keeps across generations.
+- `exchange::Exchange::{client, route, origin, refused, upstream}`.
 - `net::Socket`: `from_fd`, `connect`, `read`, `write_all_vectored`, `readable`,
   `hung_up_or_readable`, `sendfile`, `fd`.
 - `route::{run, run_error, Outcome, Effects}`, `files::serve`, `encode::{decide, wrap}`,
@@ -148,7 +178,8 @@ the disk.
 
 ## TLS certificates
 
-`tls::load` never fails as a whole. For a source whose pair is missing, unreadable or does not
+`tls::load` never fails as a whole. A site's certificate comes from files or from in-process
+ACME, whose client writes what it issues where the site's certificate source points. For a source whose pair is missing, unreadable or does not
 match its key, each name keeps its previous certificate from files. A name that never had one
 gets an in-memory self-signed certificate for that name, until a reload finds a usable pair.
 The NixOS module reloads the service when ACME renews a certificate, and reload re-reads every
@@ -157,7 +188,7 @@ pair.
 ## Configuration and Nix
 
 The NixOS module lives in `nix/module.nix`. Virtual hosts are Nix options. Routes are JSON
-values in the schema of `src/config.rs`, and the module does not restate that schema in Nix.
+values in the schema of `src/config/mod.rs`, and the module does not restate that schema in Nix.
 The module writes the config with `builtins.toJSON` and runs `upstreamer check` on it while
 the system builds, so a bad route fails the build with its JSON pointer and step name. A
 package can generate route fragments at build time, and a host names them with an `include`
