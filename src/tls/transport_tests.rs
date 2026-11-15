@@ -883,6 +883,68 @@ fn ticket_issued_on_one_core_resumes_on_another() {
     }
 }
 
+/// TLS 1.3: the ticket waits for the first response (sealed by either writer) instead of a
+/// segment of its own, and still resumes the next connection.
+#[test]
+fn session_ticket_leaves_with_the_first_response() {
+    use tokio::io::AsyncWriteExt;
+    let store = store();
+    let keys = Arc::new(TicketKeys::generate(3600));
+    for poll_writer in [false, true] {
+        let client = Arc::new(Client::with(&[], Some(suites::TLS13_AES_128_GCM_SHA256)));
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let config = server_config(store.clone(), keys.clone());
+            let client = client.clone();
+            let ((), seen_here) = run(
+                move |addr| {
+                    let mut tls = client.connect(addr, "a.test");
+                    tls.sock
+                        .set_read_timeout(Some(Duration::from_millis(200)))
+                        .unwrap();
+                    let early = tls.sock.peek(&mut [0u8; 1]).map_err(|e| e.kind());
+                    tls.sock
+                        .set_read_timeout(Some(Duration::from_secs(10)))
+                        .unwrap();
+                    tls.write_all(b"x").unwrap();
+                    let mut reply = [0u8; 2];
+                    tls.read_exact(&mut reply).unwrap();
+                    (early, reply, tls.conn.handshake_kind())
+                },
+                async move |sock| {
+                    let (mut io, _) = accepted(sock, config).await;
+                    read_exactly(&mut io, 1).await;
+                    if poll_writer {
+                        io.write_all(b"ok").await.unwrap();
+                        io.flush().await.unwrap();
+                    } else {
+                        io.write_all_vectored(&mut [IoSlice::new(b"ok")])
+                            .await
+                            .unwrap();
+                    }
+                    io.close().await;
+                },
+            );
+            seen.push(seen_here);
+        }
+        for (early, reply, _) in &seen {
+            assert!(
+                matches!(
+                    early,
+                    Err(io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+                ),
+                "nothing follows the handshake until the response: {early:?}"
+            );
+            assert_eq!(reply, b"ok");
+        }
+        assert_eq!(
+            seen.iter().map(|s| s.2).collect::<Vec<_>>(),
+            [Some(HandshakeKind::Full), Some(HandshakeKind::Resumed)],
+            "the ticket that came with the response resumes (poll writer: {poll_writer})"
+        );
+    }
+}
+
 #[test]
 fn client_key_update_rotates_both_directions() {
     // TLS 1.3 records of 5 plaintext bytes, a 5-byte KeyUpdate or 5 bytes of data: header 5 +

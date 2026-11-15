@@ -303,8 +303,9 @@ pub(crate) struct TlsStream {
 }
 
 impl TlsStream {
-    /// `rx` holds whatever arrived after the handshake's last record.
-    pub fn new(sock: Socket, session: Session, rx: BytesMut) -> TlsStream {
+    /// `rx` holds whatever arrived after the handshake's last record, `tx` the records the
+    /// handshake left to send, which go out with the first write.
+    pub fn new(sock: Socket, session: Session, rx: BytesMut, tx: BytesMut) -> TlsStream {
         let mut stream = TlsStream {
             sock,
             session,
@@ -312,11 +313,14 @@ impl TlsStream {
             plain: 0,
             trailer: 0,
             peer_closed: false,
-            tx: None,
+            tx: Some(tx),
             filling: None,
             closing: false,
         };
         stream.release_rx();
+        if stream.tx.as_ref().is_some_and(|tx| tx.is_empty()) {
+            put_ciphertext(stream.tx.take().expect("checked"));
+        }
         stream
     }
 
@@ -461,25 +465,28 @@ impl TlsStream {
         }
     }
 
-    /// Seals and writes all of `bufs`, a pool buffer of records per writev. Not cancel-safe:
-    /// records sealed and then dropped unsent leave the peer unable to read what follows.
+    /// Seals and writes all of `bufs` after the records already queued, a pool buffer of
+    /// records per writev. Not cancel-safe: records sealed and then dropped unsent leave the
+    /// peer unable to read what follows.
     async fn write_all_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<()> {
         if self.closing {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
-        std::future::poll_fn(|cx| self.poll_flush_tx(cx)).await?;
+        self.seal_filling()?;
         let total = total_len(bufs);
-        let mut tx = take_ciphertext();
+        let mut tx = self.tx.take().unwrap_or_else(take_ciphertext);
         let mut sealed = 0;
         let result = async {
-            while sealed < total {
+            loop {
                 sealed += self.session.seal(&mut tx, bufs, sealed).map_err(invalid)?;
                 self.sock
                     .write_all_vectored(&mut [IoSlice::new(&tx)])
                     .await?;
                 tx.clear();
+                if sealed == total {
+                    return Ok(());
+                }
             }
-            Ok(())
         }
         .await;
         put_ciphertext(tx);

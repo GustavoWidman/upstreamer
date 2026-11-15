@@ -624,29 +624,30 @@ pub(crate) async fn accept_within(
         sock.readable().await?;
         let mut rx = net::take_ciphertext();
         let mut tx = net::take_ciphertext();
-        let done = handshake(&mut sock, conn, &mut rx, &mut tx).await;
-        net::put_ciphertext(tx);
-        match done {
-            Ok(done) => Ok((done, rx)),
+        match handshake(&mut sock, conn, &mut rx, &mut tx).await {
+            Ok(done) => Ok((done, rx, tx)),
             Err(e) => {
                 net::put_ciphertext(rx);
+                net::put_ciphertext(tx);
                 Err(e)
             }
         }
     };
-    let ((conn, proto), rx) = tokio::time::timeout(timeout, handshake)
+    let ((conn, proto), rx, tx) = tokio::time::timeout(timeout, handshake)
         .await
         .map_err(|_| TlsError::Timeout)??;
     let (secrets, kernel) = conn.dangerous_into_kernel_connection()?;
     let session = record::Session::new(secrets, kernel)?;
     Ok((
-        Transport::Tls(Box::new(TlsStream::new(sock, session, rx))),
+        Transport::Tls(Box::new(TlsStream::new(sock, session, rx, tx))),
         proto,
     ))
 }
 
 /// Drives rustls's unbuffered server through the handshake. On a handshake error the alert
-/// rustls produced is sent before returning.
+/// rustls produced is sent before returning. Records rustls produces once a TLS 1.3 handshake
+/// is complete (its NewSessionTicket) stay in `tx`: the client does not wait for them, so they
+/// leave in front of the first response instead of in a write and a segment of their own.
 async fn handshake(
     sock: &mut Socket,
     mut conn: UnbufferedServerConnection,
@@ -689,6 +690,7 @@ async fn handshake(
         fed -= discard;
         match next {
             Next::Process => {}
+            Next::Transmit if !conn.is_handshaking() && conn.protocol_version() == TLS13 => {}
             Next::Transmit => {
                 sock.write_all_vectored(&mut [IoSlice::new(tx)]).await?;
                 tx.clear();
@@ -711,6 +713,10 @@ async fn handshake(
         }
     }
 }
+
+/// A TLS 1.2 server's last flight (its Finished) is what lets the client send, so only TLS 1.3
+/// defers what follows the handshake.
+const TLS13: Option<rustls::ProtocolVersion> = Some(rustls::ProtocolVersion::TLSv1_3);
 
 enum Next {
     Process,
