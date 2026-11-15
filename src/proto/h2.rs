@@ -112,7 +112,10 @@ pub(crate) async fn serve(core: Rc<Core>, io: Transport, info: ConnInfo) {
         match event {
             Event::Accepted(Some(Ok((req, respond)))) => {
                 let guard = Open::enter(&open);
-                tokio::task::spawn_local(stream(core.clone(), info, req, respond, guard));
+                // Boxed, the task's moves of the stream's state (spawning, completing) copy a
+                // pointer instead of the state.
+                let work = Box::pin(stream(core.clone(), info, req, respond, guard));
+                tokio::task::spawn_local(work);
             }
             Event::Accepted(Some(Err(e))) => {
                 debug!("core {}: h2 from {}: {e}", core.index, info.remote);
