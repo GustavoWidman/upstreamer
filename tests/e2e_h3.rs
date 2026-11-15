@@ -536,3 +536,16 @@ async fn drain_sends_goaway_and_finishes_open_requests() {
         .unwrap();
     assert!(closed.is_h3_no_error(), "closed with H3_NO_ERROR: {closed}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_head_with_too_many_fields_is_refused() {
+    let (_proxy, port) = h3_proxy(json!([{ "respond": { "body": "routed" } }]));
+    let mut h3 = H3::connect(port.addr).await;
+    let names: Vec<String> = (0..101).map(|i| format!("x-field-{i}")).collect();
+    let fields: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "1")).collect();
+    let many = h3.request("GET", "/", &fields, None).await.unwrap();
+    assert_eq!(many.status, 431, "more fields than limits.maxHeaderFields");
+
+    let fine = h3.get("/").await;
+    assert_eq!((fine.status, &fine.body[..]), (200, &b"routed"[..]));
+}
