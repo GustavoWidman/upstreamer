@@ -22,10 +22,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::signal::unix::{SignalKind, signal};
 
-/// How often session ticket keys rotate. A ticket stays decryptable for up to two periods
-/// (current and previous key).
+/// How often session ticket keys rotate. The previous key still decrypts for one more period
+/// and a ticket's lifetime is one period, so every ticket expires before its key is dropped.
 const TICKET_ROTATION: Duration = Duration::from_secs(12 * 3600);
-const TICKET_LIFETIME_SECS: u32 = 12 * 3600;
+const TICKET_LIFETIME_SECS: u32 = TICKET_ROTATION.as_secs() as u32;
 
 /// Produces the plan for a generation number: read, parse and compile the config.
 pub(crate) type LoadPlan<'a> =
