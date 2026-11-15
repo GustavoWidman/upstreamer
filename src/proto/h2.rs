@@ -3,6 +3,12 @@
 //! `!Send` is fine). Responses stream as DATA frames, honouring flow control; nothing is
 //! buffered whole.
 //!
+//! Writes: the `h2` codec flushes after every DATA frame over 256 bytes, which it hands to the
+//! writer by reference. It writes through [`Batched`], where a flush only queues; the driver
+//! flushes once the connection has nothing left to do, so the frames of every stream that
+//! answered since the last write leave in one write (and, over TLS, in records sealed back to
+//! back in one buffer).
+//!
 //! SETTINGS: initial stream window 1 MiB, connection window 4 MiB (1 MiB bodies in one RTT),
 //! max concurrent streams from the config, max header list 64 KiB. Extended CONNECT is not
 //! advertised, so browsers open WebSockets over HTTP/1.1, the only upgrade path.
@@ -29,12 +35,13 @@ use crate::runtime::Core;
 use ::h2::server::SendResponse;
 use ::h2::{Reason, RecvStream, SendStream};
 use bytes::Bytes;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::future::{Future, poll_fn};
-use std::io;
-use std::pin::pin;
+use std::io::{self, IoSlice};
+use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::Instant;
 
 /// SETTINGS_INITIAL_WINDOW_SIZE: a 1 MiB request body arrives without a WINDOW_UPDATE wait.
@@ -51,19 +58,24 @@ pub(crate) async fn serve(core: Rc<Core>, io: Transport, info: ConnInfo) {
         let server = &core.snapshot().plan.server;
         (server.header_timeout, server.keep_alive, server.max_streams)
     };
+    let io = Rc::new(RefCell::new(io));
     let handshake = ::h2::server::Builder::new()
         .initial_window_size(STREAM_WINDOW)
         .initial_connection_window_size(CONNECTION_WINDOW)
         .max_concurrent_streams(max_streams)
         .max_header_list_size(MAX_HEADER_LIST)
-        .handshake::<_, Bytes>(io);
-    let mut conn = match tokio::time::timeout(handshake_timeout, handshake).await {
-        Ok(Ok(conn)) => conn,
-        Ok(Err(e)) => {
+        .handshake::<_, Bytes>(Batched(io.clone()));
+    let mut conn = match tokio::time::timeout(handshake_timeout, flushing(&io, handshake)).await {
+        Ok(Ok(Ok(conn))) => conn,
+        Ok(Ok(Err(e))) => {
             debug!(
                 "core {}: h2 handshake from {}: {e}",
                 core.index, info.remote
             );
+            return;
+        }
+        Ok(Err(e)) => {
+            debug!("core {}: h2 write to {}: {e}", core.index, info.remote);
             return;
         }
         Err(_) => return,
@@ -89,8 +101,14 @@ pub(crate) async fn serve(core: Rc<Core>, io: Transport, info: ConnInfo) {
                 return Poll::Ready(Event::IdleCheck);
             }
             Poll::Pending
-        })
-        .await;
+        });
+        let event = match flushing(&io, event).await {
+            Ok(event) => event,
+            Err(e) => {
+                debug!("core {}: h2 write to {}: {e}", core.index, info.remote);
+                break;
+            }
+        };
         match event {
             Event::Accepted(Some(Ok((req, respond)))) => {
                 let guard = Open::enter(&open);
@@ -127,6 +145,61 @@ enum Event<T> {
     Accepted(Option<Result<T, ::h2::Error>>),
     Drain,
     IdleCheck,
+}
+
+/// Runs `work`, writing what the codec queued whenever `work` waits.
+async fn flushing<T>(io: &RefCell<Transport>, work: impl Future<Output = T>) -> io::Result<T> {
+    let mut work = pin!(work);
+    poll_fn(|cx| {
+        if let Poll::Ready(out) = work.as_mut().poll(cx) {
+            return Poll::Ready(Ok(out));
+        }
+        match Pin::new(&mut *io.borrow_mut()).poll_flush(cx) {
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            _ => Poll::Pending,
+        }
+    })
+    .await
+}
+
+/// The connection's transport as the `h2` codec sees it: shared with the driver, which owns
+/// the flushes (see the module docs). Borrowed only inside a poll, never across one.
+struct Batched(Rc<RefCell<Transport>>);
+
+impl AsyncRead for Batched {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut *self.0.borrow_mut()).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for Batched {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut *self.0.borrow_mut()).poll_write(cx, buf)
+    }
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut *self.0.borrow_mut()).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut *self.0.borrow_mut()).poll_shutdown(cx)
+    }
 }
 
 /// The streams a connection has in progress, and since when it has had none.

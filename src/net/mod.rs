@@ -293,7 +293,7 @@ pub(crate) struct TlsStream {
     trailer: usize,
     /// close_notify received: reads report the end of the stream.
     peer_closed: bool,
-    /// Sealed records not yet written, from the poll-based writer.
+    /// Sealed records not yet written, from the poll-based writer, which writes them on flush.
     tx: Option<BytesMut>,
     /// close_notify sealed.
     closing: bool,
@@ -481,8 +481,9 @@ impl TlsStream {
         result
     }
 
-    /// Accepts what one pool buffer of records holds and starts writing it; the rest of the
-    /// write finishes in a later write or flush.
+    /// Seals what fits behind the records already queued, writing nothing: a flush writes
+    /// them, so the frames of several writes leave in one writev. A full buffer is written
+    /// first.
     fn poll_write_plain(
         &mut self,
         cx: &mut Context<'_>,
@@ -491,15 +492,17 @@ impl TlsStream {
         if self.closing {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
-        ready!(self.poll_flush_tx(cx))?;
-        let mut tx = self.tx.take().unwrap_or_else(take_ciphertext);
-        let sealed = self.session.seal(&mut tx, bufs, 0);
-        self.tx = Some(tx);
-        let sealed = sealed.map_err(invalid)?;
-        if let Poll::Ready(Err(e)) = self.poll_flush_tx(cx) {
-            return Poll::Ready(Err(e));
+        let total = total_len(bufs);
+        loop {
+            let mut tx = self.tx.take().unwrap_or_else(take_ciphertext);
+            let sealed = self.session.seal(&mut tx, bufs, 0);
+            self.tx = Some(tx);
+            let sealed = sealed.map_err(invalid)?;
+            if sealed > 0 || total == 0 {
+                return Poll::Ready(Ok(sealed));
+            }
+            ready!(self.poll_flush_tx(cx))?;
         }
-        Poll::Ready(Ok(sealed))
     }
 
     fn poll_flush_tx(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

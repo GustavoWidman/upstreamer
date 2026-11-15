@@ -487,6 +487,47 @@ fn server_close_sends_close_notify() {
 }
 
 #[test]
+fn poll_writes_leave_on_the_flush() {
+    use tokio::io::AsyncWriteExt;
+    let config = server(&store());
+    let (written_tx, written) = std::sync::mpsc::channel();
+    let (checked_tx, checked) = std::sync::mpsc::channel();
+    let ((), (early, got)) = run(
+        move |addr| {
+            let mut tls = Client::new(&[b"h2"]).connect(addr, "a.test");
+            written.recv().unwrap();
+            tls.sock
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .unwrap();
+            let early = tls.read(&mut [0u8; 1]).map_err(|e| e.kind());
+            checked_tx.send(()).unwrap();
+            tls.sock
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut got = [0u8; 11];
+            tls.read_exact(&mut got).unwrap();
+            (early, got)
+        },
+        async move |sock| {
+            let (mut io, _) = accepted(sock, config).await;
+            io.write_all(b"first").await.unwrap();
+            io.write_all(b"second").await.unwrap();
+            written_tx.send(()).unwrap();
+            checked.recv().unwrap();
+            io.flush().await.unwrap();
+        },
+    );
+    assert!(
+        matches!(
+            early,
+            Err(io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+        ),
+        "nothing reaches the peer before the flush: {early:?}"
+    );
+    assert_eq!(&got, b"firstsecond");
+}
+
+#[test]
 fn poll_shutdown_sends_close_notify() {
     use tokio::io::AsyncWriteExt;
     let config = server(&store());
