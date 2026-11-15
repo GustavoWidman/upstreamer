@@ -1,0 +1,165 @@
+name: release
+
+# A push to main that brings a version with no release yet is checked, built for each
+# system, and pushed to the cache, where upstreamer-<system> pins the newest build, then
+# tagged and released at that commit. A push that releases nothing, such as a pull request
+# labeled no-release, builds nothing here; check.yml still checks it.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # A failed API request fails the run rather than passing for a missing release, and a
+  # draft counts as a release, as in release-tag.sh.
+  version:
+    name: Find a version to release
+    runs-on: ubuntu-24.04
+    outputs:
+      release: ${{ steps.find.outputs.release }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$(python3 .github/scripts/version.py current)"
+          releases=$(gh api --paginate 'repos/{owner}/{repo}/releases?per_page=100')
+          if jq -es --arg tag "$tag" 'any(.[][]; .tag_name == $tag)' <<< "$releases" > /dev/null; then
+            echo "$tag is already released; nothing to build"
+            printf 'release=false\n' >> "$GITHUB_OUTPUT"
+          else
+            echo "Releasing $tag"
+            printf 'release=true\n' >> "$GITHUB_OUTPUT"
+          fi
+
+  # A commit whose tree a finished check run already passed, such as a pull request merged
+  # by rebase or a branch fast-forwarded into main, reuses that check (every system and the
+  # test job included) instead of repeating it. Any other push, or a failed lookup, runs the
+  # full check.
+  checked:
+    name: Find a passing check of this tree
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run: ${{ steps.find.outputs.run }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if run=$(.github/scripts/checked-tree "$GITHUB_SHA"); then
+            echo "Reusing $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run"
+            printf 'run=%s\n' "$run" >> "$GITHUB_OUTPUT"
+          fi
+
+  validate:
+    needs: checked
+    uses: ./.github/workflows/check.yml
+    with:
+      skip-nix: ${{ needs.checked.outputs.run != '' }}
+
+  cache:
+    name: Cache ${{ matrix.system }}
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      # Deleting superseded dependency caches.
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: aarch64-darwin
+            runner: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - uses: nixbuild/nix-quick-install-action@v34
+        with:
+          nix_conf: |
+            substituters = https://cache.nixos.org/ https://cache.r3dlust.com
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= cache.r3dlust.com-1:Wdkf9mes2ued0P7C7CL3Jax1b4KPuJwQpM3h4G/Z+yI=
+      - name: Configure the niks3 cache
+        id: cache
+        uses: Mic92/niks3-action@v1
+        with:
+          server-url: https://cache.r3dlust.com
+          substituter: https://cache.r3dlust.com
+          # Only the finished package is published, in the step below.
+          skip-push: true
+      - name: Check upload authorization before building
+        env:
+          NIKS3_BIN: ${{ steps.cache.outputs.binary-dir }}/niks3
+          NIKS3_AUTH_TOKEN_SCRIPT: ${{ steps.cache.outputs.auth-token-script }}
+        run: |
+          set -euo pipefail
+          : "${NIKS3_AUTH_TOKEN_SCRIPT:?cache discovery gave no OIDC token command}"
+          "$NIKS3_BIN" pins list --server-url https://cache.r3dlust.com \
+            --auth-token-script "$NIKS3_AUTH_TOKEN_SCRIPT" --json > /dev/null
+      - name: Locate the Rust dependency build
+        id: deps
+        run: .github/scripts/deps-cache locate >> "$GITHUB_OUTPUT"
+      # Saved only here, on main; pull request checks restore it read-only. Each save
+      # deletes this system's older entries, so the cache holds one per system.
+      - name: Restore the Rust dependency build
+        id: deps-cache
+        uses: nix-community/cache-nix-action@v7.0.2
+        with:
+          primary-key: ${{ steps.deps.outputs.key }}
+          nix: false
+          paths: ${{ runner.temp }}/upstreamer-deps
+          purge: true
+          purge-prefixes: upstreamer-deps-${{ matrix.system }}-
+          purge-created: 0
+          purge-primary-key: never
+      - if: steps.deps-cache.outputs.hit-primary-key == 'true'
+        run: .github/scripts/deps-cache import "${{ steps.deps.outputs.path }}"
+      - run: nix build .#default --print-build-logs
+      - name: Export the Rust dependency build
+        if: steps.deps-cache.outputs.hit-primary-key != 'true'
+        run: .github/scripts/deps-cache export "${{ steps.deps.outputs.path }}"
+      - name: Publish and pin upstreamer
+        env:
+          NIKS3_BIN: ${{ steps.cache.outputs.binary-dir }}/niks3
+          NIKS3_AUTH_TOKEN_SCRIPT: ${{ steps.cache.outputs.auth-token-script }}
+          NIKS3_SERVER_URL: https://cache.r3dlust.com
+        run: .github/scripts/publish-cache "${{ matrix.system }}" "$(readlink result)"
+
+  release:
+    needs: cache
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Tag and release a new version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: bash .github/scripts/release-tag.sh

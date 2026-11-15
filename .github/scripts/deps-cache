@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Moves the Rust dependency build (crane's buildDepsOnly output and the vendored crate
+# sources it references) between the Nix store and $RUNNER_TEMP/upstreamer-deps, a local
+# binary cache that cache-nix-action keeps in the GitHub Actions cache. That is up to
+# 800 MB per system, against compiling every dependency again.
+#
+#   deps-cache locate        prints the store path and cache key, as step outputs
+#   deps-cache import <path> copies <path> from the restored cache into the store
+#   deps-cache export <path> writes <path> and its closure into the cache to be saved
+#
+# The key is the output path's hash, so an entry only ever restores the exact build the
+# job is about to need, and nothing is restored when the dependencies changed.
+set -euo pipefail
+
+cache="${RUNNER_TEMP:?missing runner temp directory}/upstreamer-deps"
+
+case "${1:-}" in
+  locate)
+    path=$(nix eval --raw .#default.cargoArtifacts.outPath)
+    system=$(nix eval --raw --impure --expr builtins.currentSystem)
+    hash=$(basename "$path")
+    printf 'path=%s\nkey=upstreamer-deps-%s-%s\n' "$path" "$system" "${hash%%-*}"
+    ;;
+  import)
+    # The cache is unsigned; it only ever holds what this repository's main builds saved.
+    nix copy --no-check-sigs --from "file://$cache" "${2:?missing store path}"
+    ;;
+  export)
+    nix copy --to "file://$cache?compression=zstd" "${2:?missing store path}"
+    du -sh "$cache"
+    ;;
+  *)
+    printf 'usage: %s locate | import <path> | export <path>\n' "$0" >&2
+    exit 64
+    ;;
+esac

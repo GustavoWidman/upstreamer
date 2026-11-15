@@ -1,0 +1,146 @@
+name: check
+
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_call:
+    inputs:
+      skip-nix:
+        description: Skip the nix and test jobs, which a passing check of this tree already ran
+        type: boolean
+        default: false
+
+# Supersede only PR runs; a push or release run must finish its checks.
+concurrency:
+  group: check-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  commits:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Check the version and conventional commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # A force push can drop the previous head from the advertised refs.
+          if [[ -n "$BASE_SHA" && ! "$BASE_SHA" =~ ^0+$ ]] && ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "$BASE_SHA" || BASE_SHA=
+          fi
+          python3 .github/scripts/version.py commits --base "$BASE_SHA" --head "$HEAD_SHA"
+
+  # Every system the fleet runs. x86_64-linux runs the whole `nix flake check`, NixOS VM
+  # tests included, under KVM. aarch64-linux has no KVM, so it builds every check that does
+  # not need it. aarch64-darwin, where upstreamer is developed, builds its own checks.
+  nix:
+    name: nix ${{ matrix.system }}
+    if: ${{ !inputs.skip-nix }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+            vm: true
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+            vm: false
+          - system: aarch64-darwin
+            runner: macos-15
+            vm: false
+    steps:
+      - uses: actions/checkout@v5
+      - name: Enable KVM
+        if: matrix.vm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: nixbuild/nix-quick-install-action@v34
+        with:
+          nix_conf: |
+            substituters = https://cache.nixos.org/ https://cache.r3dlust.com
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= cache.r3dlust.com-1:Wdkf9mes2ued0P7C7CL3Jax1b4KPuJwQpM3h4G/Z+yI=
+            system-features = nixos-test benchmark big-parallel ${{ matrix.vm && 'kvm' || '' }}
+      # The Rust dependency build that release.yml saved on main, when it matches exactly.
+      - name: Locate the Rust dependency build
+        id: deps
+        run: .github/scripts/deps-cache locate >> "$GITHUB_OUTPUT"
+      - name: Restore the Rust dependency build
+        id: deps-cache
+        uses: nix-community/cache-nix-action@v7.0.2
+        with:
+          primary-key: ${{ steps.deps.outputs.key }}
+          nix: false
+          paths: ${{ runner.temp }}/upstreamer-deps
+          save: false
+      - if: steps.deps-cache.outputs.hit-primary-key == 'true'
+        run: .github/scripts/deps-cache import "${{ steps.deps.outputs.path }}"
+      - if: matrix.vm || runner.os != 'Linux'
+        run: nix flake check --print-build-logs
+      - name: Build every check that does not need KVM
+        if: ${{ !matrix.vm && runner.os == 'Linux' }}
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          # A NixOS test hides its derivation's attributes behind config.rawTestDerivation.
+          names=$(nix eval --json ".#checks.$SYSTEM" --apply '
+            checks: builtins.filter (name:
+              let check = builtins.getAttr name checks;
+              in !builtins.elem "kvm" ((check.config.rawTestDerivation or check).requiredSystemFeatures or [ ]))
+              (builtins.attrNames checks)' |
+            jq -r --arg system "$SYSTEM" '.[] | ".#checks.\($system).\(.)"')
+          mapfile -t checks <<< "$names"
+          nix build --print-build-logs "${checks[@]}"
+      # Records the tree that passed, so the release run of the same tree on main can reuse
+      # this check (see .github/scripts/checked-tree): the pushed commit's tree, or on a pull
+      # request the merge of the head into the base. The run must succeed as a whole, every
+      # system and the test job included, before a release reuses it.
+      - name: Record the checked tree
+        id: tree
+        if: matrix.vm && github.workflow == 'check'
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          printf '%s\n' "$tree" > "$RUNNER_TEMP/nix-check-tree"
+          printf 'tree=%s\n' "$tree" >> "$GITHUB_OUTPUT"
+      - if: matrix.vm && github.workflow == 'check'
+        uses: actions/upload-artifact@v7
+        with:
+          name: nix-check-${{ steps.tree.outputs.tree }}
+          path: ${{ runner.temp }}/nix-check-tree
+          retention-days: 30
+
+  # The sandboxed checks.upstreamer-test has no Caddy, h2load or HTTP/3 curl, so the tests
+  # that drive them skip there. Here they run, the differential suite against Caddy
+  # included, with the tools from the flake's own nixpkgs.
+  test:
+    name: cargo test x86_64-linux
+    if: ${{ !inputs.skip-nix }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: nixbuild/nix-quick-install-action@v34
+        with:
+          nix_conf: |
+            substituters = https://cache.nixos.org/ https://cache.r3dlust.com
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= cache.r3dlust.com-1:Wdkf9mes2ued0P7C7CL3Jax1b4KPuJwQpM3h4G/Z+yI=
+      - name: Run every test in the dev shell, with Caddy, h2load and an HTTP/3 curl
+        run: |
+          nix shell --inputs-from . nixpkgs#caddy nixpkgs#nghttp2 nixpkgs#curl --command \
+            nix develop --command bash -euo pipefail -c '
+              # A missing tool makes its tests skip rather than fail.
+              caddy version
+              h2load --version
+              curl --version | grep -qw HTTP3 || { echo "::error::curl is built without HTTP/3"; exit 1; }
+              cargo test --locked
+            '

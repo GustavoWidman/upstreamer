@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Prints the id of a successful push or pull request run of check.yml that checked exactly
+# the tree of the given commit, and fails when there is none. The same tree is the
+# same flake, lock file included, so it evaluates to the same derivations and that run's
+# `nix flake check` holds for the commit too.
+#
+# check.yml records each tree it validated as an artifact named nix-check-<tree>: the pushed
+# commit's, or a pull request's merge of its head into the base. Only runs from branches of
+# this repository count: a fork's pull request runs the fork's workflow file, which could
+# upload the artifact without checking anything.
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  printf 'usage: %s <commit>\n' "$0" >&2
+  exit 64
+fi
+
+: "${GITHUB_REPOSITORY:?missing repository}"
+
+tree=$(git rev-parse --verify "$1^{tree}")
+runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=nix-check-$tree&per_page=100" \
+  --jq '.artifacts[] | select(.expired | not) | .workflow_run.id')
+
+for run in $runs; do
+  if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" --jq '
+    select(
+      .path == ".github/workflows/check.yml"
+      and (.event == "push" or .event == "pull_request")
+      and .conclusion == "success"
+      and .head_repository.full_name == .repository.full_name
+    ) | .id
+  ' | grep -q .; then
+    printf '%s\n' "$run"
+    exit 0
+  fi
+done
+
+printf 'no passing check of tree %s\n' "$tree" >&2
+exit 1
