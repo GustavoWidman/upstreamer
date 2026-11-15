@@ -154,11 +154,14 @@ async fn idle(
     let readable = io.readable();
     tokio::pin!(readable);
     poll_fn(|cx| {
-        if core.draining.get() {
-            return Poll::Ready(Err(Close::Shutdown));
-        }
+        // A request that has arrived is answered even while draining, with `Connection:
+        // close`: its client sent it before it could know, and it may be the first request of
+        // a connection, which clients do not retry.
         if let Poll::Ready(ready) = readable.as_mut().poll(cx) {
             return Poll::Ready(ready.map_err(Close::Io));
+        }
+        if core.draining.get() {
+            return Poll::Ready(Err(Close::Shutdown));
         }
         // Polled once per connection: the drain signal keeps this task's waker from then on,
         // and each later wait reads the flag above when it is woken. Polling it per wait
