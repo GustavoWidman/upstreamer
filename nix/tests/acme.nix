@@ -79,7 +79,12 @@ in
           environmentFile = legoEnv dnsHook;
         };
         security.acme.certs."good.example.test".validMinDays = 9999;
-        security.acme.certs."bad.example.test".environmentFile = legoEnv "${pkgs.coreutils}/bin/false";
+        # Certificates of one ACME account wait for the account's first certificate to be
+        # issued, so the failing one gets an account of its own.
+        security.acme.certs."bad.example.test" = {
+          environmentFile = legoEnv "${pkgs.coreutils}/bin/false";
+          email = "bad@example.test";
+        };
 
         services.upstreamer = {
           enable = true;
