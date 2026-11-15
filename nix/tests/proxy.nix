@@ -109,15 +109,17 @@ in
         time.sleep(2)
         client.succeed("touch /tmp/stop")
         client.wait_for_file("/tmp/load.rc")
-        log = client.succeed("cat /tmp/load.log")
-        print(log)
-        assert client.succeed("cat /tmp/load.rc").strip() == "0", log
+        load_log = client.succeed("cat /tmp/load.log")
+        print(load_log)
+        assert client.succeed("cat /tmp/load.rc").strip() == "0", load_log
         assert unit("MainPID") == pid, "reloaded, not restarted"
 
     with subtest("hardening: an unprivileged process binds :80 and :443 with one capability"):
         print(server.succeed("systemd-analyze security --no-pager upstreamer.service"))
         overall = server.succeed("systemd-analyze security --no-pager upstreamer.service | tail -n1")
-        score, rating = re.search(r"([0-9.]+) (\w+)", overall.split(":", 1)[1]).groups()
+        exposure = re.search(r"([0-9.]+) (\w+)", overall.split(":", 1)[1])
+        assert exposure, overall
+        score, rating = exposure.groups()
         print(f"systemd-analyze security exposure: {score} {rating}")
         assert rating in ("SAFE", "OK"), overall
         pid = unit("MainPID")

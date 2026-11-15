@@ -182,9 +182,9 @@ in
         time.sleep(1)
         server.succeed("touch /tmp/stop")
         server.wait_for_file("/tmp/keepalive.rc")
-        log = server.succeed("cat /tmp/keepalive.log")
-        print(log)
-        assert server.succeed("cat /tmp/keepalive.rc").strip() == "0", log
+        keepalive_log = server.succeed("cat /tmp/keepalive.log")
+        print(keepalive_log)
+        assert server.succeed("cat /tmp/keepalive.rc").strip() == "0", keepalive_log
         assert unit("MainPID") == first_pid, "reloaded, not restarted"
 
     with subtest("a host whose issuance fails keeps the others serving"):
