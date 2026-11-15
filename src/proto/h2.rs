@@ -248,8 +248,11 @@ async fn stream(
         }
         Ok(()) => {
             let body = request_body(&parts.headers, recv);
-            let handled = pipeline::handle(&core, &snap, &mut ex, body);
-            match or_reset(handled, |cx| respond.poll_reset(cx)).await {
+            let handled = {
+                let handled = pin!(pipeline::handle(&core, &snap, &mut ex, body));
+                or_reset(handled, |cx| respond.poll_reset(cx)).await
+            };
+            match handled {
                 Some(resp) => resp,
                 None => {
                     core.exchanges.put(ex);
@@ -340,12 +343,11 @@ fn head_only_length(local: bool, head: &ResponseHead, body: &Body) -> Option<u64
 }
 
 /// Runs `work` until it finishes, or drops it when the client resets the stream or the
-/// connection fails (`None`).
+/// connection fails (`None`). The caller pins `work`, so the stream's future holds it once.
 async fn or_reset<T>(
-    work: impl Future<Output = T>,
+    mut work: Pin<&mut impl Future<Output = T>>,
     mut reset: impl FnMut(&mut Context<'_>) -> Poll<Result<Reason, ::h2::Error>>,
 ) -> Option<T> {
-    let mut work = pin!(work);
     poll_fn(|cx| {
         if let Poll::Ready(out) = work.as_mut().poll(cx) {
             return Poll::Ready(Some(out));
@@ -361,7 +363,7 @@ async fn or_reset<T>(
 /// bytes handed to the stream.
 async fn send_body(core: &Core, mut body: Body, mut send: SendStream<Bytes>, sent: &mut u64) {
     loop {
-        let next = or_reset(body.next_chunk(core), |cx| send.poll_reset(cx)).await;
+        let next = or_reset(pin!(body.next_chunk(core)), |cx| send.poll_reset(cx)).await;
         let chunk = match next {
             None => return,
             Some(Ok(Some(chunk))) => chunk,
