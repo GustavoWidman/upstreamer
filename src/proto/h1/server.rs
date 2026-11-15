@@ -370,7 +370,7 @@ async fn write_response(
     ex.recycle(head);
 
     let out = &ex.out[..];
-    let sent = match body {
+    let wrote = match body {
         body if head_only => {
             if let Body::Upstream(upstream) = body {
                 upstream.finish(core);
@@ -405,7 +405,7 @@ async fn write_response(
             send_stream(core, io, out, &mut stream, version != Version::Http10, sent).await
         }
     };
-    sent.map_err(Close::Io)?;
+    wrote.map_err(Close::Io)?;
 
     if !keep {
         // A client that may still be sending needs its bytes read, or the reset that

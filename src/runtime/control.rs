@@ -157,7 +157,6 @@ async fn reload(
 
 /// What a generation was built with although part of it failed: certificates kept from the
 /// previous generation or made up, and access logs that could not be opened.
-#[derive(Default)]
 pub(crate) struct Problems {
     pub certs: Vec<CertProblem>,
     pub logs: Vec<OpenFailure>,
