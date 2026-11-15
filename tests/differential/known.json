@@ -117,26 +117,6 @@
   },
   {
     "kind": "finding",
-    "about": "On the portfolio, a 405 keeps the Content-Type that steps before the error set (`text/html` from the `*.html` step) on the plain status text of the catch-all error route; Caddy drops deferred header operations when a handler errors and sends `text/plain`.",
-    "differences": [
-      {
-        "site": "example.org",
-        "probe": "POST",
-        "field": "header content-type",
-        "caddy": "text/plain; charset=utf-8",
-        "upstreamer": "text/html; charset=utf-8"
-      },
-      {
-        "site": "example.org",
-        "probe": "OPTIONS",
-        "field": "header content-type",
-        "caddy": "text/plain; charset=utf-8",
-        "upstreamer": "text/html; charset=utf-8"
-      }
-    ]
-  },
-  {
-    "kind": "finding",
     "about": "A request-target whose `..` segments climb above the root gets a bare 400 without site headers; Caddy cleans the path and answers as for the cleaned path (heimdall's index.html, the portfolio's 404 page).",
     "differences": [
       {
@@ -1840,7 +1820,7 @@
   },
   {
     "kind": "finding",
-    "about": "Errors raised by the file server (404, 405) or an `error` step carry the site headers and the Cache-Control set before them; Caddy's bare error responses carry none of its `header` fields. upstreamer's answer is the intended one: site headers apply to every response.",
+    "about": "Errors raised by the file server (404, 405) or an `error` step carry the site headers; Caddy's bare error responses carry none of its `header` fields. upstreamer's answer is the intended one: site headers apply to every response.",
     "differences": [
       {
         "site": "app.example.com",
@@ -1880,13 +1860,6 @@
       {
         "site": "app.example.com",
         "probe": "missing file under _app",
-        "field": "header cache-control",
-        "caddy": "(absent)",
-        "upstreamer": "no-cache"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "missing file under _app",
         "field": "header cross-origin-opener-policy",
         "caddy": "(absent)",
         "upstreamer": "same-origin"
@@ -1922,13 +1895,6 @@
       {
         "site": "app.example.com",
         "probe": "etag sidecar",
-        "field": "header cache-control",
-        "caddy": "(absent)",
-        "upstreamer": "no-cache"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "etag sidecar",
         "field": "header cross-origin-opener-policy",
         "caddy": "(absent)",
         "upstreamer": "same-origin"
@@ -1964,13 +1930,6 @@
       {
         "site": "app.example.com",
         "probe": "brotli sidecar",
-        "field": "header cache-control",
-        "caddy": "(absent)",
-        "upstreamer": "no-cache"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "brotli sidecar",
         "field": "header cross-origin-opener-policy",
         "caddy": "(absent)",
         "upstreamer": "same-origin"
@@ -2002,13 +1961,6 @@
         "field": "header x-frame-options",
         "caddy": "(absent)",
         "upstreamer": "DENY"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "gzip sidecar",
-        "field": "header cache-control",
-        "caddy": "(absent)",
-        "upstreamer": "no-cache"
       },
       {
         "site": "app.example.com",
@@ -2048,13 +2000,6 @@
       {
         "site": "app.example.com",
         "probe": "POST to the file server",
-        "field": "header cache-control",
-        "caddy": "(absent)",
-        "upstreamer": "no-cache"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "POST to the file server",
         "field": "header cross-origin-opener-policy",
         "caddy": "(absent)",
         "upstreamer": "same-origin"
@@ -2086,13 +2031,6 @@
         "field": "header x-frame-options",
         "caddy": "(absent)",
         "upstreamer": "DENY"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "DELETE to the file server",
-        "field": "header cache-control",
-        "caddy": "(absent)",
-        "upstreamer": "no-cache"
       },
       {
         "site": "app.example.com",
@@ -2132,13 +2070,6 @@
       {
         "site": "app.example.com",
         "probe": "OPTIONS to the file server",
-        "field": "header cache-control",
-        "caddy": "(absent)",
-        "upstreamer": "no-cache"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "OPTIONS to the file server",
         "field": "header cross-origin-opener-policy",
         "caddy": "(absent)",
         "upstreamer": "same-origin"
@@ -2170,6 +2101,33 @@
         "field": "header x-frame-options",
         "caddy": "(absent)",
         "upstreamer": "DENY"
+      }
+    ]
+  },
+  {
+    "kind": "finding",
+    "about": "An error answer drops every header operation of the main route's steps. Caddy drops only its deferred ones (a `header` block that deletes a field, or `defer`) and keeps immediate ones, so its heimdall 404 for a missing hashed asset says `public, max-age=31536000, immutable` and its portfolio 405 keeps the page's Vary. upstreamer's answer is the intended one: a cache must not keep a 404 for a year, and a 405 does not vary on what the page did.",
+    "differences": [
+      {
+        "site": "app.example.com",
+        "probe": "missing hashed asset",
+        "field": "header cache-control",
+        "caddy": "public, max-age=31536000, immutable",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "OPTIONS",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "POST",
+        "field": "header vary",
+        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
+        "upstreamer": "(absent)"
       }
     ]
   },
@@ -2861,20 +2819,6 @@
         "field": "header vary",
         "caddy": "accept-encoding, accept-language, cookie",
         "upstreamer": "accept-language, cookie"
-      },
-      {
-        "site": "example.org",
-        "probe": "POST",
-        "field": "header vary",
-        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
-        "upstreamer": "accept, accept-language, cookie, user-agent"
-      },
-      {
-        "site": "example.org",
-        "probe": "OPTIONS",
-        "field": "header vary",
-        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
-        "upstreamer": "accept, accept-language, cookie, user-agent"
       },
       {
         "site": "www.example.org",

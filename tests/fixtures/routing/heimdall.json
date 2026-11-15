@@ -76,12 +76,7 @@
       "name": "missing hashed asset stays a 404",
       "request": "GET https://app.example.com/_app/immutable/gone.js",
       "outcome": "files @out@",
-      "ops": [
-        [
-          "Cache-Control",
-          "public, max-age=31536000, immutable"
-        ]
-      ],
+      "ops": [],
       "fail": 404,
       "then": "bare"
     },
@@ -225,16 +220,7 @@
       "name": "ETag sidecar",
       "request": "GET https://app.example.com/index.html.etag",
       "outcome": "error 404",
-      "ops": [
-        [
-          "Cache-Control",
-          "no-cache"
-        ],
-        [
-          "Last-Modified",
-          null
-        ]
-      ],
+      "ops": [],
       "then": "bare"
     },
     {

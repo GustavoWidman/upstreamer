@@ -342,18 +342,6 @@
           "private, no-cache"
         ],
         [
-          "Vary",
-          "Cookie, Accept-Language"
-        ],
-        [
-          "Vary",
-          "Cookie, Accept-Language, User-Agent, Accept"
-        ],
-        [
-          "Cache-Control",
-          "private, no-cache"
-        ],
-        [
           "Content-Type",
           "text/html; charset=utf-8"
         ],
@@ -376,18 +364,6 @@
           "private, no-cache"
         ],
         [
-          "Vary",
-          "Cookie, Accept-Language"
-        ],
-        [
-          "Vary",
-          "Cookie, Accept-Language, User-Agent, Accept"
-        ],
-        [
-          "Cache-Control",
-          "private, no-cache"
-        ],
-        [
           "Content-Type",
           "text/html; charset=utf-8"
         ],
@@ -405,14 +381,6 @@
       "outcome": "files @out@/site/e0/main/en",
       "path": "/404.html",
       "ops": [
-        [
-          "Cache-Control",
-          "private, no-cache"
-        ],
-        [
-          "Vary",
-          "Cookie, Accept-Language"
-        ],
         [
           "Cache-Control",
           "private, no-cache"
@@ -500,22 +468,6 @@
       "request": "GET https://example.org/",
       "outcome": "files @out@/site/e0/main/en",
       "ops": [
-        [
-          "Cache-Control",
-          "private, no-cache"
-        ],
-        [
-          "Vary",
-          "Cookie, Accept-Language"
-        ],
-        [
-          "Vary",
-          "Cookie, Accept-Language, User-Agent, Accept"
-        ],
-        [
-          "Content-Type",
-          "text/html; charset=utf-8"
-        ],
         [
           "Cache-Control",
           "no-store"
@@ -1029,10 +981,6 @@
       "ops": [
         [
           "Cache-Control",
-          "public, max-age=31536000, immutable"
-        ],
-        [
-          "Cache-Control",
           "private, no-cache"
         ],
         [
@@ -1380,18 +1328,6 @@
       "outcome": "files @out@/site/e0/blog/en",
       "path": "/404.html",
       "ops": [
-        [
-          "Cache-Control",
-          "private, no-cache"
-        ],
-        [
-          "Vary",
-          "Cookie, Accept-Language"
-        ],
-        [
-          "Vary",
-          "Cookie, Accept-Language, User-Agent, Accept"
-        ],
         [
           "Cache-Control",
           "private, no-cache"

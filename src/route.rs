@@ -56,8 +56,10 @@ pub(crate) fn run<'p>(
     }
 }
 
-/// Runs the first error route whose statuses include `ex.error`'s status. Pending header ops
-/// and vars from the main route are kept (the error route's ops apply after them). `None`
+/// Runs the first error route whose statuses include `ex.error`'s status. The main route's
+/// pending header ops are dropped, as Caddy drops its deferred header operations when a handler
+/// fails: they describe the answer the main route meant to give (a 405 must not keep the
+/// `text/html` a `*.html` step set). Its vars are kept for the error route to read. `None`
 /// when no error route matches, or the one that does reaches its end without answering: the
 /// pipeline then answers with a bare status response.
 pub(crate) fn run_error<'p>(
@@ -67,6 +69,7 @@ pub(crate) fn run_error<'p>(
     fx: &mut Effects<'_>,
 ) -> Option<Outcome<'p>> {
     let status = ex.error?.status;
+    ex.pending.ops.clear();
     let route = site
         .errors
         .iter()
