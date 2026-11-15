@@ -164,6 +164,12 @@ in
     acme.wait_for_open_port(443)
     acme.wait_for_open_port(53)
 
+    # lego saves an account key before it reaches the ACME server and, finding that key on its
+    # next run, looks the account up instead of registering it; the boot-time attempt that never
+    # reached pebble leaves such keys behind.
+    server.succeed("systemctl stop acme-order-renew-good.example.test.service acme-order-renew-bad.example.test.service")
+    server.succeed("rm -rf /var/lib/acme/.lego/accounts/*")
+
     with subtest("issuance: the proxy serves the issued chain after the renewal hook reloads it"):
         server.succeed("systemctl restart acme-order-renew-good.example.test.service")
         issued = on_disk("good.example.test")
