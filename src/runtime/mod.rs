@@ -625,10 +625,14 @@ async fn connection(core: Rc<Core>, sock: Socket, info: ConnInfo, _guard: ConnGu
     match info.scheme {
         Scheme::Http => crate::proto::h1::server::serve(core, Transport::Plain(sock), info).await,
         Scheme::Https => {
-            let Some(config) = core.snapshot().tls.clone() else {
-                return;
+            let (config, timeout) = {
+                let snap = core.snapshot();
+                let Some(config) = snap.tls.clone() else {
+                    return;
+                };
+                (config, snap.plan.server.header_timeout)
             };
-            match tls::accept(sock, config).await {
+            match tls::accept_within(sock, config, timeout).await {
                 Ok((io, Proto::H2)) => {
                     let info = ConnInfo {
                         proto: Proto::H2,

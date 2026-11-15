@@ -8,7 +8,7 @@
 //!                                                                   ▼ to every core as CoreSnapshot
 //!  per core (one OS thread, one current-thread tokio runtime, nothing shared but read-only Arcs):
 //!
-//!   net::listen (SO_REUSEPORT socket per core) ─▶ tls::accept ─▶ proto::{h1,h2,h3} driver
+//!   net::listen (SO_REUSEPORT socket per core) ─▶ tls::accept_within ─▶ proto::{h1,h2,h3} driver
 //!        driver builds an Exchange (msg::RequestHead + per-request scratch) and calls
 //!        pipeline::handle ─▶ route::run (pure decision over the plan) ─▶ Outcome
 //!                         ─▶ proxy::forward | files::serve | respond | redirect | error

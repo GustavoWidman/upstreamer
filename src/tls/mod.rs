@@ -585,17 +585,6 @@ impl From<std::io::Error> for TlsError {
     }
 }
 
-/// The plan's default header timeout.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Server handshake on an accepted socket within [`HANDSHAKE_TIMEOUT`].
-pub(crate) async fn accept(
-    sock: Socket,
-    config: Arc<rustls::ServerConfig>,
-) -> Result<(Transport, Proto), TlsError> {
-    accept_within(sock, config, HANDSHAKE_TIMEOUT).await
-}
-
 /// Server handshake on an accepted socket. Returns a userspace `Transport::Tls` and the
 /// protocol ALPN chose (h2, else HTTP/1.1); offload happens later, see
 /// [`ktls::offload_point`]. A client that has not finished within `timeout` is dropped, which

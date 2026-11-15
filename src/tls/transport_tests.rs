@@ -106,7 +106,9 @@ fn run<C: Send + 'static, R>(
 }
 
 async fn accepted(sock: Socket, config: Arc<rustls::ServerConfig>) -> (Transport, Proto) {
-    accept(sock, config).await.expect("handshake")
+    accept_within(sock, config, Duration::from_secs(10))
+        .await
+        .expect("handshake")
 }
 
 /// Reads until `want` bytes arrived or the stream ended.
@@ -178,7 +180,11 @@ fn unknown_name_gets_an_alert_and_a_handshake_error() {
             let mut stream = StreamOwned::new(conn, TcpStream::connect(addr).unwrap());
             stream.write_all(b"x").unwrap_err()
         },
-        async |sock| accept(sock, config).await.err(),
+        async |sock| {
+            accept_within(sock, config, Duration::from_secs(10))
+                .await
+                .err()
+        },
     );
     assert!(matches!(served, Some(TlsError::Handshake(_))), "{served:?}");
     let alert = client_err.into_inner().unwrap();
