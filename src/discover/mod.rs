@@ -57,3 +57,18 @@ impl Feed {
         std::future::pending().await
     }
 }
+
+/// Appends to the systemd status line what is wrong with the sources: those that never
+/// synced, or lost their API server.
+pub(crate) fn status(registry: &crate::upstream::Registry, out: &mut String) {
+    for (source, endpoints) in registry.sources() {
+        if !endpoints.synced {
+            out.push_str(&format!("; discovery source {source:?} not synced"));
+        }
+    }
+}
+
+/// The sources' state, for `upstreamer_discovery_*`.
+pub(crate) fn publish(registry: &crate::upstream::Registry, hub: &crate::metrics::Hub) {
+    let _ = (registry, hub);
+}

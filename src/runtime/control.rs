@@ -150,6 +150,7 @@ pub(crate) fn serve(
                         log_bind_failures(&publish(&workers, next.clone()).await);
                         current = next;
                     }
+                    crate::discover::publish(&live.registry, &live.hub);
                     notifier.notify(&format!("STATUS={}", status_line(&current, &live)));
                 }
                 event = live.acme.recv() => match event {
@@ -190,6 +191,7 @@ async fn reload(
             }
             *current = next;
             live.adopted(current);
+            crate::discover::publish(&live.registry, &live.hub);
             {
                 let mut control = live.hub.control();
                 control.generation = generation;
@@ -316,14 +318,10 @@ fn reload_certificates(current: &Generation) -> Option<Generation> {
     })
 }
 
-/// `serving generation N`, naming the discovery sources that never synced or lost their API.
+/// `serving generation N`, and what is wrong with the discovery sources.
 fn status_line(current: &Generation, live: &Live) -> String {
     let mut status = format!("serving generation {}", current.plan.generation);
-    for (source, endpoints) in live.registry.sources() {
-        if !endpoints.synced {
-            status.push_str(&format!("; discovery source {source:?} not synced"));
-        }
-    }
+    crate::discover::status(&live.registry, &mut status);
     status
 }
 
