@@ -1,122 +1,6 @@
 [
   {
     "kind": "finding",
-    "about": "An uncompressed answer that the encode step would compress for another client (a long, compressible body) has no `Vary: Accept-Encoding`; Caddy's encode adds it. A shared cache may keep the identity answer for every client, and the portfolio's `_astro` assets are `public, max-age=31536000, immutable` (RFC 9110 §12.5.5).",
-    "differences": [
-      {
-        "site": "example.org",
-        "probe": "long page",
-        "field": "header vary",
-        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
-        "upstreamer": "accept, accept-language, cookie, user-agent"
-      },
-      {
-        "site": "example.org",
-        "probe": "long page gzip refused",
-        "field": "header vary",
-        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
-        "upstreamer": "accept, accept-language, cookie, user-agent"
-      },
-      {
-        "site": "example.org",
-        "probe": "long page HEAD gzip",
-        "field": "header vary",
-        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
-        "upstreamer": "accept, accept-language, cookie, user-agent"
-      },
-      {
-        "site": "example.org",
-        "probe": "long page range",
-        "field": "header vary",
-        "caddy": "accept, accept-encoding, accept-language, cookie, user-agent",
-        "upstreamer": "accept, accept-language, cookie, user-agent"
-      },
-      {
-        "site": "example.org",
-        "probe": "large hashed asset",
-        "field": "header vary",
-        "caddy": "accept-encoding",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "example.org",
-        "probe": "large hashed asset HEAD gzip",
-        "field": "header vary",
-        "caddy": "accept-encoding",
-        "upstreamer": "(absent)"
-      }
-    ]
-  },
-  {
-    "kind": "finding",
-    "about": "HEAD of a resource that GET compresses answers as the identity representation (no Content-Encoding, the strong ETag, Accept-Ranges); Caddy's HEAD shows the fields its GET sends (RFC 9110 §9.3.2).",
-    "differences": [
-      {
-        "site": "example.org",
-        "probe": "long page HEAD gzip",
-        "field": "header accept-ranges",
-        "caddy": "(absent)",
-        "upstreamer": "bytes"
-      },
-      {
-        "site": "example.org",
-        "probe": "long page HEAD gzip",
-        "field": "header content-encoding",
-        "caddy": "gzip",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "example.org",
-        "probe": "long page HEAD gzip",
-        "field": "header etag",
-        "caddy": "(server default etag)",
-        "upstreamer": "\"long-index-html-9e107d9d\""
-      },
-      {
-        "site": "example.org",
-        "probe": "large hashed asset HEAD gzip",
-        "field": "header accept-ranges",
-        "caddy": "(absent)",
-        "upstreamer": "bytes"
-      },
-      {
-        "site": "example.org",
-        "probe": "large hashed asset HEAD gzip",
-        "field": "header content-encoding",
-        "caddy": "gzip",
-        "upstreamer": "(absent)"
-      }
-    ]
-  },
-  {
-    "kind": "finding",
-    "about": "A dynamically compressed answer carries the sidecar ETag made weak (`W/\"...\"`); Caddy keeps it strong with a `-gzip` or `-zstd` suffix. Both are valid, and If-None-Match matches either.",
-    "differences": [
-      {
-        "site": "example.org",
-        "probe": "long page gzip",
-        "field": "header etag",
-        "caddy": "(server default etag)",
-        "upstreamer": "W/\"long-index-html-9e107d9d\""
-      },
-      {
-        "site": "example.org",
-        "probe": "long page zstd",
-        "field": "header etag",
-        "caddy": "(server default etag)",
-        "upstreamer": "W/\"long-index-html-9e107d9d\""
-      },
-      {
-        "site": "example.org",
-        "probe": "long page zstd and gzip",
-        "field": "header etag",
-        "caddy": "(server default etag)",
-        "upstreamer": "W/\"long-index-html-9e107d9d\""
-      }
-    ]
-  },
-  {
-    "kind": "finding",
     "about": "A request-target whose `..` segments climb above the root gets a bare 400 without site headers; Caddy cleans the path and answers as for the cleaned path (heimdall's index.html, the portfolio's 404 page).",
     "differences": [
       {
@@ -2378,7 +2262,7 @@
   },
   {
     "kind": "finding",
-    "about": "Caddy adds `Vary: Accept-Encoding` to every answer of a route with encode or precompressed; upstreamer adds it only when the answer can differ by Accept-Encoding (a sidecar exists or the body is long enough to compress). Nothing a client receives depends on the missing token.",
+    "about": "Caddy adds `Vary: Accept-Encoding` to every answer of a route with encode or precompressed; upstreamer adds it only when the answer can differ by Accept-Encoding (a sidecar exists, or the encode step compresses the response for some Accept-Encoding). Nothing a client receives depends on the missing token.",
     "differences": [
       {
         "site": "app.example.com",

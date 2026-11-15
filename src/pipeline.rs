@@ -3,11 +3,11 @@
 //! (error routes), and the final header edit order ([`finalize`]).
 
 use crate::body::{Body, RequestBody};
-use crate::encode;
+use crate::encode::{self, Decision};
 use crate::exchange::{ASpan, ErrorInfo, Exchange, Proto, Scheme};
 use crate::files;
 use crate::log::debug;
-use crate::msg::{Fields, Known, ResponseHead, Status};
+use crate::msg::{Fields, Known, Method, ResponseHead, Status};
 use crate::plan::SitePlan;
 use crate::proxy;
 use crate::proxy::Upgrade;
@@ -64,6 +64,7 @@ pub(crate) async fn handle(
         };
         route::run(plan, site, ex, &mut fx)
     };
+    encode::strip_etag_suffix(ex.pending.encode, &mut ex.req);
 
     let from_files = matches!(outcome, Outcome::Files { .. });
     let mut resp = match answer(core, snap, outcome, ex, body).await {
@@ -185,8 +186,8 @@ fn redirect(ex: &mut Exchange, status: Status, location: ASpan) -> Result<Respon
 /// 2. pending step ops in step order (the error route's alone when one answered),
 /// 3. a 304 loses Content-Type (RFC 9110 §15.4.5), whoever set it,
 /// 4. dynamic compression, decided from the head as the ops left it,
-/// 5. `Vary: Accept-Encoding` if negotiation chose an encoding or a sidecar could have been
-///    chosen, merged into the Vary the ops set.
+/// 5. `Vary: Accept-Encoding` if another Accept-Encoding could have changed the answer (a
+///    sidecar, or dynamic compression), merged into the Vary the ops set.
 ///
 /// Framing headers are never touched here; the driver writes them.
 pub(crate) fn finalize(site: &SitePlan, ex: &mut Exchange, resp: &mut Response) {
@@ -220,10 +221,14 @@ pub(crate) fn finalize(site: &SitePlan, ex: &mut Exchange, resp: &mut Response) 
         fields.remove_known(Known::ContentType);
     }
 
-    if let Some(encoding) = encode::decide(ex.pending.encode, &ex.req, &resp.head, resp.body.len())
-    {
-        let body = std::mem::replace(&mut resp.body, Body::Empty);
-        resp.body = encode::wrap(encoding, body, &mut resp.head);
+    match encode::decide(ex.pending.encode, &ex.req, &resp.head, resp.body.len()) {
+        Decision::Unchanged => {}
+        Decision::Identity => resp.head.vary_accept_encoding = true,
+        Decision::Encode(encoding) => {
+            let body = std::mem::replace(&mut resp.body, Body::Empty);
+            let head_only = ex.req.method == Method::Head;
+            resp.body = encode::wrap(encoding, body, &mut resp.head, head_only);
+        }
     }
     if resp.head.vary_accept_encoding {
         vary_accept_encoding(&mut resp.head.fields);
@@ -354,5 +359,42 @@ mod tests {
         finalize(&site(), &mut ex, &mut resp);
         assert_eq!(field(&resp, "content-type"), None, "RFC 9110 §15.4.5");
         assert_eq!(field(&resp, "etag"), Some("\"v1\""));
+    }
+
+    #[test]
+    fn a_head_gets_the_fields_of_its_compressed_get() {
+        let mut get = exchange("GET", &[("Accept-Encoding", "gzip")]);
+        let mut sent = page(&mut get, 200);
+        finalize(&site(), &mut get, &mut sent);
+        let mut head = exchange("HEAD", &[("Accept-Encoding", "gzip")]);
+        let mut shown = page(&mut head, 200);
+        finalize(&site(), &mut head, &mut shown);
+        for name in ["content-encoding", "etag", "vary", "accept-ranges"] {
+            assert_eq!(field(&shown, name), field(&sent, name), "{name}");
+        }
+        assert_eq!(field(&shown, "content-encoding"), Some("gzip"));
+        assert_eq!(field(&shown, "etag"), Some("\"v1-gzip\""));
+        assert_eq!(field(&shown, "accept-ranges"), None);
+        assert_eq!(shown.body.len(), None, "no identity Content-Length");
+    }
+
+    #[test]
+    fn an_answer_compressed_for_other_clients_varies_on_accept_encoding() {
+        let mut ex = exchange("GET", &[]);
+        let mut resp = page(&mut ex, 200);
+        finalize(&site(), &mut ex, &mut resp);
+        assert_eq!(field(&resp, "content-encoding"), None);
+        assert_eq!(field(&resp, "etag"), Some("\"v1\""));
+        assert_eq!(field(&resp, "vary"), Some("Accept-Encoding"));
+
+        let mut short = exchange("GET", &[]);
+        let mut resp = page(&mut short, 200);
+        resp.body = Body::Bytes(Bytes::from_static(b"short"));
+        finalize(&site(), &mut short, &mut resp);
+        assert_eq!(
+            field(&resp, "vary"),
+            None,
+            "too short to compress for anyone"
+        );
     }
 }

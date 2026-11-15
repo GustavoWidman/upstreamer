@@ -1,8 +1,9 @@
-//! Dynamic compression (`encode` steps). Decided once per response, in `pipeline::finalize`'s
-//! caller, from the request's `encode` set and the response head:
-//! skip when the client accepts none of the set, the response already has Content-Encoding,
-//! has `Cache-Control: no-transform`, is not compressible, is shorter than 512 bytes (when the
-//! length is known), is a 204/304/HEAD/206, or is `text/event-stream`.
+//! Dynamic compression (`encode` steps). Decided once per response, in `pipeline::finalize`,
+//! from the request's `encode` set and the response head: never when the response already has
+//! Content-Encoding, has `Cache-Control: no-transform`, is not compressible, is shorter than
+//! 512 bytes (when the length is known), has no body (204, 304), or is `text/event-stream`.
+//! Otherwise the answer varies on Accept-Encoding, and is compressed unless the client accepts
+//! none of the set or it is a 206. A HEAD gets the fields its GET would, without compressing.
 //!
 //! Streaming: each input chunk is compressed and flushed as it comes (zstd `flush`, gzip sync
 //! flush), so a slow stream is never held back. Immutable files are compressed once per core
@@ -13,7 +14,7 @@
 
 use crate::body::Body;
 use crate::config::EncodingName;
-use crate::msg::{Known, Method, RequestHead, ResponseHead, Status};
+use crate::msg::{Known, RequestHead, ResponseHead, Status};
 use bytes::{Bytes, BytesMut};
 use flate2::{Compress, Compression, FlushCompress};
 use smallvec::SmallVec;
@@ -94,20 +95,31 @@ impl EncodingSet {
 /// would eat most of the gain.
 const MIN_LENGTH: u64 = 512;
 
-/// Whether and how to compress a response dynamically. `None` when the client accepts none of
-/// `set`, or the response must not be compressed (see the module docs). Pure; called once per
-/// response by the pipeline, after `finalize`.
+/// What dynamic compression makes of one response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Decision {
+    /// Sent as it is, whatever the client accepts.
+    Unchanged,
+    /// Sent as it is to this client, though another Accept-Encoding would get it compressed:
+    /// the answer varies on Accept-Encoding (RFC 9110 §12.5.5).
+    Identity,
+    Encode(Encoding),
+}
+
+/// Whether and how to compress a response dynamically (see the module docs for what is never
+/// compressed). A HEAD is decided as its GET would be, so it shows the GET's fields. A 206 is
+/// never compressed, but a request for the whole resource could be, however short the range
+/// sent. Pure; called once per response by `pipeline::finalize`.
 pub(crate) fn decide(
     set: EncodingSet,
     req: &RequestHead,
     head: &ResponseHead,
     len: Option<u64>,
-) -> Option<Encoding> {
-    if set.is_empty()
-        || req.method == Method::Head
+) -> Decision {
+    let partial = head.status == Status::PARTIAL_CONTENT;
+    if !set.iter().any(Encoding::dynamic)
         || !head.status.has_body()
-        || head.status == Status::PARTIAL_CONTENT
-        || len.is_some_and(|n| n < MIN_LENGTH)
+        || (!partial && len.is_some_and(|n| n < MIN_LENGTH))
         || head.fields.get(Known::ContentEncoding).is_some()
         || head.fields.has_token(Known::CacheControl, b"no-transform")
         || !head
@@ -115,14 +127,53 @@ pub(crate) fn decide(
             .get(Known::ContentType)
             .is_some_and(compressible)
     {
-        return None;
+        return Decision::Unchanged;
     }
+    if partial {
+        return Decision::Identity;
+    }
+    match negotiated(set, req) {
+        Some(encoding) => Decision::Encode(encoding),
+        None => Decision::Identity,
+    }
+}
+
+/// The coding `set` and the client's Accept-Encoding agree on, if any.
+fn negotiated(set: EncodingSet, req: &RequestHead) -> Option<Encoding> {
     let offered: SmallVec<[Encoding; 3]> = set.iter().collect();
     crate::files::negotiate::pick_encoding(
         req.fields.get(Known::AcceptEncoding),
         &offered,
         Encoding::dynamic,
     )
+}
+
+/// [`wrap`] gives a compressed response the strong tag `"<tag>-<coding>"`, which neither the
+/// file server nor an origin knows. A strong If-None-Match ending in the suffix of the coding
+/// this request negotiates goes to them as the tag they gave, `"<tag>"`, so a revalidation of
+/// the compressed answer can still end in 304. Only the field's last tag is looked at, as Caddy
+/// does.
+pub(crate) fn strip_etag_suffix(set: EncodingSet, req: &mut RequestHead) {
+    let Some(value) = req.fields.get(Known::IfNoneMatch) else {
+        return;
+    };
+    if value.starts_with(b"W/") || set.is_empty() {
+        return;
+    }
+    let Some(encoding) = negotiated(set, req) else {
+        return;
+    };
+    let Some(tag) = value
+        .strip_suffix(b"\"")
+        .and_then(|v| v.strip_suffix(encoding.token()))
+        .and_then(|v| v.strip_suffix(b"-"))
+    else {
+        return;
+    };
+    let mut stripped: SmallVec<[u8; 96]> = SmallVec::new();
+    stripped.extend_from_slice(tag);
+    stripped.push(b'"');
+    req.fields.set_known(Known::IfNoneMatch, &stripped);
 }
 
 /// Whether a Content-Type names a media type worth compressing: text (except event streams,
@@ -183,13 +234,35 @@ fn compressible(content_type: &[u8]) -> bool {
 }
 
 /// Wraps `body` in a compressor for `encoding`, and edits `head` to match: sets
-/// Content-Encoding, drops Content-Length, keeps a strong ETag from validating the encoded
-/// bytes as if they were the identity ones, and sets `vary_accept_encoding`.
+/// Content-Encoding, drops Content-Length and Accept-Ranges, gives a strong ETag the coding as
+/// a suffix (`"<tag>-gzip"`, as Caddy does, so each representation keeps a strong tag of its
+/// own), and sets `vary_accept_encoding`.
 ///
 /// A body already in memory is compressed here in one frame, so it keeps an exact length;
-/// any other body is compressed chunk by chunk as it is read. `head` and `body` are left as
-/// they were when no compressor can be had (brotli, or a failed context allocation).
-pub(crate) fn wrap(encoding: Encoding, body: Body, head: &mut ResponseHead) -> Body {
+/// any other body is compressed chunk by chunk as it is read. For a HEAD (`head_only`) nothing
+/// is compressed: the body becomes an empty stream of unknown length, so no driver announces
+/// the identity length for the encoded representation. `head` and `body` are left as they
+/// were when no compressor can be had (brotli, or a failed context allocation).
+pub(crate) fn wrap(
+    encoding: Encoding,
+    body: Body,
+    head: &mut ResponseHead,
+    head_only: bool,
+) -> Body {
+    if head_only {
+        if !encoding.dynamic() {
+            return body;
+        }
+        encoded_head(encoding, head);
+        let encoder = Encoder {
+            codec: Codec::Finished,
+            out: BytesMut::new(),
+        };
+        return Body::Encoded(Box::new(EncodedBody {
+            inner: Body::Empty,
+            encoder,
+        }));
+    }
     let Some(mut encoder) = Encoder::take(encoding) else {
         return body;
     };
@@ -213,12 +286,15 @@ fn encoded_head(encoding: Encoding, head: &mut ResponseHead) {
         .set_known(Known::ContentEncoding, encoding.token());
     head.fields.remove_known(Known::ContentLength);
     if let Some(etag) = head.fields.get(Known::ETag)
+        && let Some(tag) = etag.strip_suffix(b"\"")
         && !etag.starts_with(b"W/")
     {
-        let mut weak: SmallVec<[u8; 96]> = SmallVec::new();
-        weak.extend_from_slice(b"W/");
-        weak.extend_from_slice(etag);
-        head.fields.set_known(Known::ETag, &weak);
+        let mut suffixed: SmallVec<[u8; 96]> = SmallVec::new();
+        suffixed.extend_from_slice(tag);
+        suffixed.push(b'-');
+        suffixed.extend_from_slice(encoding.token());
+        suffixed.push(b'"');
+        head.fields.set_known(Known::ETag, &suffixed);
     }
     // Byte ranges would address the identity representation, not the encoded bytes sent.
     let fields = &mut head.fields;
@@ -514,12 +590,24 @@ mod tests {
             (zstd_gzip, Some("gzip;Q=1.0"), Some(Gzip)),
             (EncodingSet::new([Gzip]), Some("zstd, gzip"), Some(Gzip)),
             (EncodingSet::new([Br, Gzip]), Some("br, gzip"), Some(Gzip)),
-            (EncodingSet::new([Br]), Some("br"), None),
-            (EncodingSet::new([]), Some("zstd, gzip"), None),
         ];
         for &(set, accept, want) in cases {
             let got = decide(set, &request("GET", accept), &html(), Some(4096));
+            let want = want.map_or(Decision::Identity, Decision::Encode);
             assert_eq!(got, want, "set {set:?}, Accept-Encoding {accept:?}");
+        }
+        for set in [EncodingSet::new([Br]), EncodingSet::new([])] {
+            let got = decide(
+                set,
+                &request("GET", Some("br, zstd, gzip")),
+                &html(),
+                Some(4096),
+            );
+            assert_eq!(
+                got,
+                Decision::Unchanged,
+                "{set:?} compresses nothing on the fly, so nothing varies"
+            );
         }
     }
 
@@ -530,155 +618,197 @@ mod tests {
         let head = request("HEAD", Some("zstd, gzip"));
         let ct = |v: &str| response(200, &[("Content-Type", v)]);
         let with = |extra: (&str, &str)| response(200, &[("Content-Type", "text/html"), extra]);
-        let cases: &[(&str, &RequestHead, ResponseHead, Option<u64>, bool)] = &[
-            ("html of unknown length", &get, html(), None, true),
-            ("html at the minimum length", &get, html(), Some(512), true),
+        const ENCODE: Decision = Decision::Encode(Zstd);
+        const IDENTITY: Decision = Decision::Identity;
+        const UNCHANGED: Decision = Decision::Unchanged;
+        let refused = request("GET", Some("identity"));
+        let cases: &[(&str, &RequestHead, ResponseHead, Option<u64>, Decision)] = &[
+            ("html of unknown length", &get, html(), None, ENCODE),
+            (
+                "html at the minimum length",
+                &get,
+                html(),
+                Some(512),
+                ENCODE,
+            ),
             (
                 "html below the minimum length",
                 &get,
                 html(),
                 Some(511),
-                false,
+                UNCHANGED,
             ),
-            ("empty body", &get, html(), Some(0), false),
-            ("HEAD", &head, html(), Some(4096), false),
+            ("empty body", &get, html(), Some(0), UNCHANGED),
+            ("HEAD", &head, html(), Some(4096), ENCODE),
+            (
+                "HEAD below the minimum length",
+                &head,
+                html(),
+                Some(511),
+                UNCHANGED,
+            ),
+            (
+                "client accepts none",
+                &refused,
+                html(),
+                Some(4096),
+                IDENTITY,
+            ),
             (
                 "404 page",
                 &get,
                 response(404, &[("Content-Type", "text/html")]),
                 None,
-                true,
+                ENCODE,
             ),
             (
                 "502 page",
                 &get,
                 response(502, &[("Content-Type", "text/plain")]),
                 None,
-                true,
+                ENCODE,
             ),
             (
                 "204",
                 &get,
                 response(204, &[("Content-Type", "text/html")]),
                 None,
-                false,
+                UNCHANGED,
             ),
             (
                 "304",
                 &get,
                 response(304, &[("Content-Type", "text/html")]),
                 None,
-                false,
+                UNCHANGED,
             ),
             (
                 "206",
                 &get,
                 response(206, &[("Content-Type", "text/html")]),
                 None,
-                false,
+                IDENTITY,
+            ),
+            (
+                "206 of a short range",
+                &get,
+                response(206, &[("Content-Type", "text/html")]),
+                Some(16),
+                IDENTITY,
             ),
             (
                 "101",
                 &get,
                 response(101, &[("Content-Type", "text/html")]),
                 None,
-                false,
+                UNCHANGED,
             ),
             (
                 "already gzip",
                 &get,
                 with(("Content-Encoding", "gzip")),
                 None,
-                false,
+                UNCHANGED,
             ),
             (
                 "already br",
                 &get,
                 with(("Content-Encoding", "br")),
                 None,
-                false,
+                UNCHANGED,
             ),
             (
                 "no-transform",
                 &get,
                 with(("Cache-Control", "public, No-Transform")),
                 None,
-                false,
+                UNCHANGED,
             ),
             (
                 "other cache-control",
                 &get,
                 with(("Cache-Control", "no-cache, max-age=0")),
                 None,
-                true,
+                ENCODE,
             ),
-            ("no content type", &get, response(200, &[]), None, false),
-            ("event stream", &get, ct("text/event-stream"), None, false),
+            ("no content type", &get, response(200, &[]), None, UNCHANGED),
+            (
+                "event stream",
+                &get,
+                ct("text/event-stream"),
+                None,
+                UNCHANGED,
+            ),
             (
                 "event stream with params",
                 &get,
                 ct("Text/Event-Stream; charset=utf-8"),
                 None,
-                false,
+                UNCHANGED,
             ),
-            ("css", &get, ct("text/css"), None, true),
+            ("css", &get, ct("text/css"), None, ENCODE),
             (
                 "json with params",
                 &get,
                 ct("Application/JSON; charset=utf-8"),
                 None,
-                true,
+                ENCODE,
             ),
-            ("javascript", &get, ct("application/javascript"), None, true),
-            ("ndjson", &get, ct("application/x-ndjson"), None, true),
+            (
+                "javascript",
+                &get,
+                ct("application/javascript"),
+                None,
+                ENCODE,
+            ),
+            ("ndjson", &get, ct("application/x-ndjson"), None, ENCODE),
             (
                 "structured +json",
                 &get,
                 ct("application/vnd.api+json"),
                 None,
-                true,
+                ENCODE,
             ),
             (
                 "manifest",
                 &get,
                 ct("application/manifest+json"),
                 None,
-                true,
+                ENCODE,
             ),
             (
                 "structured +xml",
                 &get,
                 ct("application/rss+xml"),
                 None,
-                true,
+                ENCODE,
             ),
-            ("svg", &get, ct("image/svg+xml"), None, true),
-            ("wasm", &get, ct("application/wasm"), None, true),
-            ("font", &get, ct("font/ttf"), None, true),
-            ("png", &get, ct("image/png"), None, false),
-            ("jpeg", &get, ct("image/jpeg"), None, false),
-            ("woff2", &get, ct("font/woff2"), None, false),
-            ("zip", &get, ct("application/zip"), None, false),
+            ("svg", &get, ct("image/svg+xml"), None, ENCODE),
+            ("wasm", &get, ct("application/wasm"), None, ENCODE),
+            ("font", &get, ct("font/ttf"), None, ENCODE),
+            ("png", &get, ct("image/png"), None, UNCHANGED),
+            ("jpeg", &get, ct("image/jpeg"), None, UNCHANGED),
+            ("woff2", &get, ct("font/woff2"), None, UNCHANGED),
+            ("zip", &get, ct("application/zip"), None, UNCHANGED),
             (
                 "octet stream",
                 &get,
                 ct("application/octet-stream"),
                 None,
-                false,
+                UNCHANGED,
             ),
-            ("video", &get, ct("video/mp4"), None, false),
+            ("video", &get, ct("video/mp4"), None, UNCHANGED),
             (
                 "bare +json suffix",
                 &get,
                 ct("application/+json"),
                 None,
-                false,
+                UNCHANGED,
             ),
-            ("malformed type", &get, ct("texthtml"), None, false),
+            ("malformed type", &get, ct("texthtml"), None, UNCHANGED),
         ];
-        for (name, req, resp, len, compress) in cases {
-            let got = decide(set, req, resp, *len);
-            assert_eq!(got.is_some(), *compress, "{name}");
+        for (name, req, resp, len, want) in cases {
+            assert_eq!(decide(set, req, resp, *len), *want, "{name}");
         }
     }
 
@@ -694,7 +824,12 @@ mod tests {
                 ("Cache-Control", "max-age=60"),
             ],
         );
-        let body = wrap(Gzip, Body::Bytes(Bytes::from(vec![b'a'; 2048])), &mut head);
+        let body = wrap(
+            Gzip,
+            Body::Bytes(Bytes::from(vec![b'a'; 2048])),
+            &mut head,
+            false,
+        );
         let fields: Vec<(&[u8], &[u8])> = head.fields.live().map(|(n, v, _)| (n, v)).collect();
         assert_eq!(
             fields,
@@ -702,7 +837,7 @@ mod tests {
                 (&b"content-type"[..], &b"text/html"[..]),
                 (b"cache-control", b"max-age=60"),
                 (b"content-encoding", b"gzip"),
-                (b"etag", b"W/\"abc\""),
+                (b"etag", b"\"abc-gzip\""),
             ]
         );
         assert!(head.vary_accept_encoding);
@@ -715,7 +850,12 @@ mod tests {
     #[test]
     fn wrap_keeps_a_weak_etag_and_replaces_content_encoding() {
         let mut head = response(200, &[("Content-Type", "text/html"), ("ETag", "W/\"v1\"")]);
-        let body = wrap(Zstd, Body::Bytes(Bytes::from_static(b"hello")), &mut head);
+        let body = wrap(
+            Zstd,
+            Body::Bytes(Bytes::from_static(b"hello")),
+            &mut head,
+            false,
+        );
         assert_eq!(head.fields.get(Known::ETag), Some(&b"W/\"v1\""[..]));
         assert_eq!(head.fields.get(Known::ContentEncoding), Some(&b"zstd"[..]));
         let Body::Bytes(encoded) = body else {
@@ -730,11 +870,99 @@ mod tests {
             200,
             &[("Content-Type", "text/html"), ("Content-Length", "5")],
         );
-        let body = wrap(Br, Body::Bytes(Bytes::from_static(b"hello")), &mut head);
+        let body = wrap(
+            Br,
+            Body::Bytes(Bytes::from_static(b"hello")),
+            &mut head,
+            false,
+        );
         assert_eq!(head.fields.get(Known::ContentLength), Some(&b"5"[..]));
         assert_eq!(head.fields.get(Known::ContentEncoding), None);
         assert!(!head.vary_accept_encoding);
         assert!(matches!(body, Body::Bytes(b) if b == "hello"));
+    }
+
+    #[test]
+    fn each_coding_gets_its_own_strong_etag() {
+        for (encoding, tag) in [(Gzip, "\"v1-gzip\""), (Zstd, "\"v1-zstd\"")] {
+            let mut head = response(200, &[("Content-Type", "text/html"), ("ETag", "\"v1\"")]);
+            let _ = wrap(
+                encoding,
+                Body::Bytes(Bytes::from_static(b"hello")),
+                &mut head,
+                false,
+            );
+            assert_eq!(
+                head.fields.get(Known::ETag),
+                Some(tag.as_bytes()),
+                "{encoding:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_head_shows_the_encoded_fields_without_compressing() {
+        let mut head = response(
+            200,
+            &[
+                ("Content-Type", "text/html"),
+                ("Content-Length", "2048"),
+                ("ETag", "\"abc\""),
+                ("Accept-Ranges", "bytes"),
+            ],
+        );
+        let body = wrap(
+            Gzip,
+            Body::Bytes(Bytes::from(vec![b'a'; 2048])),
+            &mut head,
+            true,
+        );
+        let fields: Vec<(&[u8], &[u8])> = head.fields.live().map(|(n, v, _)| (n, v)).collect();
+        assert_eq!(
+            fields,
+            [
+                (&b"content-type"[..], &b"text/html"[..]),
+                (b"content-encoding", b"gzip"),
+                (b"etag", b"\"abc-gzip\""),
+            ]
+        );
+        assert!(head.vary_accept_encoding);
+        assert_eq!(
+            body.len(),
+            None,
+            "no driver may announce the identity length for the gzip representation"
+        );
+    }
+
+    #[test]
+    fn a_revalidation_of_a_compressed_answer_reaches_the_handler_without_the_suffix() {
+        let set = EncodingSet::new([Zstd, Gzip]);
+        let if_none_match = |accept: &str, tag: &str| {
+            let mut req = request("GET", Some(accept));
+            req.push_field(b"If-None-Match", tag.as_bytes());
+            strip_etag_suffix(set, &mut req);
+            let value = req.fields.get(Known::IfNoneMatch).unwrap();
+            String::from_utf8(value.to_vec()).unwrap()
+        };
+        assert_eq!(if_none_match("gzip", "\"v1-gzip\""), "\"v1\"");
+        assert_eq!(if_none_match("zstd, gzip", "\"v1-zstd\""), "\"v1\"");
+        assert_eq!(
+            if_none_match("zstd", "\"v1-gzip\""),
+            "\"v1-gzip\"",
+            "a gzip tag does not name the zstd representation this request gets"
+        );
+        assert_eq!(if_none_match("gzip", "W/\"v1-gzip\""), "W/\"v1-gzip\"");
+        assert_eq!(if_none_match("gzip", "\"v1\""), "\"v1\"");
+        assert_eq!(if_none_match("identity", "\"v1-gzip\""), "\"v1-gzip\"");
+
+        let mut req = request("GET", Some("gzip"));
+        req.push_field(b"If-None-Match", b"\"v1-gzip\"");
+        strip_etag_suffix(EncodingSet::default(), &mut req);
+        assert_eq!(
+            req.fields.get(Known::IfNoneMatch),
+            Some(&b"\"v1-gzip\""[..]),
+            "a route without encode leaves the field alone"
+        );
     }
 
     fn gunzip(data: &[u8]) -> Vec<u8> {
