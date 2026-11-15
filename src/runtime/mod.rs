@@ -332,17 +332,28 @@ impl Core {
                 break;
             }
         }
-        // The connections' closing packets go out while their endpoints still run.
+        // The connections' closing packets go out while their endpoints still run. At the
+        // deadline the connections still open are closed rather than dropped, so their clients
+        // learn at once instead of after their idle timeout.
         for endpoint in endpoints {
             if tokio::time::timeout_at(deadline, endpoint.wait_idle())
                 .await
                 .is_err()
             {
-                break;
+                endpoint.close(H3_NO_ERROR, b"");
+                let _ = tokio::time::timeout(CLOSE_GRACE, endpoint.wait_idle()).await;
             }
         }
     }
 }
+
+/// The HTTP/3 application error code of a connection closed without an error (RFC 9114
+/// section 8.1).
+const H3_NO_ERROR: quinn::VarInt = quinn::VarInt::from_u32(0x100);
+
+/// How long past the shutdown deadline QUIC endpoints get to send the close of the
+/// connections they cut. The unit's stop timeout leaves seconds for it.
+const CLOSE_GRACE: Duration = Duration::from_millis(100);
 
 fn quic_config(
     config: Arc<rustls::ServerConfig>,
