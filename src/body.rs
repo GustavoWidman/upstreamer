@@ -96,11 +96,13 @@ fn read_file(file: &mut FileBody) -> io::Result<Option<Bytes>> {
 
 /// The request body as the downstream protocol delivers it. Borrowed from the h1 connection
 /// for the duration of `pipeline::handle` (h1 has one request in flight, so the connection's
-/// reader is lent, not shared); owned streams for h2/h3.
+/// reader is lent, not shared), and from the h2 connection for the life of the stream's work
+/// (the stream's queue is the connection's); an owned stream for h3.
 pub(crate) enum RequestBody<'a> {
     Empty,
     H1(H1Body<'a>),
-    H2(crate::proto::h2::H2Body),
+    H2(crate::proto::h2::H2Body<'a>),
+    H2Legacy(crate::proto::h2::legacy::H2Body),
     H3(crate::proto::h3::H3Body),
 }
 
@@ -111,6 +113,7 @@ impl RequestBody<'_> {
             RequestBody::Empty => Some(0),
             RequestBody::H1(body) => body.state.track.remaining(),
             RequestBody::H2(body) => body.len(),
+            RequestBody::H2Legacy(body) => body.len(),
             RequestBody::H3(body) => body.declared,
         }
     }
@@ -121,7 +124,7 @@ impl RequestBody<'_> {
         match self {
             RequestBody::Empty => true,
             RequestBody::H1(body) => body.state.is_empty(),
-            RequestBody::H2(_) | RequestBody::H3(_) => false,
+            RequestBody::H2(_) | RequestBody::H2Legacy(_) | RequestBody::H3(_) => false,
         }
     }
 
@@ -131,6 +134,7 @@ impl RequestBody<'_> {
             RequestBody::Empty => Ok(None),
             RequestBody::H1(body) => body.next_chunk().await,
             RequestBody::H2(body) => body.next_chunk().await,
+            RequestBody::H2Legacy(body) => body.next_chunk().await,
             RequestBody::H3(body) => body.next_chunk().await,
         }
     }

@@ -64,6 +64,11 @@ pub use plan::Diagnostic;
 #[doc(hidden)]
 pub use proto::h1::codec::harness as codec;
 
+/// HTTP/2 entry points for the fuzz targets; not part of the API.
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub use proto::h2::harness as h2;
+
 /// Options of `upstreamer run`.
 pub struct RunOptions {
     /// The JSON config the NixOS module wrote (`/etc/upstreamer/config.json`). Read again on

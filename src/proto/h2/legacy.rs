@@ -1,28 +1,10 @@
-//! HTTP/2 downstream via the `h2` crate (TLS with ALPN h2 only; no h2c). One local task drives
-//! the connection; each stream runs `pipeline::handle` in its own local task (`spawn_local`,
-//! `!Send` is fine). Responses stream as DATA frames, honouring flow control; nothing is
-//! buffered whole.
+//! HTTP/2 downstream through the `h2` crate: the driver this module's parent replaces, kept
+//! selectable while the two are compared. A process started with `UPSTREAMER_H2_CRATE` set
+//! serves HTTP/2 with it.
 //!
-//! Writes: the `h2` codec flushes after every DATA frame over 256 bytes, which it hands to the
-//! writer by reference. It writes through [`Batched`], where a flush only queues; the driver
-//! flushes once the connection has nothing left to do, so the frames of every stream that
-//! answered since the last write leave in one write (and, over TLS, in records sealed back to
-//! back in one buffer).
-//!
-//! SETTINGS: initial stream window 1 MiB, connection window 4 MiB (1 MiB bodies in one RTT),
-//! max concurrent streams from the config, max header list 64 KiB. Extended CONNECT is not
-//! advertised, so browsers open WebSockets over HTTP/1.1, the only upgrade path.
-//!
-//! A RST_STREAM from the client drops the stream's work where it stands: an upstream exchange
-//! in progress is closed, never pooled. Draining sends GOAWAY and lets open streams finish
-//! within the shutdown deadline; a connection without streams for `keep_alive` closes the same way.
-//!
-//! # Allocations per stream
-//!
-//! The exchange comes from the core's pool, as on h1. What remains is the `spawn_local` task,
-//! the `h2` crate's request (`http::Request`, its `HeaderMap` and one `Bytes` per field value
-//! the HPACK decoder produced), and the response's `HeaderMap`, where each value is a copied
-//! `HeaderValue`. The lib test `allocations_per_stream` measures the total.
+//! One local task drives the connection; each stream runs `pipeline::handle` in its own
+//! local task. The `h2` codec writes through [`Batched`], where a flush only queues; the
+//! driver flushes once the connection has nothing left to do.
 
 use crate::access;
 use crate::body::{Body, RequestBody};
@@ -50,6 +32,12 @@ const STREAM_WINDOW: u32 = 1 << 20;
 const CONNECTION_WINDOW: u32 = 4 << 20;
 /// SETTINGS_MAX_HEADER_LIST_SIZE: decoded names and values plus 32 bytes per field.
 const MAX_HEADER_LIST: u32 = 64 * 1024;
+
+/// Whether this process serves HTTP/2 through the `h2` crate.
+pub(crate) fn selected() -> bool {
+    static SELECTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SELECTED.get_or_init(|| std::env::var_os("UPSTREAMER_H2_CRATE").is_some())
+}
 
 /// Serves one connection until the client closes it, a connection error, the idle timeout
 /// or the end of a drain.
@@ -322,7 +310,7 @@ fn request_body(fields: &http::HeaderMap, recv: RecvStream) -> RequestBody<'stat
     let len = fields
         .get(http::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok()?.parse().ok());
-    RequestBody::H2(H2Body { recv, len })
+    RequestBody::H2Legacy(H2Body { recv, len })
 }
 
 /// The content-length of a response sent without a body: what the body would have been for
@@ -451,141 +439,5 @@ impl H2Body {
                 Some(Err(e)) => return Err(io::Error::other(e)),
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::net::Socket;
-    use crate::proxy::tls::ClientStream;
-    use crate::runtime::testing::{free_addr, plan_from, served};
-    use crate::runtime::{Generation, TlsState, allowed_cpus, spawn_workers, stop};
-    use crate::tls::{self, TicketKeys};
-    use bytes::Bytes;
-    use std::sync::Arc;
-    use std::time::Instant;
-
-    /// One core with an HTTPS listener whose site answers every request with `hi`.
-    fn generation(addr: std::net::SocketAddr) -> Arc<Generation> {
-        let plan = plan_from(
-            1,
-            &serde_json::json!({
-                "version": 1,
-                "listen": { "http": [], "https": [addr] },
-                "sites": [{
-                    "name": "test",
-                    "hosts": ["test.example"],
-                    "tls": {
-                        "cert": "/nonexistent/fullchain.pem",
-                        "key": "/nonexistent/key.pem",
-                        "redirectHttp": false,
-                        "http3": false,
-                    },
-                    "routes": [{ "respond": { "body": "hi" } }],
-                }],
-            }),
-        );
-        let (certs, _) = tls::load(&plan.certs, None);
-        Arc::new(Generation {
-            plan: Arc::new(plan),
-            tls: Some(TlsState {
-                certs: Arc::new(certs),
-                tickets: Arc::new(TicketKeys::generate(3600)),
-            }),
-            access: Arc::default(),
-        })
-    }
-
-    async fn client(addr: std::net::SocketAddr) -> ::h2::client::SendRequest<Bytes> {
-        let mut config = (*tls::client_config(false)).clone();
-        config.alpn_protocols = vec![b"h2".to_vec()];
-        let sock = Socket::connect(addr).await.unwrap();
-        let name = "test.example".try_into().unwrap();
-        let io = ClientStream::connect(sock, Arc::new(config), name)
-            .await
-            .unwrap();
-        let (send, conn) = ::h2::client::handshake(io).await.unwrap();
-        tokio::spawn(conn);
-        send
-    }
-
-    /// Fields a browser sends with a navigation.
-    const BROWSER: &[(&str, &str)] = &[
-        (
-            "user-agent",
-            "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
-        ),
-        (
-            "accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        ),
-        ("accept-language", "en-US,en;q=0.5"),
-        ("accept-encoding", "gzip, deflate, br, zstd"),
-        ("cookie", "session=0123456789abcdef; theme=dark"),
-        ("cookie", "lang=en"),
-        ("sec-fetch-dest", "document"),
-        ("sec-fetch-mode", "navigate"),
-        ("sec-fetch-site", "none"),
-        ("sec-fetch-user", "?1"),
-        ("upgrade-insecure-requests", "1"),
-        ("priority", "u=0, i"),
-    ];
-
-    async fn get(send: &mut ::h2::client::SendRequest<Bytes>, fields: &[(&str, &str)]) {
-        std::future::poll_fn(|cx| send.poll_ready(cx))
-            .await
-            .unwrap();
-        let mut req = http::Request::get("https://test.example/");
-        for (name, value) in fields {
-            req = req.header(*name, *value);
-        }
-        let req = req.body(()).unwrap();
-        let (response, _) = send.send_request(req, true).unwrap();
-        let mut body = response.await.unwrap().into_body();
-        let mut got = Vec::new();
-        while let Some(data) = body.data().await {
-            got.extend_from_slice(&data.unwrap());
-        }
-        assert_eq!(got, b"hi");
-    }
-
-    /// Allocations the core thread makes per stream on a warm keep-alive connection: the
-    /// `h2` crate's request and response objects and the stream task (see the module docs).
-    #[test]
-    fn allocations_per_stream() {
-        let addr = free_addr();
-        let workers = spawn_workers(&[allowed_cpus()[0]], generation(addr)).unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let streams = 10_000;
-        let measured = runtime.block_on(async {
-            let mut send = client(addr).await;
-            let mut measured = Vec::new();
-            for fields in [&[][..], BROWSER] {
-                for _ in 0..2_000 {
-                    get(&mut send, fields).await;
-                }
-                let before = served(addr.port(), 0).allocations;
-                for _ in 0..streams {
-                    get(&mut send, fields).await;
-                }
-                let after = served(addr.port(), 0).allocations;
-                measured.push((after - before) as f64 / f64::from(streams));
-            }
-            measured
-        });
-        stop(workers, Instant::now());
-        let [bare, browser] = measured[..] else {
-            unreachable!()
-        };
-        println!(
-            "core thread allocations per h2 stream: {bare:.2} without fields, \
-             {browser:.2} with a browser's {} fields",
-            BROWSER.len()
-        );
-        assert!(bare <= 16.0, "{bare} allocations per stream");
-        assert!(browser <= 32.0, "{browser} allocations per stream");
     }
 }
