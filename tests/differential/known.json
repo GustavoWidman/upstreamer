@@ -2362,6 +2362,20 @@
     ]
   },
   {
+    "kind": "accepted",
+    "about": "Caddy on macOS takes the type of .ico from /etc/apache2/mime.types (image/x-icon), which overrides the mailcap table nixpkgs builds Go with. On the fleet's NixOS hosts Caddy sends mailcap's image/vnd.microsoft.icon, the registered type, as upstreamer does.",
+    "os": "macos",
+    "differences": [
+      {
+        "site": "example.org",
+        "probe": "favicon",
+        "field": "header content-type",
+        "caddy": "image/x-icon",
+        "upstreamer": "image/vnd.microsoft.icon"
+      }
+    ]
+  },
+  {
     "kind": "finding",
     "about": "On a case-sensitive file system /BLOG names no file, so both answer with the 404 page, which has no ETag and no Accept-Ranges as the 404-page finding records. macOS folds case and serves the blog page to both.",
     "os": "linux",
