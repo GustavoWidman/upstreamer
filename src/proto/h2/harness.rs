@@ -189,6 +189,11 @@ impl Responder {
         });
     }
 
+    /// Drops the work of every stream, as the driver does when the connection ends.
+    pub fn stop(&mut self) {
+        self.work.clear();
+    }
+
     pub fn cancel(&mut self, slot: u32) {
         let work = self.work.get_mut(slot as usize).and_then(Option::take);
         assert!(work.is_some(), "slot {slot} was cancelled without work");
@@ -324,6 +329,7 @@ pub fn frames_input(data: &[u8]) {
                 responder.run(&mut session, false);
             }
             Err(reason) => {
+                responder.stop();
                 session.engine.fail(reason);
                 failed = true;
             }

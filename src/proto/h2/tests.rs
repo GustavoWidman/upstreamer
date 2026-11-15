@@ -1932,6 +1932,28 @@ fn the_clients_table_size_limit_is_honoured() {
     }
 }
 
+/// What the connection's driver does in order, checked by the harness: the streams' work
+/// stops when the connection fails, so nothing is answered after a connection error, even
+/// by a stream that a frame of the same read had reset.
+#[test]
+fn a_connection_error_ends_the_work_of_every_stream() {
+    let mut post = POST.to_vec();
+    post.push(("content-length", "3"));
+    let trailers = frame(frame::HEADERS, frame::END_HEADERS, 1, &block(&[POST[0]]));
+    let oversized = [0, 0x40, 1, frame::DATA, 0, 0, 0, 0, 1];
+    // The request in one read; its body, the reset and the connection error in the next.
+    let reads = [
+        headers(1, &post, false),
+        [data(1, 2, false), trailers, oversized.to_vec()].concat(),
+    ];
+    let mut input = vec![0];
+    for read in reads {
+        input.push(read.len() as u8);
+        input.extend_from_slice(&read);
+    }
+    harness::frames_input(&input);
+}
+
 mod any_client {
     use super::super::harness;
     use super::{GET, POST, frame};
