@@ -728,7 +728,7 @@ pub(crate) mod testing {
     use super::*;
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::io::{Read, Write};
-    use std::sync::Mutex;
+    use std::sync::{Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
     struct Counting;
 
@@ -763,6 +763,25 @@ pub(crate) mod testing {
     /// counting allocator; every allocation test reads its own thread's count from here.
     pub fn thread_allocations() -> u64 {
         ALLOCS.with(Cell::get)
+    }
+
+    /// Held while a test raises process signals, and while a test counts the allocations of a
+    /// thread that runs a tokio runtime. A signal wakes the signal driver of every runtime in
+    /// the process, and the first to wake broadcasts it on that thread. On macOS a broadcast
+    /// can allocate: the first one of each signal kind sets up the mutexes of tokio's watch
+    /// channel for it (`std`'s pthread mutexes are boxed on first lock), so a counted thread
+    /// would charge a test's signal to the requests it measures.
+    static SIGNALS: RwLock<()> = RwLock::new(());
+
+    /// Keeps process signals from being raised until the guard drops.
+    pub fn no_signals() -> RwLockReadGuard<'static, ()> {
+        SIGNALS.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Waits until no test counts allocations, and keeps them from starting until the guard
+    /// drops.
+    pub fn raising_signals() -> RwLockWriteGuard<'static, ()> {
+        SIGNALS.write().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// What one core has answered on one listening port.
@@ -1016,12 +1035,14 @@ mod tests {
         for _ in 0..2_000 {
             get(&mut conn).unwrap();
         }
+        let signals = no_signals();
         let before = served(addr.port(), 0).allocations;
         let requests = 20_000;
         for _ in 0..requests {
             assert_eq!(get(&mut conn).unwrap(), 7);
         }
         let after = served(addr.port(), 0).allocations;
+        drop(signals);
         stop(workers, Instant::now());
         println!(
             "core thread allocations over {requests} keep-alive requests: {}",
@@ -1061,12 +1082,14 @@ mod tests {
         for _ in 0..warm_up {
             get(&mut conn).unwrap();
         }
+        let signals = no_signals();
         let before = served(addr.port(), 0);
         let requests = 20_000;
         for _ in 0..requests {
             assert_eq!(get(&mut conn).unwrap(), 9);
         }
         let after = served(addr.port(), 0);
+        drop(signals);
         stop(workers, Instant::now());
         let allocations = after.allocations - before.allocations;
         let writes = after.log_writes - before.log_writes;

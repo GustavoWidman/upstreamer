@@ -507,7 +507,9 @@ async fn connect_named(
 
 #[cfg(test)]
 mod tests {
-    use crate::runtime::testing::{connect, free_addr, plan_from, read_response, served};
+    use crate::runtime::testing::{
+        connect, free_addr, no_signals, plan_from, read_response, served,
+    };
     use crate::runtime::{Generation, allowed_cpus, spawn_workers, stop};
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener};
@@ -601,12 +603,14 @@ mod tests {
         for _ in 0..2_000 {
             request();
         }
+        let signals = no_signals();
         let before = served(listen.port(), 0).allocations;
         let requests = 20_000;
         for _ in 0..requests {
             request();
         }
         let after = served(listen.port(), 0).allocations;
+        drop(signals);
         stop(workers, Instant::now());
         println!(
             "core thread allocations over {requests} proxied keep-alive requests: {}",

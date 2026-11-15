@@ -1017,8 +1017,10 @@ fn echoed_requests_allocate_nothing_after_warm_up() {
             let (mut io, _) = accepted(sock, config).await;
             let mut buf = BytesMut::with_capacity(16 * 1024);
             let mut before = 0;
+            let mut signals = None;
             for i in 0..WARM + MEASURED {
                 if i == WARM {
+                    signals = Some(crate::runtime::testing::no_signals());
                     before = crate::runtime::testing::thread_allocations();
                 }
                 io.readable().await.unwrap();
@@ -1030,7 +1032,9 @@ fn echoed_requests_allocate_nothing_after_warm_up() {
                     .unwrap();
                 buf.clear();
             }
-            crate::runtime::testing::thread_allocations() - before
+            let allocations = crate::runtime::testing::thread_allocations() - before;
+            drop(signals);
+            allocations
         },
     );
     assert_eq!(allocations, 0, "allocations for {MEASURED} echoed requests");
