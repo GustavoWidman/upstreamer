@@ -404,12 +404,15 @@ pub fn differences(
 
 /// `known.json`: every difference the corpus shows today, grouped by cause. A group is a
 /// finding (upstreamer should change, or the fleet should decide) or an accepted difference
-/// (the rationale's Tradeoffs accepted names it).
+/// (the rationale's Tradeoffs accepted names it). A group with `os` happens only on that
+/// operating system (`std::env::consts::OS`), where Caddy's answer depends on the host.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Group {
     pub kind: Kind,
     pub about: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
     pub differences: Vec<Difference>,
 }
 
@@ -423,5 +426,10 @@ pub enum Kind {
 pub fn known() -> Vec<Group> {
     let path = super::harness::dir().join("known.json");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
-    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path:?}: {e}"))
+    let groups: Vec<Group> =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+    groups
+        .into_iter()
+        .filter(|g| g.os.as_deref().is_none_or(|os| os == std::env::consts::OS))
+        .collect()
 }

@@ -2360,5 +2360,26 @@
         "upstreamer": "(empty)"
       }
     ]
+  },
+  {
+    "kind": "finding",
+    "about": "On a case-sensitive file system /BLOG names no file, so both answer with the 404 page, which has no ETag and no Accept-Ranges as the 404-page finding records. macOS folds case and serves the blog page to both.",
+    "os": "linux",
+    "differences": [
+      {
+        "site": "example.org",
+        "probe": "upper case path",
+        "field": "header accept-ranges",
+        "caddy": "bytes",
+        "upstreamer": "(absent)"
+      },
+      {
+        "site": "example.org",
+        "probe": "upper case path",
+        "field": "header etag",
+        "caddy": "(server default etag)",
+        "upstreamer": "(absent)"
+      }
+    ]
   }
 ]
