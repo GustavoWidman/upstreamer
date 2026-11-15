@@ -68,7 +68,9 @@ const MAX_DRAIN: u64 = 64 * 1024;
 /// is still sending.
 const LINGER: Duration = Duration::from_secs(2);
 
-/// Serves one connection until close, error, idle timeout or shutdown.
+/// Serves one connection until close, error, idle timeout or shutdown. Between requests the
+/// task holds only the idle wait; each request runs in a block recycled by the core, so an idle
+/// connection costs a few hundred bytes of task state, not the size of the request path.
 pub(crate) async fn serve(core: Rc<Core>, mut io: Transport, info: ConnInfo) {
     // Bytes of a pipelined next request that arrived with the previous one.
     let mut carry: Option<BytesMut> = None;
@@ -89,61 +91,79 @@ pub(crate) async fn serve(core: Rc<Core>, mut io: Transport, info: ConnInfo) {
         {
             break close;
         }
-        // Once per request: a reload takes effect on the next request of every connection.
-        let snap = core.snapshot();
-        let mut ex = core.exchanges.take(info, snap.plan.var_count);
-        let mut buf = carry.take().unwrap_or_else(|| core.bufs.take());
-
-        let head = match read_head(&snap, &mut io, &mut buf, &mut ex, &mut watch).await {
-            Ok(head) => head,
-            Err(close) => {
-                answer_bad(&core, &mut io, &mut ex, &close).await;
-                core.exchanges.put(ex);
-                core.bufs.put(buf);
-                break close;
-            }
-        };
-
-        // The connection is lent to the pipeline as the request body; the borrow ends when
-        // `handle` returns, before the response is written on the same connection.
-        let mut state = BodyState::new(head.framing, head.expect_continue);
-        let (resp, log) = pipeline::handle(
-            &core,
-            &snap,
-            &mut ex,
-            RequestBody::H1(H1Body {
-                io: &mut io,
-                buf: &mut buf,
-                state: &mut state,
-            }),
-        )
-        .await;
-        #[cfg(test)]
-        crate::runtime::testing::observe(&core, &info);
-
-        let status = resp.head.status;
-        let mut sent = 0;
-        let written = write_response(
-            &core, &snap, &mut io, &mut buf, &mut state, &mut ex, resp, &head, &mut watch,
-            &mut sent,
-        )
-        .await;
-        if let Some(log) = log {
-            access::record(&core, &snap, &ex, log, status, sent);
-        }
-        core.exchanges.put(ex);
-        match written {
-            Ok(()) if !buf.is_empty() => carry = Some(buf),
-            Ok(()) => core.bufs.put(buf),
-            Err(close) => {
-                core.bufs.put(buf);
-                break close;
-            }
+        let request = request(&core, &mut io, info, carry.take(), &mut watch);
+        match core.requests.run(request).await {
+            Ok(next) => carry = next,
+            Err(close) => break close,
         }
     };
     match close {
-        Close::Bad(_) | Close::SlowHead | Close::Unread => linger(&core, io).await,
+        Close::Bad(_) | Close::SlowHead | Close::Unread => Box::pin(linger(&core, io)).await,
         _ => io.close().await,
+    }
+}
+
+/// One request, from its first byte to its response written. `Ok` keeps the connection, with
+/// the bytes of a pipelined next request if any arrived.
+async fn request(
+    core: &Core,
+    io: &mut Transport,
+    info: ConnInfo,
+    carry: Option<BytesMut>,
+    watch: &mut Deadline,
+) -> Result<Option<BytesMut>, Close> {
+    // Once per request: a reload takes effect on the next request of every connection.
+    let snap = core.snapshot();
+    let mut ex = core.exchanges.take(info, snap.plan.var_count);
+    let mut buf = carry.unwrap_or_else(|| core.bufs.take());
+
+    let head = match read_head(&snap, io, &mut buf, &mut ex, watch).await {
+        Ok(head) => head,
+        Err(close) => {
+            answer_bad(core, io, &mut ex, &close).await;
+            core.exchanges.put(ex);
+            core.bufs.put(buf);
+            return Err(close);
+        }
+    };
+
+    // The connection is lent to the pipeline as the request body; the borrow ends when
+    // `handle` returns, before the response is written on the same connection.
+    let mut state = BodyState::new(head.framing, head.expect_continue);
+    let (resp, log) = pipeline::handle(
+        core,
+        &snap,
+        &mut ex,
+        RequestBody::H1(H1Body {
+            io: &mut *io,
+            buf: &mut buf,
+            state: &mut state,
+        }),
+    )
+    .await;
+    #[cfg(test)]
+    crate::runtime::testing::observe(core, &info);
+
+    let status = resp.head.status;
+    let mut sent = 0;
+    let written = write_response(
+        core, &snap, io, &mut buf, &mut state, &mut ex, resp, &head, watch, &mut sent,
+    )
+    .await;
+    if let Some(log) = log {
+        access::record(core, &snap, &ex, log, status, sent);
+    }
+    core.exchanges.put(ex);
+    match written {
+        Ok(()) if !buf.is_empty() => Ok(Some(buf)),
+        Ok(()) => {
+            core.bufs.put(buf);
+            Ok(None)
+        }
+        Err(close) => {
+            core.bufs.put(buf);
+            Err(close)
+        }
     }
 }
 

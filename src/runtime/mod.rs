@@ -10,6 +10,7 @@
 //! keep-alive connection, and an in-flight request finishes under the plan it started with.
 
 pub(crate) mod control;
+pub(crate) mod slots;
 
 use crate::StartError;
 use crate::access;
@@ -208,6 +209,8 @@ pub(crate) struct Core {
     pub catalog: RefCell<Catalog>,
     pub bufs: BufPool,
     pub exchanges: ExchangePool,
+    /// Blocks the HTTP/1.1 driver runs each request in.
+    pub requests: slots::Slots,
     pub upstreams: Pools,
     pub clock: Clock,
     /// This core's access log buffers; written when the core drops.
@@ -232,6 +235,7 @@ impl Core {
             catalog: RefCell::default(),
             bufs: BufPool::default(),
             exchanges: ExchangePool::default(),
+            requests: slots::Slots::default(),
             upstreams: Pools::default(),
             clock: Clock::new(),
             access: access::Writer::new(generation.access.clone()),
@@ -678,13 +682,15 @@ async fn connection(core: Rc<Core>, sock: Socket, info: ConnInfo, _guard: ConnGu
                 };
                 (config, snap.plan.server.header_timeout)
             };
-            match tls::accept_within(sock, config, timeout).await {
+            // The handshake and the h2 driver are boxed: a task is as large as the largest
+            // future it awaits inline, and an idle h1 connection must not carry their size.
+            match Box::pin(tls::accept_within(sock, config, timeout)).await {
                 Ok((io, Proto::H2)) => {
                     let info = ConnInfo {
                         proto: Proto::H2,
                         ..info
                     };
-                    crate::proto::h2::serve(core, io, info).await;
+                    Box::pin(crate::proto::h2::serve(core, io, info)).await;
                 }
                 Ok((io, _)) => crate::proto::h1::server::serve(core, io, info).await,
                 Err(e) => debug!("core {}: TLS from {}: {e:?}", core.index, info.remote),
@@ -876,6 +882,18 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::*;
     use super::*;
+
+    fn output_size<A, B, C, D, R>(_: fn(A, B, C, D) -> R) -> usize {
+        size_of::<R>()
+    }
+
+    #[test]
+    fn an_idle_connection_task_stays_small() {
+        // The connection future is the task state every open connection carries for its whole
+        // life; the handshake, the h2 driver and the request path must not live in it inline.
+        let size = output_size(connection);
+        assert!(size <= 1200, "connection future is {size} bytes");
+    }
 
     #[test]
     fn imf_fixdate_matches_rfc_examples() {
