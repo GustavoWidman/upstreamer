@@ -29,6 +29,8 @@ Data moves through these types, in the order a request meets them:
 7. `pipeline::finalize` applies the header edits in one fixed order, and the driver writes the
    `pipeline::Response`. Its `body::Body` is a closed enum, so each driver picks the cheapest
    transfer for each kind of body: writev, sendfile, an in-place relay, or DATA frames.
+8. For a site with an access log, the pipeline also returns an `access::Started`, and the
+   driver completes it with `access::record` once the response or tunnel is over.
 
 ## Modules
 
@@ -67,6 +69,7 @@ command line.
 | `src/net/buf.rs` | per-core buffer pools |
 | `src/runtime/mod.rs` | cores, generations, snapshots |
 | `src/runtime/control.rs` | startup, reload, shutdown, systemd notification |
+| `src/access.rs` | access log lines, the files of a generation, and each core's buffered writer |
 | `src/log.rs` | logging to stderr with journald priority prefixes |
 
 ## Seams
@@ -82,7 +85,9 @@ only together with every module that uses it.
 - `config`: every schema type, `parse_config` and `parse_fragment`.
 - `plan`: `Plan`, `SitePlan`, `Block`, `Step`, `Action`, `Terminal`, the `*Plan` types,
   `ListenerKey`, `CertSource`, `ServerParams` and the id types.
-- `pipeline::handle(core, snapshot, exchange, body) -> Response`, which every driver calls.
+- `pipeline::handle(core, snapshot, exchange, body) -> (Response, Option<access::Started>)`,
+  which every driver calls, and `access::record(core, snapshot, exchange, started, status,
+  bytes)`, which it calls once the response is sent.
 - `net::Socket`: `from_fd`, `connect`, `read`, `write_all_vectored`, `readable`,
   `hung_up_or_readable`, `sendfile`, `fd`.
 - `route::{run, run_error, Outcome, Effects}`, `files::serve`, `encode::{decide, wrap}`,
@@ -116,6 +121,29 @@ The control thread is the main thread. It compiles plans, loads certificates and
 a reload applies to the next request of each connection, and a request in flight finishes
 under the plan it started with. A reload whose config fails to parse or compile keeps the
 running generation.
+
+## Access logs
+
+A site with `accessLog` gets one JSON object per line for every request it answers and every
+tunnel once it closes. `src/access.rs` documents the fields, and the NixOS option
+`accessLog.enable` repeats them for the people who read the files.
+
+The control thread opens the plan's log files in append mode at startup and at every reload,
+and publishes them in the `runtime::Generation`. A reload therefore reopens every file, which
+is how logrotate's rename and `postrotate` reload start a new one. A file that cannot be opened
+does not fail the reload: the systemd status names it, and its lines are counted as dropped.
+
+The per-request cost is paid only by sites that log. Once the pipeline has chosen such a site,
+it reads the monotonic clock and formats the request's fields into the exchange's arena, before
+any rewrite. When the response ends, the driver passes the status and the body bytes it sent.
+The core's `access::Writer` adds the time, status, bytes, duration and origin, and appends the
+whole line to its buffer for that file. Nothing allocates once the buffers have grown, and
+nothing makes a syscall per request. A buffer is written with a single `write(2)` once it passes
+32 KiB, on the core's one-second clock tick, before the core adopts a new generation's files,
+and when the core stops. Each buffer holds whole lines and the file is in append mode, so lines
+of different cores never interleave inside a line. A failed or short write drops the lines it
+did not write. The core logs a warning with the count once a second, and no request waits for
+the disk.
 
 ## TLS certificates
 
