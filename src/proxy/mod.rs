@@ -124,7 +124,8 @@ impl ProxyError {
 }
 
 /// Hot path:
-/// 1. serialise the upstream request head into `ex.out` (`client::write_request_head`);
+/// 1. add [`via`] to the request's fields, then serialise the upstream request head into
+///    `ex.out` (`client::write_request_head`, which applies the plan's header ops first);
 /// 2. take a pooled connection or [`dial`];
 /// 3. [`attempt`]: send head + body, read the response head;
 /// 4. retry once on a fresh connection only if the pooled one failed before any response
@@ -138,6 +139,7 @@ pub(crate) async fn forward(
 ) -> Result<Response, ProxyError> {
     let up = &snap.plan.upstreams[plan.upstream.0 as usize];
     let upgrade = wants_upgrade(ex);
+    ex.req.fields.push(b"via", via(ex.req.version));
     client::write_request_head(ex, plan, up_framing(&body), upgrade);
 
     let mut pooled = core.upstreams.checkout(up, snap.plan.generation);
@@ -155,6 +157,18 @@ pub(crate) async fn forward(
             }) if reused && ex.req.method.idempotent() && body.replayable() => {}
             Err(Failed { error, .. }) => return Err(error),
         }
+    }
+}
+
+/// The Via entry a gateway MUST add to each request it forwards (RFC 9110 §7.6.3): the
+/// protocol the client spoke, then this proxy's pseudonym. Added as its own field line, after
+/// any Via the client sent. Responses get none, as the RFC leaves it to a gateway.
+fn via(version: Version) -> &'static [u8] {
+    match version {
+        Version::Http10 => b"1.0 upstreamer",
+        Version::Http11 => b"1.1 upstreamer",
+        Version::H2 => b"2 upstreamer",
+        Version::H3 => b"3 upstreamer",
     }
 }
 
@@ -598,5 +612,81 @@ mod tests {
             after - before
         );
         assert_eq!(after - before, 0, "allocations on the core thread");
+    }
+
+    /// An origin that answers each request with an empty 204 and hands over its head.
+    fn recording_origin() -> (SocketAddr, std::sync::mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (seen, heads) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let seen = seen.clone();
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    let mut pending = Vec::new();
+                    loop {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => pending.extend_from_slice(&buf[..n]),
+                        }
+                        while let Some(end) = memchr::memmem::find(&pending, b"\r\n\r\n") {
+                            let head: Vec<u8> = pending.drain(..end + 4).collect();
+                            let _ = seen.send(String::from_utf8(head).unwrap());
+                            if stream
+                                .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        (addr, heads)
+    }
+
+    #[test]
+    fn forwarded_requests_name_the_gateway_in_via() {
+        let (origin, heads) = recording_origin();
+        let listen = free_addr();
+        let workers = spawn_workers(&[allowed_cpus()[0]], proxied(origin, listen)).unwrap();
+        let mut conn = connect(listen);
+        let via = |head: &str| -> Vec<String> {
+            head.lines()
+                .filter_map(|l| l.split_once(':'))
+                .filter(|(n, _)| n.eq_ignore_ascii_case("via"))
+                .map(|(_, v)| v.trim().to_owned())
+                .collect()
+        };
+
+        conn.write_all(b"GET / HTTP/1.1\r\nHost: a.example\r\n\r\n")
+            .unwrap();
+        let (head, _) = read_response(&mut conn).unwrap();
+        assert!(head.starts_with("HTTP/1.1 204"), "{head}");
+        assert!(via(&head).is_empty(), "responses carry no Via: {head}");
+        assert_eq!(via(&heads.recv().unwrap()), ["1.1 upstreamer"]);
+
+        conn.write_all(b"GET / HTTP/1.1\r\nHost: a.example\r\nVia: 1.1 cdn\r\n\r\n")
+            .unwrap();
+        read_response(&mut conn).unwrap();
+        assert_eq!(
+            via(&heads.recv().unwrap()),
+            ["1.1 cdn", "1.1 upstreamer"],
+            "the client's Via first, then this hop (RFC 9110 §7.6.3)"
+        );
+
+        let mut old = connect(listen);
+        old.write_all(b"GET / HTTP/1.0\r\nHost: a.example\r\n\r\n")
+            .unwrap();
+        read_response(&mut old).unwrap();
+        assert_eq!(
+            via(&heads.recv().unwrap()),
+            ["1.0 upstreamer"],
+            "the protocol the client spoke"
+        );
+        stop(workers, Instant::now());
     }
 }

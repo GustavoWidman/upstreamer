@@ -259,7 +259,7 @@
   },
   {
     "kind": "finding",
-    "about": "Caddy adds `Via: 1.1 Caddy` to every request it forwards and every proxied response; upstreamer adds none. RFC 9110 §7.6.3 requires a gateway to send Via on the requests it forwards.",
+    "about": "Caddy adds `Via: 1.1 Caddy` to every proxied response as well as to the requests it forwards; upstreamer adds Via to forwarded requests only. RFC 9110 §7.6.3 requires a gateway to send Via on the requests it forwards and leaves it free to send one on responses, which would only tell clients about the fleet's internals.",
     "differences": [
       {
         "site": "app.example.com",
@@ -270,13 +270,6 @@
       },
       {
         "site": "app.example.com",
-        "probe": "api GET with a query",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
         "probe": "api HEAD",
         "field": "header via",
         "caddy": "1.1 Caddy",
@@ -284,22 +277,8 @@
       },
       {
         "site": "app.example.com",
-        "probe": "api HEAD",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
         "probe": "api POST",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "api POST",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -312,22 +291,8 @@
       },
       {
         "site": "app.example.com",
-        "probe": "api POST chunked",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
         "probe": "api root with a slash",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "api root with a slash",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -340,22 +305,8 @@
       },
       {
         "site": "app.example.com",
-        "probe": "api keeps If-Modified-Since",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
         "probe": "api conditional passes through",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "api conditional passes through",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -368,22 +319,8 @@
       },
       {
         "site": "app.example.com",
-        "probe": "api error status passes through",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
         "probe": "api not found passes through",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "api not found passes through",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -396,22 +333,8 @@
       },
       {
         "site": "app.example.com",
-        "probe": "api response fields the site also sets",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
         "probe": "api large body is not compressed",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "api large body is not compressed",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -424,22 +347,8 @@
       },
       {
         "site": "app.example.com",
-        "probe": "api with spoofed forwarding fields",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
         "probe": "api with a cookie and authorization",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "api with a cookie and authorization",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -452,29 +361,8 @@
       },
       {
         "site": "app.example.com",
-        "probe": "api with an encoded slash",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
         "probe": "api event stream",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "api event stream",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "app.example.com",
-        "probe": "api websocket upgrade",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -487,22 +375,8 @@
       },
       {
         "site": "s3.cache.example.com",
-        "probe": "bucket root",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "s3.cache.example.com",
         "probe": "bucket listing",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "s3.cache.example.com",
-        "probe": "bucket listing",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -515,22 +389,8 @@
       },
       {
         "site": "s3.cache.example.com",
-        "probe": "signed object GET",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "s3.cache.example.com",
         "probe": "signed object HEAD",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "s3.cache.example.com",
-        "probe": "signed object HEAD",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -543,13 +403,6 @@
       },
       {
         "site": "s3.cache.example.com",
-        "probe": "object PUT",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "s3.cache.example.com",
         "probe": "object key with reserved characters",
         "field": "header via",
         "caddy": "1.1 Caddy",
@@ -557,22 +410,8 @@
       },
       {
         "site": "s3.cache.example.com",
-        "probe": "object key with reserved characters",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "s3.cache.example.com",
         "probe": "double slash in a key",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "s3.cache.example.com",
-        "probe": "double slash in a key",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -585,22 +424,8 @@
       },
       {
         "site": "cache.example.com",
-        "probe": "cache info",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "cache.example.com",
         "probe": "narinfo HEAD",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "cache.example.com",
-        "probe": "narinfo HEAD",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -613,22 +438,8 @@
       },
       {
         "site": "cache.example.com",
-        "probe": "nar GET",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "cache.example.com",
         "probe": "api GET takes the long timeout route",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "cache.example.com",
-        "probe": "api GET takes the long timeout route",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -641,22 +452,8 @@
       },
       {
         "site": "cache.example.com",
-        "probe": "api POST",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "cache.example.com",
         "probe": "narinfo PUT goes to the second route",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "cache.example.com",
-        "probe": "narinfo PUT goes to the second route",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -669,20 +466,6 @@
       },
       {
         "site": "cache.example.com",
-        "probe": "DELETE",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "cache.example.com",
-        "probe": "read past 15s times out",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "cache.example.com",
         "probe": "upload past 15s does not",
         "field": "header via",
         "caddy": "1.1 Caddy",
@@ -690,22 +473,8 @@
       },
       {
         "site": "cache.example.com",
-        "probe": "upload past 15s does not",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "cache.example.com",
         "probe": "with spoofed forwarding fields",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "cache.example.com",
-        "probe": "with spoofed forwarding fields",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -718,22 +487,8 @@
       },
       {
         "site": "dns.example.net",
-        "probe": "DoH GET",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "dns.example.net",
         "probe": "DoH POST",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "dns.example.net",
-        "probe": "DoH POST",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -746,22 +501,8 @@
       },
       {
         "site": "dns.example.net",
-        "probe": "admin page",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "dns.example.net",
         "probe": "with spoofed forwarding fields",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "dns.example.net",
-        "probe": "with spoofed forwarding fields",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -774,36 +515,8 @@
       },
       {
         "site": "admin.example.net",
-        "probe": "page",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "admin.example.net",
         "probe": "with spoofed forwarding fields",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "admin.example.net",
-        "probe": "with spoofed forwarding fields",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "relay.example.net",
-        "probe": "DERP upgrade",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "relay.example.net",
-        "probe": "websocket upgrade",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -816,13 +529,6 @@
       },
       {
         "site": "relay.example.net",
-        "probe": "probe",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "relay.example.net",
         "probe": "no content",
         "field": "header via",
         "caddy": "1.1 Caddy",
@@ -830,22 +536,8 @@
       },
       {
         "site": "relay.example.net",
-        "probe": "no content",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "relay.example.net",
         "probe": "home",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "relay.example.net",
-        "probe": "home",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -858,29 +550,8 @@
       },
       {
         "site": "play.example.net",
-        "probe": "panel",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "play.example.net",
         "probe": "panel API",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "play.example.net",
-        "probe": "panel API",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "play.example.net",
-        "probe": "panel websocket",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -893,22 +564,8 @@
       },
       {
         "site": "play.example.net",
-        "probe": "daemon root",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "play.example.net",
         "probe": "daemon without a slash goes to the panel",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "play.example.net",
-        "probe": "daemon without a slash goes to the panel",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -921,22 +578,8 @@
       },
       {
         "site": "play.example.net",
-        "probe": "daemon API with a query",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "play.example.net",
         "probe": "daemon path with an encoded slash",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "play.example.net",
-        "probe": "daemon path with an encoded slash",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -949,13 +592,6 @@
       },
       {
         "site": "play.example.net",
-        "probe": "daemon prefix twice",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "play.example.net",
         "probe": "daemon upload",
         "field": "header via",
         "caddy": "1.1 Caddy",
@@ -963,29 +599,8 @@
       },
       {
         "site": "play.example.net",
-        "probe": "daemon upload",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "play.example.net",
-        "probe": "daemon websocket",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "play.example.net",
         "probe": "daemon look-alike",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "play.example.net",
-        "probe": "daemon look-alike",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -998,22 +613,8 @@
       },
       {
         "site": "files.example.net",
-        "probe": "listing",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "files.example.net",
         "probe": "download",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "files.example.net",
-        "probe": "download",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -1026,13 +627,6 @@
       },
       {
         "site": "files.example.net",
-        "probe": "upload",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "files.example.net",
         "probe": "with a spoofed X-Forwarded-For",
         "field": "header via",
         "caddy": "1.1 Caddy",
@@ -1040,22 +634,8 @@
       },
       {
         "site": "files.example.net",
-        "probe": "with a spoofed X-Forwarded-For",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "files.example.net",
         "probe": "origin error passes through",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "files.example.net",
-        "probe": "origin error passes through",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -1068,22 +648,8 @@
       },
       {
         "site": "mail.example.net",
-        "probe": "inbox",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "mail.example.net",
         "probe": "login",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "mail.example.net",
-        "probe": "login",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -1096,13 +662,6 @@
       },
       {
         "site": "mail.example.net",
-        "probe": "fields the site also sets",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "mail.example.net",
         "probe": "origin not found",
         "field": "header via",
         "caddy": "1.1 Caddy",
@@ -1110,22 +669,8 @@
       },
       {
         "site": "mail.example.net",
-        "probe": "origin not found",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "mail.example.net",
         "probe": "conditional",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "mail.example.net",
-        "probe": "conditional",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -1138,29 +683,8 @@
       },
       {
         "site": "lab",
-        "probe": "viewer page",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "lab",
         "probe": "script",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "lab",
-        "probe": "script",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "lab",
-        "probe": "websocket",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       },
@@ -1172,23 +696,9 @@
         "upstreamer": "(absent)"
       },
       {
-        "site": "lab",
-        "probe": "with spoofed forwarding fields",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
         "site": "100.64.0.7",
         "probe": "viewer by tailnet address",
         "field": "header via",
-        "caddy": "1.1 Caddy",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "100.64.0.7",
-        "probe": "viewer by tailnet address",
-        "field": "upstream header via",
         "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       }
@@ -2951,13 +2461,6 @@
         "probe": "daemon upper case",
         "field": "upstream header accept-encoding",
         "caddy": "gzip",
-        "upstreamer": "(absent)"
-      },
-      {
-        "site": "play.example.net",
-        "probe": "daemon upper case",
-        "field": "upstream header via",
-        "caddy": "1.1 Caddy",
         "upstreamer": "(absent)"
       }
     ]

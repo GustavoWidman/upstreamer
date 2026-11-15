@@ -236,7 +236,10 @@ fn normalise_response(mut fields: Vec<(String, String)>) -> Vec<(String, String)
 }
 
 /// Fields dropped from what the origins read, as for responses: framing (RFC 9112 §6) and
-/// per-hop connection options other than `upgrade` (RFC 9110 §7.6.1).
+/// per-hop connection options other than `upgrade` (RFC 9110 §7.6.1). In `via`, each entry's
+/// received-by becomes `(proxy)`: RFC 9110 §7.6.3 lets each intermediary name itself with a
+/// pseudonym of its choosing (`Caddy`, `upstreamer`), and only the received protocol is
+/// compared.
 fn normalise_upstream(mut fields: Vec<(String, String)>) -> Vec<(String, String)> {
     fields.retain(|(n, _)| {
         !matches!(
@@ -255,6 +258,18 @@ fn normalise_upstream(mut fields: Vec<(String, String)>) -> Vec<(String, String)
         }
     }
     fields.retain(|(n, v)| n != "connection" || !v.is_empty());
+    for (name, value) in &mut fields {
+        if name == "via" {
+            let entries: Vec<String> = value
+                .split(',')
+                .map(|entry| match entry.trim().split_once(' ') {
+                    Some((protocol, _)) => format!("{protocol} (proxy)"),
+                    None => entry.trim().to_owned(),
+                })
+                .collect();
+            *value = entries.join(", ");
+        }
+    }
     fields.sort_by(|a, b| a.0.cmp(&b.0));
     fields
 }
