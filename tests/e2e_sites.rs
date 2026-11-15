@@ -314,7 +314,7 @@ fn heimdall_serves_its_app_shell_assets_and_api() {
         assert!(shell.header("date").is_some());
     }
 
-    // The ETag is the sidecar's content, the same for every encoding, and revalidates.
+    // The ETag is the content of the sidecar beside the file sent, and revalidates.
     let etag = String::from_utf8(site.file("index.html.etag")).unwrap();
     let etag = etag.trim();
     assert_eq!(etag.len(), 26);
@@ -338,7 +338,18 @@ fn heimdall_serves_its_app_shell_assets_and_api() {
     let br = get(&mut client, "/", "Accept-Encoding: gzip, br\r\n");
     assert_eq!(br.header("content-encoding"), Some("br"));
     assert_eq!(br.body, site.file("index.html.br"));
-    assert_eq!(br.header("etag"), Some(etag));
+    let br_etag = String::from_utf8(site.file("index.html.br.etag")).unwrap();
+    assert_eq!(br.header("etag"), Some(br_etag.as_str()));
+    assert_eq!(br_etag.len(), 26);
+    let br_fresh = get(
+        &mut client,
+        "/",
+        &format!("Accept-Encoding: br\r\nIf-None-Match: {br_etag}\r\n"),
+    );
+    assert_eq!(
+        br_fresh.status, 304,
+        "heimdall's NixOS test revalidates the br answer"
+    );
     let gzip = get(&mut client, "/settings", "Accept-Encoding: gzip\r\n");
     assert_eq!(gzip.header("content-encoding"), Some("gzip"));
     assert_eq!(gzip.body, site.file("index.html.gz"));

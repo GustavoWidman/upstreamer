@@ -17,14 +17,16 @@
 //!   `vary_accept_encoding` whenever a sidecar exists, so caches key on the header.
 //! - Bodies: files up to 64 KiB come from memory as `Body::Bytes`, larger ones as
 //!   `Body::File` on a descriptor the catalog keeps open.
-//! - ETag: the sidecar's trimmed content if `etagSidecar` is set and the sidecar holds one
-//!   valid entity-tag (identical for every encoding, as Caddy does), else for /nix/store files
-//!   a hash of the store path and size (store mtimes are all 1), else mtime+size.
-//!   Variant-specific suffixes are not added.
+//! - ETag: one per representation, as Caddy gives: the trimmed content of the ETag sidecar
+//!   beside the file sent (`index.html.etag` for the identity bytes, `index.html.br.etag` for
+//!   the brotli ones) when `etagSidecar` is set and it holds one valid entity-tag, else for
+//!   /nix/store files a hash of the store path and size (store mtimes are all 1), else
+//!   mtime+size. Conditionals compare against the tag of the representation the request gets.
 //! - No Last-Modified for files whose mtime is <= 1 (every store path).
 //! - If-None-Match (weak comparison) -> 304; If-Modified-Since only without If-None-Match.
 //! - Range: one `bytes=` range -> 206 on the identity representation (a ranged request never
-//!   gets a compressed variant), If-Range honoured; multi-range -> 200 full.
+//!   gets a compressed variant), If-Range honoured; multi-range -> 200 full. Every 200 and 206,
+//!   precompressed ones included, says `Accept-Ranges: bytes`.
 //! - In an error route: served with the error's status, conditionals and ranges ignored, and
 //!   without validators (an error page's ETag would let a cache revalidate the error).
 
@@ -93,45 +95,45 @@ fn serve_with(
     )?;
 
     let fields = &ex.req.fields;
-    let accept = fields.get(Known::AcceptEncoding);
     let vary = options
         .precompressed
         .iter()
         .any(|&e| file.content(Some(e)).is_some());
-    let encoding = |ranged: bool| {
-        (!ranged)
-            .then(|| {
-                negotiate::pick_encoding(accept, options.precompressed, |e| {
-                    file.content(Some(e)).is_some()
-                })
-            })
-            .flatten()
-    };
+    let negotiated = negotiate::pick_encoding(
+        fields.get(Known::AcceptEncoding),
+        options.precompressed,
+        |e| file.content(Some(e)).is_some(),
+    );
 
     let Some(status) = error else {
-        if let Conditional::NotModified = negotiate::conditional(
-            fields.get(Known::IfNoneMatch),
-            fields.get(Known::IfModifiedSince),
-            Some(&file.etag),
-            file.mtime,
-        ) {
-            let mut head = ex.response_head(Status::NOT_MODIFIED);
-            head.fields.append_known(Known::ETag, &file.etag);
-            head.vary_accept_encoding = vary;
-            return Ok(local(head, Body::Empty));
-        }
         let decision = match method {
             Method::Get => negotiate::range(
                 fields.get(Known::Range),
                 fields.get(Known::IfRange),
-                Some(&file.etag),
+                Some(&file.identity.etag),
                 file.identity.len,
             ),
             _ => RangeDecision::Full,
         };
-        let (status, range, encoding) = match decision {
-            RangeDecision::Full => (Status::OK, None, encoding(false)),
-            RangeDecision::Partial(range) => (Status::PARTIAL_CONTENT, Some(range), None),
+        let encoding = match decision {
+            RangeDecision::Full => negotiated,
+            RangeDecision::Partial(_) | RangeDecision::NotSatisfiable => None,
+        };
+        let content = file.content(encoding).expect("negotiated variants exist");
+        if let Conditional::NotModified = negotiate::conditional(
+            fields.get(Known::IfNoneMatch),
+            fields.get(Known::IfModifiedSince),
+            Some(&content.etag),
+            file.mtime,
+        ) {
+            let mut head = ex.response_head(Status::NOT_MODIFIED);
+            head.fields.append_known(Known::ETag, &content.etag);
+            head.vary_accept_encoding = vary;
+            return Ok(local(head, Body::Empty));
+        }
+        let (status, range) = match decision {
+            RangeDecision::Full => (Status::OK, 0..content.len),
+            RangeDecision::Partial(range) => (Status::PARTIAL_CONTENT, range),
             RangeDecision::NotSatisfiable => {
                 let mut head = ex.response_head(Status::RANGE_NOT_SATISFIABLE);
                 let mut buf = [0u8; 32];
@@ -142,8 +144,6 @@ fn serve_with(
                 return Ok(local(head, Body::Empty));
             }
         };
-        let content = file.content(encoding).expect("negotiated variants exist");
-        let range = range.unwrap_or(0..content.len);
         let mut head = ex.response_head(status);
         head.fields
             .append_known(Known::ContentType, file.content_type.as_bytes());
@@ -151,13 +151,11 @@ fn serve_with(
             head.fields
                 .append_known(Known::ContentEncoding, encoding.token());
         }
-        head.fields.append_known(Known::ETag, &file.etag);
+        head.fields.append_known(Known::ETag, &content.etag);
         if let Some(date) = &file.last_modified {
             head.fields.append_known(Known::LastModified, date);
         }
-        if encoding.is_none() {
-            head.fields.push(b"accept-ranges", b"bytes");
-        }
+        head.fields.push(b"accept-ranges", b"bytes");
         if status == Status::PARTIAL_CONTENT {
             let mut buf = [0u8; 64];
             let value = fmt(
@@ -170,7 +168,7 @@ fn serve_with(
         return Ok(local(head, body(content, range)));
     };
 
-    let encoding = encoding(false);
+    let encoding = negotiated;
     let content = file.content(encoding).expect("negotiated variants exist");
     let mut head = ex.response_head(status);
     head.fields
@@ -425,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn heimdall_index_in_brotli_with_the_sidecar_etag() {
+    fn heimdall_index_in_brotli_with_the_brotli_files_etag() {
         let tree = Tree::fixture("heimdall");
         let mut catalog = tree.store_catalog();
         let site = options(&[Br, Gzip], Some(".etag"));
@@ -446,10 +444,12 @@ mod tests {
         );
         let etag = resp.header("etag").unwrap();
         assert_eq!(
-            etag, r#""Vh2c1Qx0aZ3kLm9PqR7sT4uW""#,
-            "the sidecar's content, trimmed"
+            etag,
+            String::from_utf8(tree.read("index.html.br.etag")).unwrap(),
+            "the content of the brotli file's own ETag sidecar"
         );
-        assert_eq!(etag.len(), 26);
+        assert_eq!(etag.len(), 26, "heimdall's content-hash tags are 26 bytes");
+        assert_eq!(resp.header("accept-ranges"), Some("bytes"));
         assert_eq!(resp.header("last-modified"), None, "store mtimes are 1");
         assert!(resp.vary_accept_encoding);
 
@@ -465,13 +465,14 @@ mod tests {
         assert_eq!(gzip.body, tree.read("index.html.gz"));
         assert_eq!(
             gzip.header("etag"),
-            Some(etag),
-            "one ETag for every encoding"
+            Some(r#""Gz8hR3nYw5KqD2fM7tV0xA9b""#),
+            "each encoding has its own ETag"
         );
 
         let plain = get(&site, &tree.root(""), &mut catalog, "/index.html", &[]).unwrap();
         assert_eq!(plain.header("content-encoding"), None);
         assert_eq!(plain.body, tree.read("index.html"));
+        assert_eq!(plain.header("etag"), Some(r#""Vh2c1Qx0aZ3kLm9PqR7sT4uW""#));
         assert!(
             plain.vary_accept_encoding,
             "the answer depends on Accept-Encoding"
@@ -483,19 +484,44 @@ mod tests {
         let tree = Tree::fixture("heimdall");
         let mut catalog = tree.store_catalog();
         let site = options(&[Br, Gzip], Some(".etag"));
-        let etag = r#""Vh2c1Qx0aZ3kLm9PqR7sT4uW""#;
+        let br = r#""Br4kQ9mXv2LpT7cN1sW6yZ0e""#;
+        let identity = r#""Vh2c1Qx0aZ3kLm9PqR7sT4uW""#;
         let resp = get(
             &site,
             &tree.root(""),
             &mut catalog,
             "/",
-            &[("accept-encoding", "br"), ("if-none-match", etag)],
+            &[("accept-encoding", "br"), ("if-none-match", br)],
         )
         .unwrap();
         assert_eq!(resp.status, 304);
-        assert_eq!(resp.header("etag"), Some(etag));
+        assert_eq!(resp.header("etag"), Some(br));
         assert!(resp.body.is_empty());
         assert!(resp.vary_accept_encoding);
+
+        let plain = get(
+            &site,
+            &tree.root(""),
+            &mut catalog,
+            "/",
+            &[("if-none-match", identity)],
+        )
+        .unwrap();
+        assert_eq!((plain.status, plain.header("etag")), (304, Some(identity)));
+
+        let switched = get(
+            &site,
+            &tree.root(""),
+            &mut catalog,
+            "/",
+            &[("accept-encoding", "br"), ("if-none-match", identity)],
+        )
+        .unwrap();
+        assert_eq!(
+            (switched.status, switched.header("etag")),
+            (200, Some(br)),
+            "the identity tag does not validate the brotli representation"
+        );
 
         let changed = get(
             &site,
@@ -562,6 +588,8 @@ mod tests {
             "/index.html.etag",
             "/index.html.br",
             "/index.html.gz",
+            "/index.html.br.etag",
+            "/index.html.gz.etag",
             "/sw.js.etag",
             "/_app/immutable/entry/app.Bk3d9f.js.gz",
         ] {
@@ -667,7 +695,13 @@ mod tests {
         .unwrap();
         assert_eq!(home.header("content-encoding"), Some("zstd"));
         assert_eq!(home.body, tree.read("site/e0/main/en/index.html.zst"));
-        assert_eq!(home.header("etag"), Some(r#""e0-main-en-index""#));
+        let zstd_tag = home.header("etag").unwrap();
+        assert_ne!(
+            zstd_tag, r#""e0-main-en-index""#,
+            "without `index.html.zst.etag` the zstd file's tag is derived from it"
+        );
+        let plain = get(&pages, &root, &mut catalog, "/", &[]).unwrap();
+        assert_eq!(plain.header("etag"), Some(r#""e0-main-en-index""#));
 
         let post = get(
             &pages,
@@ -1005,7 +1039,7 @@ mod tests {
         std::fs::remove_dir_all(tree.path("")).unwrap();
         let (resp, missing, sidecar) = warm(&mut catalog);
         assert_eq!(resp.body, index, "served from the catalog");
-        assert_eq!(resp.header("etag"), Some(r#""Vh2c1Qx0aZ3kLm9PqR7sT4uW""#));
+        assert_eq!(resp.header("etag"), Some(r#""Br4kQ9mXv2LpT7cN1sW6yZ0e""#));
         assert_eq!((missing, sidecar), (404, 404));
         catalog.retain_immutable();
         assert_eq!(

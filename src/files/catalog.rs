@@ -47,9 +47,6 @@ pub(crate) struct FileEntry {
     pub identity: Content,
     /// Indexed by `Encoding as usize`: the sidecars found on disk, among those looked for.
     pub variants: [Option<Content>; 3],
-    /// A valid entity-tag: the ETag sidecar's content when there is one, else derived from the
-    /// store path and size (store files) or the mtime and size.
-    pub etag: Box<[u8]>,
     /// `None` when the mtime is <= 1 (every store path), where a date would lie.
     pub last_modified: Option<[u8; 29]>,
     pub mtime: i64,
@@ -57,11 +54,17 @@ pub(crate) struct FileEntry {
     looked_for: LookedFor,
 }
 
-/// The bytes of one representation of a file.
+/// The bytes of one representation of a file, and its validator.
 #[derive(Debug)]
 pub(crate) struct Content {
     pub len: u64,
     pub data: Data,
+    /// A valid entity-tag of these bytes: the content of the ETag sidecar beside the file that
+    /// holds them (`index.html.etag`, `index.html.br.etag`) when there is one, else derived
+    /// from that file's store path and size (store files) or its mtime and size. Each encoding
+    /// has its own, as with Caddy: one strong tag on two representations would let If-Range
+    /// or a cache splice their bytes together (RFC 9110 §8.8.3).
+    pub etag: Box<[u8]>,
 }
 
 #[derive(Debug)]
@@ -312,34 +315,28 @@ impl Catalog {
 }
 
 fn load(path: &[u8], immutable: bool, want: &Want<'_>, small_file: u64) -> Node {
-    let Some((content, meta)) = open(path, small_file) else {
+    let mut scratch = Vec::with_capacity(path.len() + 16);
+    let Some((identity, meta)) = open(path, immutable, want.etag_ext, small_file, &mut scratch)
+    else {
         return match std::fs::metadata(OsStr::from_bytes(path)) {
             Ok(meta) if meta.is_dir() => Node::Dir,
             _ => Node::Missing,
         };
     };
-    let mut sidecar = Vec::with_capacity(path.len() + 8);
-    let mut sidecar_path = |ext: &[u8]| {
-        sidecar.clear();
-        sidecar.extend_from_slice(path);
-        sidecar.extend_from_slice(ext);
-        OsStr::from_bytes(&sidecar).to_owned()
-    };
     let variants = [Encoding::Br, Encoding::Zstd, Encoding::Gzip].map(|e| {
-        (want.encodings & 1 << e as u8 != 0)
-            .then(|| open(sidecar_path(e.sidecar()).as_bytes(), small_file))
-            .flatten()
+        if want.encodings & 1 << e as u8 == 0 {
+            return None;
+        }
+        let mut sidecar = Vec::with_capacity(path.len() + e.sidecar().len());
+        sidecar.extend_from_slice(path);
+        sidecar.extend_from_slice(e.sidecar());
+        open(&sidecar, immutable, want.etag_ext, small_file, &mut scratch)
             .map(|(content, _)| content)
     });
-    let etag = want
-        .etag_ext
-        .and_then(|ext| etag_sidecar(sidecar_path(ext).as_bytes()))
-        .unwrap_or_else(|| derived_etag(path, &meta, immutable));
     let mtime = meta.mtime();
     Node::File(Rc::new(FileEntry {
-        identity: content,
+        identity,
         variants,
-        etag,
         last_modified: (mtime > 1).then(|| http_date(mtime)),
         mtime,
         content_type: content_type(path),
@@ -350,28 +347,37 @@ fn load(path: &[u8], immutable: bool, want: &Want<'_>, small_file: u64) -> Node 
     }))
 }
 
-/// Opens a regular file: its bytes when small, its descriptor otherwise. `None` for anything
-/// that is not a readable regular file.
-fn open(path: &[u8], small_file: u64) -> Option<(Content, Metadata)> {
+/// Opens a regular file as one representation: its bytes when small, its descriptor
+/// otherwise, and its ETag (from `<path><etag_ext>` when that holds one). `None` for anything
+/// that is not a readable regular file. `scratch` holds the ETag sidecar's path.
+fn open(
+    path: &[u8],
+    immutable: bool,
+    etag_ext: Option<&[u8]>,
+    small_file: u64,
+    scratch: &mut Vec<u8>,
+) -> Option<(Content, Metadata)> {
     let mut file = File::open(OsStr::from_bytes(path)).ok()?;
     let meta = file.metadata().ok()?;
     if !meta.is_file() {
         return None;
     }
-    let content = if meta.len() <= small_file {
+    let (len, data) = if meta.len() <= small_file {
         let mut bytes = Vec::with_capacity(meta.len() as usize);
         file.read_to_end(&mut bytes).ok()?;
-        Content {
-            len: bytes.len() as u64,
-            data: Data::Small(Bytes::from(bytes)),
-        }
+        (bytes.len() as u64, Data::Small(Bytes::from(bytes)))
     } else {
-        Content {
-            len: meta.len(),
-            data: Data::Open(Rc::new(file)),
-        }
+        (meta.len(), Data::Open(Rc::new(file)))
     };
-    Some((content, meta))
+    let etag = etag_ext
+        .and_then(|ext| {
+            scratch.clear();
+            scratch.extend_from_slice(path);
+            scratch.extend_from_slice(ext);
+            etag_sidecar(scratch)
+        })
+        .unwrap_or_else(|| derived_etag(path, &meta, immutable));
+    Some((Content { len, data, etag }, meta))
 }
 
 /// The content of an ETag sidecar, trimmed, when it is one valid entity-tag.
