@@ -198,13 +198,16 @@ async fn stream(
         Ok(resolved) => resolved,
         Err(e) => return debug!("core {}: h3 request from {}: {e}", core.index, info.remote),
     };
-    let (mut send, recv) = stream.split();
+    let (mut send, mut recv) = stream.split();
     let (parts, ()) = request.into_parts();
     // Once per request, as on h1: a reload applies to the next request of every connection.
     let snap = core.snapshot();
     let mut ex = core.exchanges.take(info, snap.plan.var_count);
     let resp = match head(&mut ex, &parts, &snap.plan.server) {
-        Err(status) => pipeline::bare(&mut ex, status),
+        Err(status) => {
+            recv.stop_sending(Code::H3_NO_ERROR);
+            pipeline::bare(&mut ex, status)
+        }
         Ok(declared) => match request_body(recv, declared).await {
             Ok(body) => pipeline::handle(&core, &snap, &mut ex, body).await,
             Err(BodyError::Malformed) => pipeline::bare(&mut ex, Status::BAD_REQUEST),
