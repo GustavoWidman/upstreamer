@@ -449,9 +449,9 @@
           };
           description = ''
             Top-level settings of upstreamer's config file, merged over what the module
-            generates: `timeouts` (`header`, `keepAlive`, `h2Idle`, `shutdown`; durations such
+            generates: `timeouts` (`header`, `keepAlive`, `shutdown`; durations such
             as `"300ms"`, `"5s"`, `"2m"`, `"1h"`) and `limits` (`maxHeadBytes`,
-            `maxHeaderFields`, `h2MaxStreams`).
+            `maxHeaderFields`, `maxStreams`).
           '';
         };
 

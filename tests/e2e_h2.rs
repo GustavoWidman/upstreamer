@@ -649,7 +649,7 @@ fn an_idle_connection_closes_and_an_open_stream_keeps_it() {
     });
     let tls = Tls::start_with(
         site(json!([{ "proxy": origin.url() }])),
-        json!({ "timeouts": { "h2Idle": "1s", "shutdown": "1s" } }),
+        json!({ "timeouts": { "keepAlive": "1s", "shutdown": "1s" } }),
     );
     let rt = runtime();
     let mut h2 = tls.h2(&rt);

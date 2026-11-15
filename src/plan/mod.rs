@@ -57,11 +57,10 @@ pub(crate) struct Plan {
 pub(crate) struct ServerParams {
     pub header_timeout: Duration,
     pub keep_alive: Duration,
-    pub h2_idle: Duration,
     pub shutdown: Duration,
     pub max_head_bytes: u32,
     pub max_header_fields: u16,
-    pub h2_max_streams: u32,
+    pub max_streams: u32,
 }
 
 impl Default for ServerParams {
@@ -70,11 +69,10 @@ impl Default for ServerParams {
         ServerParams {
             header_timeout: Duration::from_secs(10),
             keep_alive: Duration::from_secs(75),
-            h2_idle: Duration::from_secs(300),
             shutdown: Duration::from_secs(10),
             max_head_bytes: 32 * 1024,
             max_header_fields: 100,
-            h2_max_streams: 128,
+            max_streams: 128,
         }
     }
 }

@@ -9,7 +9,7 @@
 //!
 //! A RST_STREAM from the client drops the stream's work where it stands: an upstream exchange
 //! in progress is closed, never pooled. Draining sends GOAWAY and lets open streams finish
-//! within the shutdown deadline; a connection without streams for `h2_idle` closes the same way.
+//! within the shutdown deadline; a connection without streams for `keep_alive` closes the same way.
 //!
 //! # Allocations per stream
 //!
@@ -48,7 +48,7 @@ const MAX_HEADER_LIST: u32 = 64 * 1024;
 pub(crate) async fn serve(core: Rc<Core>, io: Transport, info: ConnInfo) {
     let (handshake_timeout, idle_timeout, max_streams) = {
         let server = &core.snapshot().plan.server;
-        (server.header_timeout, server.h2_idle, server.h2_max_streams)
+        (server.header_timeout, server.keep_alive, server.max_streams)
     };
     let handshake = ::h2::server::Builder::new()
         .initial_window_size(STREAM_WINDOW)

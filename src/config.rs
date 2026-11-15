@@ -129,26 +129,27 @@ fn pointer(path: &serde_path_to_error::Path) -> String {
     out
 }
 
-/// Downstream timeouts. Defaults: header 10s, keepAlive 75s, h2Idle 5m, shutdown 10s.
+/// Downstream timeouts. Defaults: header 10s, keepAlive 75s, shutdown 10s.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct ServerTimeouts {
     /// From the first byte of a request to the end of its head (slowloris bound).
     pub header: Option<Dur>,
-    /// Idle keep-alive connection (h1) before it is closed.
+    /// How long a connection with no request in flight stays open: between requests on
+    /// HTTP/1.1, without streams on HTTP/2, without packets on HTTP/3.
     pub keep_alive: Option<Dur>,
-    pub h2_idle: Option<Dur>,
     /// Graceful shutdown: how long in-flight requests and tunnels may run after SIGTERM.
     pub shutdown: Option<Dur>,
 }
 
-/// Defaults: head 32 KiB, 100 header fields, h2 128 streams per connection.
+/// Defaults: head 32 KiB, 100 header fields, 128 streams per HTTP/2 or HTTP/3 connection.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct Limits {
     pub max_head_bytes: Option<u32>,
     pub max_header_fields: Option<u16>,
-    pub h2_max_streams: Option<u32>,
+    /// Requests a client may have open at once on one HTTP/2 or HTTP/3 connection.
+    pub max_streams: Option<u32>,
 }
 
 /// One virtual host (`services.upstreamer.virtualHosts.<name>`).
@@ -622,6 +623,33 @@ mod tests {
             e.message,
             "invalid type: integer `7`, expected a string or a list of strings"
         );
+    }
+
+    #[test]
+    fn one_idle_timeout_and_one_stream_limit_for_every_protocol() {
+        let config = parse_config(
+            br#"{"version":1,"sites":[],"timeouts":{"keepAlive":"30s"},"limits":{"maxStreams":64}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.timeouts.keep_alive.unwrap().0,
+            Duration::from_secs(30)
+        );
+        assert_eq!(config.limits.max_streams, Some(64));
+        for (json, pointer) in [
+            (
+                br#"{"version":1,"sites":[],"timeouts":{"h2Idle":"5m"}}"#.as_slice(),
+                "/timeouts/h2Idle",
+            ),
+            (
+                br#"{"version":1,"sites":[],"limits":{"h2MaxStreams":64}}"#,
+                "/limits/h2MaxStreams",
+            ),
+        ] {
+            let e = parse_config(json).unwrap_err();
+            assert_eq!(e.pointer, pointer);
+            assert!(e.message.starts_with("unknown field"), "{}", e.message);
+        }
     }
 
     #[test]

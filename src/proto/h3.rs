@@ -31,14 +31,14 @@ type Connection = h3::server::Connection<h3_quinn::Connection, Bytes>;
 type SendStream = h3::server::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>;
 type RecvStream = h3::server::RequestStream<h3_quinn::RecvStream, Bytes>;
 
-/// QUIC transport settings for the plan's limits. The multiplexed-connection settings that h2
-/// reads apply to h3 as well: `h2MaxStreams` bounds the request streams a client may have open
-/// at once and `h2Idle` is how long a connection without traffic stays open.
+/// QUIC transport settings for the plan's limits: `maxStreams` bounds the request streams a
+/// client may have open at once and `keepAlive` is how long a connection without traffic stays
+/// open.
 pub(crate) fn transport(server: &ServerParams) -> Arc<quinn::TransportConfig> {
     let mut transport = quinn::TransportConfig::default();
     transport
-        .max_concurrent_bidi_streams(server.h2_max_streams.into())
-        .max_idle_timeout(quinn::IdleTimeout::try_from(server.h2_idle).ok());
+        .max_concurrent_bidi_streams(server.max_streams.into())
+        .max_idle_timeout(quinn::IdleTimeout::try_from(server.keep_alive).ok());
     Arc::new(transport)
 }
 

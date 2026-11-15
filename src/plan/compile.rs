@@ -112,11 +112,10 @@ fn server_params(config: &Config) -> ServerParams {
     ServerParams {
         header_timeout: t.header.map_or(d.header_timeout, |x| x.0),
         keep_alive: t.keep_alive.map_or(d.keep_alive, |x| x.0),
-        h2_idle: t.h2_idle.map_or(d.h2_idle, |x| x.0),
         shutdown: t.shutdown.map_or(d.shutdown, |x| x.0),
         max_head_bytes: l.max_head_bytes.unwrap_or(d.max_head_bytes),
         max_header_fields: l.max_header_fields.unwrap_or(d.max_header_fields),
-        h2_max_streams: l.h2_max_streams.unwrap_or(d.h2_max_streams),
+        max_streams: l.max_streams.unwrap_or(d.max_streams),
     }
 }
 
