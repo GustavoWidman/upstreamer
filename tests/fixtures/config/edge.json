@@ -114,6 +114,7 @@
       }
     },
     {
+      "accessLog": "/var/log/upstreamer/access-cache.example.com.log",
       "errors": [],
       "headers": {},
       "hosts": [
@@ -158,6 +159,7 @@
       }
     },
     {
+      "accessLog": "/srv/logs/s3.log",
       "errors": [],
       "headers": {},
       "hosts": [

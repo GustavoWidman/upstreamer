@@ -48,4 +48,11 @@
       };
     }
   ];
+
+  # Access logs: one host in the service's logs directory, one in a directory of its own.
+  services.upstreamer.virtualHosts."cache.example.com".accessLog.enable = true;
+  services.upstreamer.virtualHosts."s3.cache.example.com".accessLog = {
+    enable = true;
+    path = "/srv/logs/s3.log";
+  };
 }

@@ -71,7 +71,31 @@ let
       tcp = sorted c.networking.firewall.allowedTCPPorts;
       udp = sorted c.networking.firewall.allowedUDPPorts;
       tlsModule = lib.elem "tls" c.boot.kernelModules;
+      logs =
+        let
+          rotate = c.services.logrotate.settings.upstreamer or null;
+        in
+        {
+          directory = u.serviceConfig.LogsDirectory or null;
+          readWritePaths = u.serviceConfig.ReadWritePaths or [ ];
+          rotated = if rotate == null then [ ] else rotate.files;
+          rotation =
+            if rotate == null then
+              null
+            else
+              {
+                inherit (rotate) frequency compress delaycompress;
+                reloads = lib.hasSuffix "/bin/systemctl try-reload-or-restart upstreamer.service" rotate.postrotate;
+              };
+        };
     };
+
+  noLogs = {
+    directory = null;
+    readWritePaths = [ ];
+    rotated = [ ];
+    rotation = null;
+  };
 
   cert = domain: extraDomainNames: group: reloadServices: {
     inherit
@@ -103,6 +127,20 @@ let
       ];
       udp = [ 443 ];
       tlsModule = true;
+      logs = {
+        directory = "upstreamer";
+        readWritePaths = [ "-/srv/logs" ];
+        rotated = [
+          "/var/log/upstreamer/access-cache.example.com.log"
+          "/srv/logs/s3.log"
+        ];
+        rotation = {
+          frequency = "daily";
+          compress = true;
+          delaycompress = true;
+          reloads = true;
+        };
+      };
     };
     apps = {
       failedAssertions = [ ];
@@ -133,6 +171,7 @@ let
       ];
       udp = [ 443 ];
       tlsModule = true;
+      logs = noLogs;
     };
     desktop = {
       failedAssertions = [ ];
@@ -141,6 +180,7 @@ let
       tcp = [ ];
       udp = [ ];
       tlsModule = false;
+      logs = noLogs;
     };
     custom = {
       failedAssertions = [ ];
@@ -163,6 +203,7 @@ let
         8443
       ];
       tlsModule = true;
+      logs = noLogs;
     };
   };
 

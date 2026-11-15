@@ -32,6 +32,7 @@
         mkIf
         mkOption
         optional
+        optionalAttrs
         optionals
         recursiveUpdate
         subtractLists
@@ -242,6 +243,53 @@
               '';
             };
 
+            accessLog = {
+              enable = mkOption {
+                type = types.bool;
+                default = false;
+                description = ''
+                  Write an access log for this host: one JSON object per line for every request it
+                  answers, and for every WebSocket or other upgraded connection once it closes.
+                  The fields, always present and in this order:
+
+                  - `ts`: when the response or tunnel ended, UTC, RFC 3339 with milliseconds
+                    (`"2026-11-14T08:49:37.123Z"`).
+                  - `remote_ip`, `remote_port`: the client's address.
+                  - `host`: the host name the request was matched by (lowercase, without port).
+                  - `method`, `target`: as the client sent them (the target before any
+                    `rewrite` or `stripPrefix`).
+                  - `proto`: `"HTTP/1.0"`, `"HTTP/1.1"`, `"HTTP/2"` or `"HTTP/3"`.
+                  - `user_agent`, `referer`: the request's header, or `null`.
+                  - `status`: the status sent (101 for an upgraded connection).
+                  - `bytes`: body bytes sent after the response head (over HTTP/1.1 as on the
+                    wire, chunk syntax included); for an upgraded connection, the bytes relayed
+                    to the client.
+                  - `duration`: seconds, to the microsecond, from the host's choice to the end of
+                    the response or tunnel.
+                  - `upstream`: the `host:port` of the last `proxy` step that ran, or `null`.
+
+                  Strings are JSON-escaped; an invalid UTF-8 sequence in a header becomes U+FFFD.
+
+                  Each worker buffers lines and appends them in batches, at the latest a second
+                  after a request ends; lines are never split or interleaved. When the disk is
+                  full the lines are dropped and counted in the journal, and requests are not
+                  slowed. The module rotates the files daily with logrotate, which reloads the
+                  service so it reopens them.
+                '';
+              };
+
+              path = mkOption {
+                type = types.strMatching "/.*";
+                default = "/var/log/upstreamer/access-${lib.replaceStrings [ "/" " " ] [ "_" "_" ] name}.log";
+                defaultText = lib.literalExpression ''"/var/log/upstreamer/access-''${name}.log"'';
+                description = ''
+                  The log file. Hosts that name the same file share it. The default directory is
+                  the service's `LogsDirectory`; a file elsewhere needs a directory that exists
+                  and that the service's dynamic user may write to.
+                '';
+              };
+            };
+
             proxy = mkOption {
               type = types.nullOr (types.either types.str json);
               default = null;
@@ -273,29 +321,38 @@
       hostPort = addr: port: "${addr}:${toString port}";
       defaultAddrs = port: map (a: hostPort a port) cfg.listen.addresses;
 
-      site = name: v: {
-        inherit name;
-        hosts = namesOf v;
-        tls =
-          if !v.tls.enable then
-            null
-          else
-            {
-              cert = if v.tls.certFile != null then v.tls.certFile else "${certDir v.tls.acmeCert}/fullchain.pem";
-              key = if v.tls.keyFile != null then v.tls.keyFile else "${certDir v.tls.acmeCert}/key.pem";
-              redirectHttp = v.tls.redirectHttp && v.listen == [ ];
-              inherit (v) http3;
-            };
-        listen =
-          if v.listen == [ ] then
-            null
-          else
-            concatMap (
-              l: if l.addr != null then [ (hostPort l.addr l.port) ] else defaultAddrs l.port
-            ) v.listen;
-        inherit (v) headers errors;
-        routes = v.routes ++ optional (v.proxy != null) { inherit (v) proxy; };
-      };
+      site =
+        name: v:
+        {
+          inherit name;
+          hosts = namesOf v;
+          tls =
+            if !v.tls.enable then
+              null
+            else
+              {
+                cert = if v.tls.certFile != null then v.tls.certFile else "${certDir v.tls.acmeCert}/fullchain.pem";
+                key = if v.tls.keyFile != null then v.tls.keyFile else "${certDir v.tls.acmeCert}/key.pem";
+                redirectHttp = v.tls.redirectHttp && v.listen == [ ];
+                inherit (v) http3;
+              };
+          listen =
+            if v.listen == [ ] then
+              null
+            else
+              concatMap (
+                l: if l.addr != null then [ (hostPort l.addr l.port) ] else defaultAddrs l.port
+              ) v.listen;
+          inherit (v) headers errors;
+          routes = v.routes ++ optional (v.proxy != null) { inherit (v) proxy; };
+        }
+        // optionalAttrs v.accessLog.enable { accessLog = v.accessLog.path; };
+
+      logDir = "/var/log/upstreamer";
+      logPaths = unique (map (v: v.accessLog.path) (filter (v: v.accessLog.enable) vhosts));
+      # Directories of logs outside the LogsDirectory, made writable through ProtectSystem
+      # ("-": a directory that does not exist does not fail the unit).
+      outsideLogDirs = unique (map dirOf (filter (p: dirOf p != logDir) logPaths));
 
       settings = recursiveUpdate {
         version = 1;
@@ -593,6 +650,8 @@
             RestrictRealtime = true;
             RestrictSUIDSGID = true;
             SystemCallArchitectures = "native";
+            LogsDirectory = mkIf (logPaths != [ ]) "upstreamer";
+            ReadWritePaths = mkIf (outsideLogDirs != [ ]) (map (d: "-${d}") outsideLogDirs);
             # @system-service keeps sched_setaffinity (worker pinning) and setsockopt (kTLS).
             SystemCallFilter = [
               "@system-service"
@@ -607,6 +666,23 @@
         # Connections queued on a reuseport socket that closes (restart, removed listener) move to
         # a sibling socket instead of being reset.
         boot.kernel.sysctl."net.ipv4.tcp_migrate_req" = lib.mkDefault 1;
+
+        # Rotation renames the files; the reload that follows makes the proxy open new ones.
+        services.logrotate.settings.upstreamer = mkIf (logPaths != [ ]) (
+          lib.mapAttrs (_: lib.mkDefault) {
+            files = logPaths;
+            frequency = "daily";
+            rotate = 14;
+            compress = true;
+            # A line from a request that started before the reload may still land in the
+            # rotated file; it is compressed at the next rotation instead.
+            delaycompress = true;
+            missingok = true;
+            notifempty = true;
+            sharedscripts = true;
+            postrotate = "${config.systemd.package}/bin/systemctl try-reload-or-restart upstreamer.service";
+          }
+        );
 
         networking.firewall = mkIf cfg.openFirewall {
           allowedTCPPorts = usedPorts;
