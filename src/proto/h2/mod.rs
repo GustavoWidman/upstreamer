@@ -39,7 +39,6 @@ mod engine;
 mod frame;
 mod hpack;
 mod huffman;
-pub(crate) mod legacy;
 mod task;
 mod wake;
 
@@ -96,9 +95,6 @@ pub(crate) struct Conn {
 /// Serves one connection until the client closes it, a connection error, the idle timeout
 /// or the end of a drain.
 pub(crate) async fn serve(core: Rc<Core>, io: Transport, info: ConnInfo) {
-    if legacy::selected() {
-        return Box::pin(legacy::serve(core, io, info)).await;
-    }
     let server = core.snapshot().plan.server.clone();
     let ready = Ready::new(Engine::slots(server.max_streams));
     let conn = Conn {

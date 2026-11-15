@@ -54,7 +54,8 @@ command line.
 | `src/proto/h1/codec.rs` | HTTP/1.1 parsing, framing and serialisation, without IO |
 | `src/proto/h1/server.rs` | the HTTP/1.1 connection driver |
 | `src/proto/h1/client.rs` | the upstream request head |
-| `src/proto/h2.rs`, `src/proto/h3.rs` | HTTP/2 and HTTP/3 drivers on the `h2`, `quinn` and `h3` crates |
+| `src/proto/h2/` | the HTTP/2 connection engine (frames, HPACK, flow control, limits) and its driver |
+| `src/proto/h3.rs` | the HTTP/3 driver on the `quinn` and `h3` crates |
 | `src/proxy/mod.rs` | forwarding to an origin, dialling, the retry rule |
 | `src/proxy/pool.rs` | per-core idle upstream connections |
 | `src/proxy/relay.rs` | body relays and upgraded tunnels |

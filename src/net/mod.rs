@@ -637,7 +637,7 @@ impl Transport {
     }
 }
 
-// Poll-based IO for the h2 crate, which drives its connection through tokio's traits.
+// Poll-based IO for the HTTP/2 driver, whose one task polls the transport and its streams.
 impl AsyncRead for Transport {
     fn poll_read(
         self: Pin<&mut Self>,

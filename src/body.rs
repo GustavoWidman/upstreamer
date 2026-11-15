@@ -102,7 +102,6 @@ pub(crate) enum RequestBody<'a> {
     Empty,
     H1(H1Body<'a>),
     H2(crate::proto::h2::H2Body<'a>),
-    H2Legacy(crate::proto::h2::legacy::H2Body),
     H3(crate::proto::h3::H3Body),
 }
 
@@ -113,7 +112,6 @@ impl RequestBody<'_> {
             RequestBody::Empty => Some(0),
             RequestBody::H1(body) => body.state.track.remaining(),
             RequestBody::H2(body) => body.len(),
-            RequestBody::H2Legacy(body) => body.len(),
             RequestBody::H3(body) => body.declared,
         }
     }
@@ -124,7 +122,7 @@ impl RequestBody<'_> {
         match self {
             RequestBody::Empty => true,
             RequestBody::H1(body) => body.state.is_empty(),
-            RequestBody::H2(_) | RequestBody::H2Legacy(_) | RequestBody::H3(_) => false,
+            RequestBody::H2(_) | RequestBody::H3(_) => false,
         }
     }
 
@@ -134,7 +132,6 @@ impl RequestBody<'_> {
             RequestBody::Empty => Ok(None),
             RequestBody::H1(body) => body.next_chunk().await,
             RequestBody::H2(body) => body.next_chunk().await,
-            RequestBody::H2Legacy(body) => body.next_chunk().await,
             RequestBody::H3(body) => body.next_chunk().await,
         }
     }

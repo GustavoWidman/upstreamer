@@ -22,9 +22,8 @@ bytes = "1.12"
 smallvec = { version = "1.16", features = ["union", "const_generics"] }
 memchr = "2.8"
 
-# HTTP/2 and HTTP/3 downstream, adapted into the same heads and pipeline.
+# HTTP/3 downstream, adapted into the same heads and pipeline (HTTP/2 is our own).
 http = "1.5"
-h2 = "0.4.20"
 quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
@@ -55,6 +54,8 @@ internals = []
 proptest = "1.12"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 tempfile = "3.27"
+# The HTTP/2 client of the end-to-end tests.
+h2 = "0.4.20"
 # examples/bench-backend.rs
 hyper = { version = "1.12", features = ["server", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
