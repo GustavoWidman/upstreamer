@@ -486,6 +486,13 @@ impl Engine {
         self.now = now;
     }
 
+    /// The state of the response encoder's table (see `hpack`), for checking that a client
+    /// that decoded every block so far is in step with it.
+    #[cfg(any(test, feature = "internals"))]
+    pub fn encoder_table(&self) -> (usize, usize, usize) {
+        self.encoder.table_state()
+    }
+
     /// How many slots a connection that admits `max_streams` streams uses at most: its
     /// streams in progress, those that linger, and one being let go of.
     pub fn slots(max_streams: u32) -> u32 {

@@ -3,7 +3,7 @@
 //! engine's steps, and [`Responder`] stands in for the work of the streams.
 
 use super::engine::{Begin, Engine, Event, OUT_HIGH, Opened, SHARE_MIN, Step};
-use super::frame::{self, Head, Reason};
+use super::frame::{self, Reason};
 use super::hpack::{Decoder, Encoder};
 use super::wake::Ready;
 use crate::msg::{Fields, RequestHead, Status};
@@ -129,10 +129,10 @@ impl Session {
 
 /// Cuts written bytes into frames. Panics on bytes that are not whole frames within the
 /// frame size this server sends.
-pub(super) fn frames(mut bytes: &[u8]) -> Vec<(Head, Vec<u8>)> {
+pub(super) fn frames(mut bytes: &[u8]) -> Vec<(frame::Head, Vec<u8>)> {
     let mut frames = Vec::new();
     while !bytes.is_empty() {
-        let head = Head::parse(bytes).expect("a whole frame header");
+        let head = frame::Head::parse(bytes).expect("a whole frame header");
         assert!(head.len <= frame::MAX_FRAME, "{head:?}");
         let end = frame::HEADER_LEN + head.len;
         frames.push((head, bytes[frame::HEADER_LEN..end].to_vec()));
@@ -142,7 +142,8 @@ pub(super) fn frames(mut bytes: &[u8]) -> Vec<(Head, Vec<u8>)> {
 }
 
 /// One stream's stand-in work: reads the request body to its end, then answers with a
-/// head and `body` bytes.
+/// head and `body` bytes. Requests for the same path get the same head, as the requests
+/// for one file do.
 struct Work {
     reading: bool,
     head_sent: bool,
@@ -150,11 +151,20 @@ struct Work {
     status: Status,
 }
 
+/// The fields of a response head, as a client should decode them.
+type Head = Vec<(Vec<u8>, Vec<u8>)>;
+
+/// The Date every stand-in response carries.
+const DATE: &[u8] = b"Thu, 01 Jan 1970 00:00:00 GMT";
+
 /// Answers every request of a [`Session`], as the streams' work would.
 #[derive(Default)]
 pub(super) struct Responder {
     work: Vec<Option<Work>>,
     fields: Fields,
+    /// The heads sent and not yet checked against what was written, oldest first, each
+    /// with the state of the encoder's table once it was encoded.
+    pub sent: std::collections::VecDeque<(Head, (usize, usize, usize))>,
 }
 
 impl Responder {
@@ -215,18 +225,20 @@ impl Responder {
             self.fields.clear();
             self.fields.push(b"content-type", b"text/plain");
             self.fields.push(b"set-cookie", b"id=1");
-            self.fields.push(b"x-slot", slot.to_string().as_bytes());
             let length = work.body.len() as u64;
             let empty = work.body.is_empty();
-            engine.send_head(
-                slot,
-                work.status,
-                &self.fields,
-                Some(length),
-                Some(b"Thu, 01 Jan 1970 00:00:00 GMT"),
-                empty,
-            );
+            let status = work.status;
+            engine.send_head(slot, status, &self.fields, Some(length), Some(DATE), empty);
             work.head_sent = true;
+            let field = |name: &str, value: String| (name.as_bytes().to_vec(), value.into_bytes());
+            let head = vec![
+                field(":status", status.code().to_string()),
+                field("content-type", "text/plain".to_owned()),
+                field("set-cookie", "id=1".to_owned()),
+                field("content-length", length.to_string()),
+                (b"date".to_vec(), DATE.to_vec()),
+            ];
+            self.sent.push_back((head, engine.encoder_table()));
         }
         if work.body.is_empty() || engine.send_data(slot, &mut work.body, true) {
             self.work[slot as usize] = None;
@@ -241,7 +253,9 @@ impl Responder {
 /// every read, a little of it, or nothing until the end); each read is one length byte
 /// and that many bytes. Whatever the bytes are, the engine must not panic, must keep its
 /// output within what a client that does not read can make it queue, must write only whole
-/// frames, and its field blocks must decode.
+/// frames, and a client must decode from its field blocks exactly the heads that were
+/// sent, in the order they were sent, with its compression table in step with the server's
+/// after each.
 pub fn frames_input(data: &[u8]) {
     let Some((&options, mut data)) = data.split_first() else {
         return;
@@ -257,10 +271,10 @@ pub fn frames_input(data: &[u8]) {
     let mut client = Decoder::new();
     let mut wire = Vec::new();
     let mut block = Vec::new();
-    let mut check = |session: &mut Session, takes: usize| {
+    let mut check = |session: &mut Session, responder: &mut Responder, takes: usize| {
         wire.extend_from_slice(&session.written_up_to(takes));
         let mut at = 0;
-        while let Some(head) = Head::parse(&wire[at..]) {
+        while let Some(head) = frame::Head::parse(&wire[at..]) {
             assert!(head.len <= frame::MAX_FRAME, "{head:?}");
             let start = at + frame::HEADER_LEN;
             let Some(payload) = wire.get(start..start + head.len) else {
@@ -271,11 +285,15 @@ pub fn frames_input(data: &[u8]) {
                 frame::HEADERS | frame::CONTINUATION => {
                     block.extend_from_slice(payload);
                     if head.has(frame::END_HEADERS) {
-                        let mut status = false;
+                        let mut decoded = Head::new();
                         client
-                            .decode(&block, |name, _| status |= name == b":status")
+                            .decode(&block, |name, value| {
+                                decoded.push((name.to_vec(), value.to_vec()));
+                            })
                             .expect("a response block decodes");
-                        assert!(status);
+                        let (sent, table) = responder.sent.pop_front().expect("a head was sent");
+                        assert_eq!(decoded, sent);
+                        assert_eq!(client.table_state(), table, "the client's table is in step");
                         block.clear();
                     }
                 }
@@ -327,12 +345,14 @@ pub fn frames_input(data: &[u8]) {
             session.engine.out.len()
         );
         if reads_output || failed {
-            check(&mut session, if failed { usize::MAX } else { takes });
+            let takes = if failed { usize::MAX } else { takes };
+            check(&mut session, &mut responder, takes);
             responder.run(&mut session, false);
         }
     }
-    check(&mut session, usize::MAX);
+    check(&mut session, &mut responder, usize::MAX);
     assert!(wire.is_empty(), "the last frame is whole");
+    assert!(responder.sent.is_empty(), "every head sent was written");
 }
 
 /// Fuzz entry: a field block. Whatever decodes is encoded again as a response would be,

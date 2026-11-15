@@ -268,6 +268,13 @@ impl Table {
         std::mem::swap(&mut self.bytes, &mut self.spare);
     }
 
+    /// The table's size limit, its size and its entry count: equal for an encoder and the
+    /// decoder that has read every block the encoder wrote.
+    #[cfg(any(test, feature = "internals"))]
+    fn state(&self) -> (usize, usize, usize) {
+        (self.max, self.size, self.entries.len())
+    }
+
     /// How many insertions back the pair is, if it is in the table.
     fn find(&self, hash: u32, name: &[u8], value: &[u8]) -> Option<usize> {
         self.entries.iter().rev().position(|entry| {
@@ -385,6 +392,11 @@ impl Decoder {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "internals"))]
+    pub fn table_state(&self) -> (usize, usize, usize) {
+        self.table.state()
+    }
+
     /// Lets go of a scratch buffer that a long string grew past `keep` bytes.
     pub fn trim(&mut self, keep: usize) {
         if self.scratch.capacity() > keep {
@@ -478,6 +490,11 @@ impl Encoder {
             seen_next: 0,
             changes: 0,
         }
+    }
+
+    #[cfg(any(test, feature = "internals"))]
+    pub fn table_state(&self) -> (usize, usize, usize) {
+        self.table.state()
     }
 
     /// A count that stays the same exactly as long as a block encoded now may be sent

@@ -1738,17 +1738,29 @@ fn a_response_head_larger_than_a_frame_continues() {
 
 #[test]
 fn a_repeated_head_is_sent_as_the_same_small_block_and_others_are_not_mistaken_for_it() {
-    let mut client = Client::new();
-    let mut stream = 1;
-    // Answers a request and returns the decoded head and the size of its block.
-    let mut answer = |client: &mut Client, fields: &[(&str, &str)], length: u64, date: &[u8]| {
-        let slot = client.get(stream);
+    fn head(fields: &[(&str, &str)]) -> Fields {
         let mut head = Fields::default();
         for (name, value) in fields {
             head.push(name.as_bytes(), value.as_bytes());
         }
+        head
+    }
+    fn expected(fields: &[(&str, &str)], length: u64, date: &[u8]) -> Vec<(String, String)> {
+        let length = length.to_string();
+        let mut all = vec![(":status", "200")];
+        all.extend_from_slice(fields);
+        all.push(("content-length", &length));
+        all.push(("date", std::str::from_utf8(date).unwrap()));
+        pairs(&all)
+    }
+    let mut client = Client::new();
+    let mut stream = 1;
+    // Answers a request and returns the head a client decodes and the size of its block.
+    let mut answer = |client: &mut Client, head: &Fields, length: u64, date: &[u8]| {
+        let slot = client.get(stream);
+        stream += 2;
         let engine = &mut client.session.engine;
-        engine.send_head(slot, Status::OK, &head, Some(length), Some(date), true);
+        engine.send_head(slot, Status::OK, head, Some(length), Some(date), true);
         engine.finish(slot);
         let written = client.session.written();
         let block = harness::frames(&written)[0].1.clone();
@@ -1762,45 +1774,137 @@ fn a_repeated_head_is_sent_as_the_same_small_block_and_others_are_not_mistaken_f
                 ));
             })
             .expect("the block decodes");
-        stream += 2;
         (decoded, block.len())
     };
-    let page = [("content-type", "text/html"), ("etag", "\"v1\"")];
-    let style = [("content-type", "text/css"), ("etag", "\"v1\"")];
+    const PAGE: [(&str, &str); 3] = [
+        ("content-type", "text/html"),
+        ("etag", "\"v1\""),
+        ("x-frame-options", "DENY"),
+    ];
+    let page = head(&PAGE);
     let noon = b"Sun, 06 Nov 1994 12:00:00 GMT";
     let later = b"Sun, 06 Nov 1994 12:00:01 GMT";
-    let expected = |fields: &[(&str, &str)], length: &str, date: &[u8]| {
-        let mut all = vec![(":status", "200")];
-        all.extend_from_slice(fields);
-        all.push(("content-length", length));
-        all.push(("date", std::str::from_utf8(date).unwrap()));
-        pairs(&all)
-    };
 
     let sizes: Vec<_> = (0..5)
         .map(|_| {
             let (decoded, size) = answer(&mut client, &page, 1024, noon);
-            assert_eq!(decoded, expected(&page, "1024", noon));
+            assert_eq!(decoded, expected(&PAGE, 1024, noon));
             size
         })
         .collect();
     assert!(sizes[0] > 50, "literals first: {sizes:?}");
-    assert_eq!(sizes[2..], [5, 5, 5], "then one byte per field: {sizes:?}");
+    assert_eq!(sizes[2..], [6, 6, 6], "then one byte per field: {sizes:?}");
 
-    // The same bytes in the head are not enough: another length, another date, another
-    // field each get their own block, and the first head still gets its own afterwards.
-    for _ in 0..3 {
-        let (decoded, _) = answer(&mut client, &page, 1025, noon);
-        assert_eq!(decoded, expected(&page, "1025", noon));
-        let (decoded, _) = answer(&mut client, &page, 1024, later);
-        assert_eq!(decoded, expected(&page, "1024", later));
-        let (decoded, _) = answer(&mut client, &style, 1024, noon);
-        assert_eq!(decoded, expected(&style, "1024", noon));
-        let (decoded, _) = answer(&mut client, &page, 1024, noon);
-        assert_eq!(decoded, expected(&page, "1024", noon));
+    // A head that differs from the kept one in a single respect gets its own block, sent
+    // right after the kept block was used, and the first head still gets its own after it.
+    let style = [PAGE[1], PAGE[2], ("content-type", "text/css")];
+    let other_etag = [PAGE[0], ("etag", "\"v2\""), PAGE[2]];
+    // The same bytes, cut into name and value one byte earlier.
+    let cut = [PAGE[0], PAGE[1], ("x-frame-option", "sDENY")];
+    // A field removed after it was added, as a site's header rule does: its bytes stay.
+    let mut removed = head(&PAGE);
+    removed.remove(&crate::msg::HeaderName::new("x-frame-options").unwrap());
+    let variants = [
+        (
+            "another length",
+            head(&PAGE),
+            1025,
+            noon,
+            expected(&PAGE, 1025, noon),
+        ),
+        (
+            "another date",
+            head(&PAGE),
+            1024,
+            later,
+            expected(&PAGE, 1024, later),
+        ),
+        (
+            "another value",
+            head(&style),
+            1024,
+            noon,
+            expected(&style, 1024, noon),
+        ),
+        (
+            "another value of the same length",
+            head(&other_etag),
+            1024,
+            noon,
+            expected(&other_etag, 1024, noon),
+        ),
+        (
+            "another cut",
+            head(&cut),
+            1024,
+            noon,
+            expected(&cut, 1024, noon),
+        ),
+        (
+            "a field removed",
+            removed,
+            1024,
+            noon,
+            expected(&PAGE[..2], 1024, noon),
+        ),
+    ];
+    for (what, fields, length, date, expected_head) in variants {
+        for _ in 0..3 {
+            let (decoded, _) = answer(&mut client, &page, 1024, noon);
+            assert_eq!(decoded, expected(&PAGE, 1024, noon), "before {what}");
+        }
+        let (decoded, size) = answer(&mut client, &page, 1024, noon);
+        assert_eq!((decoded, size), (expected(&PAGE, 1024, noon), 6), "{what}");
+        let (decoded, _) = answer(&mut client, &fields, length, date);
+        assert_eq!(decoded, expected_head, "{what}");
     }
-    let (decoded, size) = answer(&mut client, &page, 1024, noon);
-    assert_eq!((decoded, size), (expected(&page, "1024", noon), 5));
+
+    // A table size the client changes is announced once, in the next block (RFC 7541 4.2),
+    // however often the head before it was repeated: 3 bytes for a size of 1000.
+    client.ok(&settings(&[(1, 1000)]));
+    client.sent();
+    let sizes: Vec<_> = (0..4)
+        .map(|_| {
+            let (decoded, size) = answer(&mut client, &page, 1024, noon);
+            assert_eq!(decoded, expected(&PAGE, 1024, noon));
+            size
+        })
+        .collect();
+    assert_eq!(sizes, [9, 6, 6, 6]);
+
+    // Without a table, every field is a literal again.
+    client.ok(&settings(&[(1, 0)]));
+    client.sent();
+    for _ in 0..3 {
+        let (decoded, size) = answer(&mut client, &page, 1024, noon);
+        assert_eq!(decoded, expected(&PAGE, 1024, noon));
+        assert!(size > 50, "{size} bytes");
+    }
+}
+
+#[test]
+fn heads_that_differ_in_status_alone_are_told_apart() {
+    let mut client = Client::new();
+    let mut fields = Fields::default();
+    fields.push(b"content-type", b"text/html");
+    let mut stream = 1;
+    let mut answer = |client: &mut Client, status: Status| {
+        let slot = client.get(stream);
+        stream += 2;
+        let engine = &mut client.session.engine;
+        engine.send_head(slot, status, &fields, None, None, true);
+        engine.finish(slot);
+        match &client.sent()[..] {
+            [Sent::Headers { fields, .. }] => fields[0].1.clone(),
+            other => panic!("{other:?}"),
+        }
+    };
+    // 200 and 404 are both in the static table: neither changes the encoder's.
+    for _ in 0..4 {
+        assert_eq!(answer(&mut client, Status::OK), "200");
+    }
+    assert_eq!(answer(&mut client, Status::NOT_FOUND), "404");
+    assert_eq!(answer(&mut client, Status::OK), "200");
 }
 
 #[test]
@@ -1898,6 +2002,41 @@ mod any_client {
         ) {
             let bytes = frames.concat();
             let mut input = vec![u8::from(!reads_answers)];
+            for read in bytes.chunks(cut) {
+                input.push(read.len() as u8);
+                input.extend_from_slice(read);
+            }
+            harness::frames_input(&input);
+        }
+
+        /// Requests for a few resources over and over, between changes of the client's
+        /// table size: every response head decodes to what was sent (the harness checks),
+        /// whether it was encoded afresh or sent as the block kept from the last time.
+        #[test]
+        fn repeated_answers_decode_to_what_was_sent(
+            steps in proptest::collection::vec(
+                prop_oneof![
+                    8 => (0usize..3).prop_map(Ok),
+                    1 => prop_oneof![Just(0u32), Just(60), Just(200), Just(4096)].prop_map(Err),
+                ],
+                1..80,
+            ),
+            cut in 1usize..200,
+        ) {
+            let paths = ["/", "/ab", "/123456789ab"];
+            let mut bytes = Vec::new();
+            for (n, step) in steps.into_iter().enumerate() {
+                match step {
+                    Ok(path) => {
+                        let fields = [GET[0], GET[1], GET[2], (":path", paths[path])];
+                        bytes.extend_from_slice(&super::headers(2 * n as u32 + 1, &fields, true));
+                        // Room for the answer, whatever its size.
+                        bytes.extend_from_slice(&super::window_update(0, 1 << 20));
+                    }
+                    Err(size) => bytes.extend_from_slice(&super::settings(&[(1, size), (4, 1 << 20)])),
+                }
+            }
+            let mut input = vec![0];
             for read in bytes.chunks(cut) {
                 input.push(read.len() as u8);
                 input.extend_from_slice(read);
