@@ -448,19 +448,43 @@ pub(crate) fn quic_server_config(
     ))
 }
 
+/// The server's cipher-suite order, applied over the client's: AES-128-GCM, ChaCha20-Poly1305,
+/// AES-256-GCM per version, the order Go's crypto/tls and BoringSSL choose on hardware with AES.
+/// Clients built on rustls or OpenSSL list AES-256-GCM-SHA384 first, and its SHA-384 key
+/// schedule dominates a handshake's hashing: aws-lc runs SHA-256 on the x86 SHA extensions but
+/// SHA-512 in scalar code on CPUs without SHA-512 instructions, AMD Zen among them.
+const SERVER_CIPHER_SUITES: [rustls::SupportedCipherSuite; 9] = {
+    use rustls::crypto::aws_lc_rs::cipher_suite::*;
+    [
+        TLS13_AES_128_GCM_SHA256,
+        TLS13_CHACHA20_POLY1305_SHA256,
+        TLS13_AES_256_GCM_SHA384,
+        TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+        TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+    ]
+};
+
 fn base_server_config(
     store: Arc<CertStore>,
     tickets: Arc<TicketKeys>,
     versions: &[&'static rustls::SupportedProtocolVersion],
     alpn: &[&[u8]],
 ) -> rustls::ServerConfig {
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let provider = Arc::new(CryptoProvider {
+        cipher_suites: SERVER_CIPHER_SUITES.to_vec(),
+        ..rustls::crypto::aws_lc_rs::default_provider()
+    });
     let mut config = rustls::ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(versions)
         .expect("aws-lc-rs supports TLS 1.2 and 1.3")
         .with_no_client_auth()
         .with_cert_resolver(Arc::new(Resolver { store }));
     config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+    config.ignore_client_order = true;
     // Stateless tickets only: a server-side session cache would be per core (so it would not
     // resume across cores) and takes a lock per handshake.
     config.session_storage = Arc::new(NoServerSessionStorage {});
@@ -1126,6 +1150,51 @@ mod tests {
         assert_eq!(first.server.handshake_kind(), Some(HandshakeKind::Full));
         let second = connect(client_config, resumer, "a.test").unwrap();
         second.server.handshake_kind()
+    }
+
+    #[test]
+    fn server_prefers_aes_128_gcm_over_the_clients_order() {
+        use rustls::crypto::aws_lc_rs::cipher_suite::*;
+        let config = server_config(store_a(), Arc::new(TicketKeys::generate(3600)));
+        let tls13 = &[&rustls::version::TLS13][..];
+        let tls12 = &[&rustls::version::TLS12][..];
+        let rustls_default = rustls::crypto::aws_lc_rs::DEFAULT_CIPHER_SUITES;
+        let cases = [
+            (rustls_default, tls13, TLS13_AES_128_GCM_SHA256),
+            (
+                rustls_default,
+                tls12,
+                TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+            ),
+            (
+                &[TLS13_AES_256_GCM_SHA384][..],
+                tls13,
+                TLS13_AES_256_GCM_SHA384,
+            ),
+            (
+                &[TLS13_CHACHA20_POLY1305_SHA256, TLS13_AES_256_GCM_SHA384][..],
+                tls13,
+                TLS13_CHACHA20_POLY1305_SHA256,
+            ),
+        ];
+        for (offered, versions, chosen) in cases {
+            let provider = Arc::new(CryptoProvider {
+                cipher_suites: offered.to_vec(),
+                ..rustls::crypto::aws_lc_rs::default_provider()
+            });
+            let client_config = rustls::ClientConfig::builder_with_provider(provider.clone())
+                .with_protocol_versions(versions)
+                .unwrap()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(AcceptAnyCert { provider }))
+                .with_no_client_auth();
+            let hs = connect(Arc::new(client_config), config.clone(), "a.test").unwrap();
+            assert_eq!(
+                hs.server.negotiated_cipher_suite(),
+                Some(chosen),
+                "client offered {offered:?} over {versions:?}"
+            );
+        }
     }
 
     #[test]
