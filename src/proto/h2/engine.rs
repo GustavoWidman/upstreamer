@@ -36,7 +36,7 @@
 use super::frame::{self, Head, Reason};
 use super::hpack::{Decoder, Encoder};
 use super::wake::Ready;
-use crate::msg::{Fields, Known, RequestHead, Status, Version};
+use crate::msg::{Field, Fields, Known, RequestHead, Status, Version};
 use bytes::Bytes;
 use smallvec::SmallVec;
 use std::collections::VecDeque;
@@ -213,6 +213,67 @@ impl Budget {
     }
 }
 
+/// The field block of the last response head that was encoded entirely from the table,
+/// with what it was encoded from. A connection that answers the same way again (the same
+/// file, the same origin's response) sends the block as it is.
+#[derive(Default)]
+struct LastHead {
+    status: u16,
+    length: Option<u64>,
+    date: Option<[u8; 29]>,
+    /// The head's fields: their bytes and the table over them.
+    bytes: Vec<u8>,
+    fields: Vec<Field>,
+    block: Vec<u8>,
+    /// The encoder's change count the block is good for.
+    changes: u64,
+}
+
+/// Heads with more field bytes than this are encoded each time.
+const LAST_HEAD_MAX: usize = 2048;
+
+impl LastHead {
+    fn is(
+        &self,
+        status: Status,
+        fields: &Fields,
+        length: Option<u64>,
+        date: Option<&[u8]>,
+    ) -> bool {
+        self.status == status.code()
+            && self.length == length
+            && self.date.as_ref().map(|date| &date[..]) == date
+            && self.bytes == fields.buf
+            && self.fields.len() == fields.table.len()
+            && self
+                .fields
+                .iter()
+                .zip(&fields.table)
+                .all(|(a, b)| (a.name, a.value, a.tag, a.live) == (b.name, b.value, b.tag, b.live))
+    }
+
+    fn keep(
+        &mut self,
+        status: Status,
+        fields: &Fields,
+        length: Option<u64>,
+        date: Option<&[u8]>,
+        block: &[u8],
+        changes: u64,
+    ) {
+        self.status = status.code();
+        self.length = length;
+        self.date = date.and_then(|date| date.try_into().ok());
+        self.bytes.clear();
+        self.bytes.extend_from_slice(&fields.buf);
+        self.fields.clear();
+        self.fields.extend_from_slice(&fields.table);
+        self.block.clear();
+        self.block.extend_from_slice(block);
+        self.changes = changes;
+    }
+}
+
 struct Stream {
     /// 0 while the slot is free or its stream has closed.
     id: u32,
@@ -340,6 +401,7 @@ pub(super) struct Engine {
 
     decoder: Decoder,
     encoder: Encoder,
+    last_head: LastHead,
     /// The field block in progress across CONTINUATION frames.
     continued: Option<Block>,
     block: Vec<u8>,
@@ -397,6 +459,7 @@ impl Engine {
             recent_next: 0,
             decoder: Decoder::new(),
             encoder: Encoder::new(),
+            last_head: LastHead::default(),
             continued: None,
             block: Vec::new(),
             stage: Vec::new(),
@@ -1149,6 +1212,14 @@ impl Engine {
         let out = &mut self.out.buf;
         let start = out.len();
         out.extend_from_slice(&[0; frame::HEADER_LEN]);
+        let changes = self.encoder.changes();
+        if self.last_head.changes == changes
+            && !self.last_head.block.is_empty()
+            && self.last_head.is(status, fields, length, date)
+        {
+            out.extend_from_slice(&self.last_head.block);
+            return frame::finish_headers(out, start, stream.id, end_stream);
+        }
         self.encoder.begin(out);
         self.encoder.status(out, status.code());
         for (name, value, tag) in fields.live() {
@@ -1177,6 +1248,13 @@ impl Engine {
         }
         if let Some(date) = date {
             self.encoder.field(out, b"date", date);
+        }
+        // A block that changed nothing was encoded from the table alone (but for fields
+        // no table holds): the same head gets the same block until the table changes.
+        if self.encoder.changes() == changes && fields.buf.len() <= LAST_HEAD_MAX {
+            let block = &out[start + frame::HEADER_LEN..];
+            self.last_head
+                .keep(status, fields, length, date, block, changes);
         }
         frame::finish_headers(out, start, stream.id, end_stream);
     }

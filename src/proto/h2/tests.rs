@@ -1737,6 +1737,73 @@ fn a_response_head_larger_than_a_frame_continues() {
 }
 
 #[test]
+fn a_repeated_head_is_sent_as_the_same_small_block_and_others_are_not_mistaken_for_it() {
+    let mut client = Client::new();
+    let mut stream = 1;
+    // Answers a request and returns the decoded head and the size of its block.
+    let mut answer = |client: &mut Client, fields: &[(&str, &str)], length: u64, date: &[u8]| {
+        let slot = client.get(stream);
+        let mut head = Fields::default();
+        for (name, value) in fields {
+            head.push(name.as_bytes(), value.as_bytes());
+        }
+        let engine = &mut client.session.engine;
+        engine.send_head(slot, Status::OK, &head, Some(length), Some(date), true);
+        engine.finish(slot);
+        let written = client.session.written();
+        let block = harness::frames(&written)[0].1.clone();
+        let mut decoded = Vec::new();
+        client
+            .decoder
+            .decode(&block, |name, value| {
+                decoded.push((
+                    String::from_utf8(name.to_vec()).unwrap(),
+                    String::from_utf8(value.to_vec()).unwrap(),
+                ));
+            })
+            .expect("the block decodes");
+        stream += 2;
+        (decoded, block.len())
+    };
+    let page = [("content-type", "text/html"), ("etag", "\"v1\"")];
+    let style = [("content-type", "text/css"), ("etag", "\"v1\"")];
+    let noon = b"Sun, 06 Nov 1994 12:00:00 GMT";
+    let later = b"Sun, 06 Nov 1994 12:00:01 GMT";
+    let expected = |fields: &[(&str, &str)], length: &str, date: &[u8]| {
+        let mut all = vec![(":status", "200")];
+        all.extend_from_slice(fields);
+        all.push(("content-length", length));
+        all.push(("date", std::str::from_utf8(date).unwrap()));
+        pairs(&all)
+    };
+
+    let sizes: Vec<_> = (0..5)
+        .map(|_| {
+            let (decoded, size) = answer(&mut client, &page, 1024, noon);
+            assert_eq!(decoded, expected(&page, "1024", noon));
+            size
+        })
+        .collect();
+    assert!(sizes[0] > 50, "literals first: {sizes:?}");
+    assert_eq!(sizes[2..], [5, 5, 5], "then one byte per field: {sizes:?}");
+
+    // The same bytes in the head are not enough: another length, another date, another
+    // field each get their own block, and the first head still gets its own afterwards.
+    for _ in 0..3 {
+        let (decoded, _) = answer(&mut client, &page, 1025, noon);
+        assert_eq!(decoded, expected(&page, "1025", noon));
+        let (decoded, _) = answer(&mut client, &page, 1024, later);
+        assert_eq!(decoded, expected(&page, "1024", later));
+        let (decoded, _) = answer(&mut client, &style, 1024, noon);
+        assert_eq!(decoded, expected(&style, "1024", noon));
+        let (decoded, _) = answer(&mut client, &page, 1024, noon);
+        assert_eq!(decoded, expected(&page, "1024", noon));
+    }
+    let (decoded, size) = answer(&mut client, &page, 1024, noon);
+    assert_eq!((decoded, size), (expected(&page, "1024", noon), 5));
+}
+
+#[test]
 fn the_clients_table_size_limit_is_honoured() {
     let mut client = Client::new();
     client.ok(&settings(&[(1, 0)]));

@@ -464,6 +464,9 @@ pub(super) struct Encoder {
     shrunk_to: Option<usize>,
     seen: [u32; SEEN],
     seen_next: usize,
+    /// Counts what makes a block encoded earlier wrong or wasteful to send again: a change
+    /// to the table, and every literal that a later sending would index.
+    changes: u64,
 }
 
 impl Encoder {
@@ -473,7 +476,15 @@ impl Encoder {
             shrunk_to: None,
             seen: [0; SEEN],
             seen_next: 0,
+            changes: 0,
         }
+    }
+
+    /// A count that stays the same exactly as long as a block encoded now may be sent
+    /// again byte for byte: the table is unchanged, and nothing in the block would be
+    /// encoded shorter a second time.
+    pub fn changes(&self) -> u64 {
+        self.changes
     }
 
     /// Applies the peer's SETTINGS_HEADER_TABLE_SIZE: the table never grows past
@@ -483,6 +494,7 @@ impl Encoder {
         if max != self.table.max {
             self.shrunk_to = Some(self.shrunk_to.map_or(max, |low| low.min(max)));
             self.table.set_max(max);
+            self.changes += 1;
         }
     }
 
@@ -493,6 +505,7 @@ impl Encoder {
                 put_integer(out, 5, 0x20, low);
             }
             put_integer(out, 5, 0x20, self.table.max);
+            self.changes += 1;
         }
     }
 
@@ -530,6 +543,7 @@ impl Encoder {
         if !sendable(value) {
             return;
         }
+        self.changes += 1;
         let fits = name.len() + value.len() + ENTRY_OVERHEAD <= self.table.max / 2;
         if fits && self.seen_before(hash) {
             put_integer(out, 6, 0x40, static_name(name));
