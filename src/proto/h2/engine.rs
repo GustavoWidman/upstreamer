@@ -595,7 +595,7 @@ impl Engine {
     /// Whether `id` names a stream the client has not opened yet (RFC 9113 5.1.1). Streams a
     /// server would open (even ids) are never opened here.
     fn idle(&self, id: u32) -> bool {
-        id % 2 == 0 || id > self.last_id
+        id.is_multiple_of(2) || id > self.last_id
     }
 
     /// Whether `id` is a stream the client opened after the last one the final GOAWAY
@@ -885,7 +885,7 @@ impl Engine {
         if let Some(slot) = self.slot_of(id) {
             return self.trailers(slot, block, bytes).map(Opened::Not);
         }
-        if id % 2 == 0 {
+        if id.is_multiple_of(2) {
             return Err(Reason::Protocol);
         }
         // The block is decoded whatever becomes of the stream: the compression state of
@@ -1064,7 +1064,7 @@ impl Engine {
                 _ => Err(Reason::FrameSize),
             };
         }
-        if payload.len() % 6 != 0 {
+        if !payload.len().is_multiple_of(6) {
             return Err(Reason::FrameSize);
         }
         if std::mem::replace(&mut self.settings_seen, true) {
