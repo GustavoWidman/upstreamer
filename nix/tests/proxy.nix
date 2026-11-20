@@ -1,7 +1,7 @@
 # The proxy on a booted host, seen from another machine: `server` runs upstreamer in front of a
-# backend (HTTP and a WebSocket echo) with a certificate from files; `client` reaches it only
-# through the server's firewall. The `extra` specialisation changes nothing but the proxy's
-# routes, so switching to it reloads the proxy.
+# backend (HTTP and a WebSocket echo) with a certificate from files, and a Prometheus that
+# scrapes its metrics; `client` reaches it only through the server's firewall. The `extra`
+# specialisation changes nothing but the proxy's routes, so switching to it reloads the proxy.
 {
   pkgs,
   lib,
@@ -21,6 +21,7 @@ in
       imports = [ module ];
       services.upstreamer = {
         enable = true;
+        metrics.enable = true;
         virtualHosts.${host} = {
           tls = {
             certFile = "${tls}/cert.pem";
@@ -29,6 +30,22 @@ in
           proxy = "http://127.0.0.1:8000";
         };
       };
+      services.prometheus = {
+        enable = true;
+        listenAddress = "127.0.0.1";
+        globalConfig.scrape_interval = "1s";
+        scrapeConfigs = [
+          {
+            job_name = "upstreamer";
+            static_configs = [ { targets = [ "127.0.0.1:9100" ]; } ];
+          }
+        ];
+      };
+      environment.systemPackages = [
+        pkgs.curl
+        pkgs.jq
+      ];
+
       specialisation.extra.configuration.services.upstreamer.virtualHosts.${host}.routes = [
         {
           when.path = "/extra";
@@ -59,6 +76,7 @@ in
 
   testScript = ''
     import re
+    import shlex
     import time
 
     ca = "${tls}/ca.pem"
@@ -91,6 +109,34 @@ in
             "curl -s -o /dev/null -w '%{http_code} %{redirect_url}' 'http://${host}/a/b?c=d'"
         )
         assert out == "308 https://${host}/a/b?c=d", out
+
+    with subtest("metrics: the exposition answers on loopback and Prometheus scrapes it"):
+        server.wait_for_unit("prometheus.service")
+        server.wait_for_open_port(9100)
+        exposition = server.succeed("curl -sf http://127.0.0.1:9100/metrics")
+        assert "# TYPE upstreamer_requests_total counter" in exposition, exposition
+        assert "# TYPE upstreamer_request_duration_seconds histogram" in exposition, exposition
+        assert "process_resident_memory_bytes" in exposition, exposition
+        status = server.succeed("curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9100/other")
+        assert status == "404", f"a path other than /metrics answered {status}"
+
+        def prometheus(query):
+            return server.succeed(
+                "curl -sf --get http://127.0.0.1:9090/api/v1/query --data-urlencode "
+                + shlex.quote("query=" + query)
+                + " | jq -r '.data.result[0].value[1] // \"none\"'"
+            ).strip()
+
+        def eventually(query, want):
+            for _ in range(60):
+                if prometheus(query) == want:
+                    return
+                time.sleep(1)
+            raise Exception(f"{query}: {prometheus(query)}, want {want}")
+
+        eventually('up{job="upstreamer"}', "1")
+        # h1, h2 and h3 each got a 200 from the backend through the host's catch-all route.
+        eventually('sum(upstreamer_requests_total{site="${host}",code="2xx"}) >= bool 3', "1")
 
     with subtest("a WebSocket upgrade is proxied both ways"):
         client.succeed(f"python3 ${./websocket.py} wss://${host}/ws {ca}")
@@ -133,5 +179,8 @@ in
     with subtest("the firewall opens the proxy's ports and nothing else"):
         server.succeed("curl -sf http://127.0.0.1:8000/")
         client.fail("curl -s --connect-timeout 3 http://server:8000/")
+        # The metrics listener is on loopback and stays out of the firewall.
+        client.fail("curl -s --connect-timeout 3 http://server:9100/metrics")
+        assert "127.0.0.1:9100" in server.succeed("ss -Hltn 'sport = :9100'")
   '';
 }
