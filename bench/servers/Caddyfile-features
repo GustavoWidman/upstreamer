@@ -1,0 +1,53 @@
+{
+	admin off
+	persist_config off
+	auto_https disable_redirects
+	storage file_system {{run_dir}}/caddy
+	log {
+		level WARN
+	}
+{{global_extra}}
+	servers {
+		timeouts {
+			idle 75s
+		}
+{{servers_extra}}
+	}
+}
+
+(proxy) {
+	reverse_proxy {{upstreams}} {
+{{proxy_extra}}
+		transport http {
+			versions 1.1
+			keepalive 75s
+			keepalive_idle_conns 256
+			keepalive_idle_conns_per_host 256
+		}
+	}
+}
+
+(tls) {
+	tls {{cert}} {{key}} {
+		protocols tls1.3
+	}
+}
+
+http://:{{h1_port}} {
+	bind {{host}}
+	import proxy
+}
+
+https://:{{tls_port}} {
+	bind {{host}}
+	import tls
+	import proxy
+}
+
+https://:{{static_port}} {
+	bind {{host}}
+	import tls
+	root * {{www}}
+	file_server
+}
+{{sites_extra}}
