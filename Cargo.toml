@@ -44,6 +44,10 @@ toml_edit = { version = "0.25.19", default-features = false, features = ["parse"
 regex-automata = { version = "0.4.18", default-features = false, features = ["std", "syntax", "perf", "unicode", "meta", "hybrid", "dfa-onepass", "nfa-backtrack"] }
 rustc-hash = "2.1"
 
+# Kubernetes discovery (feature `kubernetes`): kubeconfig files are YAML. Nothing else is added:
+# the API client is our own HTTP/1.1 over rustls and tokio, with httparse and serde_json above.
+saphyr = { version = "0.3.4", optional = true, default-features = false }
+
 # Dynamic compression.
 zstd = { version = "0.14.4", default-features = false }
 flate2 = { version = "1.1.11", default-features = false, features = ["zlib-rs"] }
@@ -54,7 +58,7 @@ internals = []
 # Origins from Kubernetes EndpointSlices (`proxy.to.kubernetes`). Off by default: a default
 # build carries no Kubernetes client, and a config that names a source fails `check` with a
 # message naming this feature.
-kubernetes = []
+kubernetes = ["dep:saphyr"]
 
 [dev-dependencies]
 proptest = "1.12"
