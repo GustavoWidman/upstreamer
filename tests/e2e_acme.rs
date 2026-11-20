@@ -134,11 +134,9 @@ fn site(name: &str, hosts: &[&str], acme: Value) -> Value {
 fn http_get(addr: SocketAddr, host: &str, path: &str) -> String {
     let mut sock = TcpStream::connect(addr).unwrap();
     sock.set_read_timeout(Some(PATIENCE)).unwrap();
-    write!(
-        sock,
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap();
+    // One write: a head sent in pieces waits on Nagle and the server's delayed ACK.
+    let head = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    sock.write_all(head.as_bytes()).unwrap();
     let mut response = String::new();
     sock.read_to_string(&mut response).unwrap();
     response
@@ -393,11 +391,9 @@ impl Pebble {
                 let name = ServerName::try_from("localhost").unwrap();
                 let mut tls = rustls::ClientConnection::new(config.clone(), name).unwrap();
                 let mut stream = rustls::Stream::new(&mut tls, &mut sock);
-                write!(
-                    stream,
-                    "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-                )
-                .unwrap();
+                let head =
+                    format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+                stream.write_all(head.as_bytes()).unwrap();
                 let mut response = Vec::new();
                 let _ = stream.read_to_end(&mut response);
                 let response = String::from_utf8_lossy(&response).into_owned();
@@ -414,12 +410,11 @@ impl Pebble {
     fn misdirect(&self, name: &str) {
         let body = json!({ "host": format!("{name}."), "addresses": ["127.0.0.2"] }).to_string();
         let mut sock = TcpStream::connect(self.dns_management).unwrap();
-        write!(
-            sock,
+        let request = format!(
             "POST /add-a HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
-        )
-        .unwrap();
+        );
+        sock.write_all(request.as_bytes()).unwrap();
         let mut response = String::new();
         sock.read_to_string(&mut response).unwrap();
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
