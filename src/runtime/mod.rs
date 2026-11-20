@@ -897,6 +897,16 @@ pub(crate) mod testing {
         SIGNALS.read().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The guard for counting a core's allocations, taken around one more request (`settle`)
+    /// so the count the test starts from is read after it. A signal raised before the guard
+    /// can be broadcast on the core thread after the core's previous request, and a count read
+    /// from that request would charge the broadcast to the measured ones.
+    pub fn counting(settle: impl FnOnce()) -> RwLockReadGuard<'static, ()> {
+        let guard = no_signals();
+        settle();
+        guard
+    }
+
     /// Waits until no test counts allocations, and keeps them from starting until the guard
     /// drops.
     pub fn raising_signals() -> RwLockWriteGuard<'static, ()> {
@@ -1156,7 +1166,9 @@ mod tests {
         for _ in 0..2_000 {
             get(&mut conn).unwrap();
         }
-        let signals = no_signals();
+        let signals = counting(|| {
+            get(&mut conn).unwrap();
+        });
         let before = served(addr.port(), 0).allocations;
         let requests = 20_000;
         for _ in 0..requests {
@@ -1196,10 +1208,12 @@ mod tests {
         let workers = spawn_workers(&[allowed_cpus()[0]], generation).unwrap();
         let mut conn = connect(addr);
         let warm_up = 2_000;
-        for _ in 0..warm_up {
+        for _ in 1..warm_up {
             get(&mut conn).unwrap();
         }
-        let signals = no_signals();
+        let signals = counting(|| {
+            get(&mut conn).unwrap();
+        });
         let before = served(addr.port(), 0);
         let requests = 20_000;
         for _ in 0..requests {

@@ -805,7 +805,7 @@ mod tests {
     #[test]
     fn a_limited_request_allocates_nothing_after_warm_up() {
         use crate::runtime::testing::{
-            connect, free_addr, no_signals, plan_from, read_response, served,
+            connect, counting, free_addr, plan_from, read_response, served,
         };
         use crate::runtime::{Generation, allowed_cpus, spawn_workers, stop};
         use std::io::Write;
@@ -844,7 +844,9 @@ mod tests {
             assert!(head.contains("\r\nretry-after: "), "{head}");
             assert!(body.starts_with(b"slow down "), "{body:?}");
         }
-        let signals = no_signals();
+        let signals = counting(|| {
+            request();
+        });
         let before = served(listen.port(), 0).allocations;
         let requests = 20_000;
         for _ in 0..requests {
