@@ -26,7 +26,7 @@ from .procs import (
     raise_nofile,
     run_pinned,
 )
-from .scenarios import STATIC_FILE, SMALL, Scenario
+from .scenarios import METRICS_SCRAPE_S, STATIC_FILE, SMALL, Feature, Scenario
 from .servers import Context, Server
 from .tools import tool, tools
 
@@ -43,6 +43,8 @@ NOISE = frozenset({"foreign_load", "steal"})
 INVALID = frozenset({"errors", "work_mismatch", "loadgen_saturated", "loadgen_failed"}) | NOISE
 RATE_MISS = 0.95
 READY_TIMEOUT = 45.0
+# Each origin address of a balanced scenario must take at least this share of the requests.
+BALANCE_SHARE_MIN = 0.2
 
 
 def now() -> str:
@@ -98,7 +100,7 @@ class Origin:
         self.scope = Scope(
             "origin",
             [tool("origin").exe("bench-origin"), "--listen", f"{t.HOST}:{t.ORIGIN_PORT}",
-             "--threads", str(len(profile.origin))],
+             "--listen", f"{t.HOST}:{t.ORIGIN_PORT2}", "--threads", str(len(profile.origin))],
             profile.origin,
             log_dir / f"origin-{profile.name}.log",
         )
@@ -255,7 +257,7 @@ class Runner:
     def _ctx_args(self, spec: RunSpec, run_dir: Path) -> dict:
         a = self.session.assets
         server = spec.server
-        config_name = server.template or f"{server.name}.conf"
+        config_name = (server.feature_template if spec.scenario.features else None) or server.template or f"{server.name}.conf"
         return dict(
             run_dir=run_dir,
             config=run_dir / config_name,
@@ -266,6 +268,7 @@ class Runner:
             cert_and_key=a.cert_and_key,
             www=a.www,
             pkg=tool(server.tool).path if server.tool else Path("/"),
+            scenario=spec.scenario,
         )
 
     def wait_ready(self, spec: RunSpec, scope: Scope | None, run_dir: Path) -> None:
@@ -350,12 +353,17 @@ class Runner:
         o_cpu0 = self.origin.scope.cpu_seconds()
         p_cpu0 = scope.cpu_seconds() if scope else 0.0
         snap0 = CpuSnapshot.take()
+        scraper = Scraper(spec.server, run_dir) if Feature.METRICS in sc.features else None
         if scope:
             with MemorySampler(scope) as mem:
+                if scraper:
+                    scraper.start()
                 fin = run_pinned(main.argv, lg_cpus, main.output, cwd=run_dir)
         else:
             mem = None
             fin = run_pinned(main.argv, lg_cpus, main.output, cwd=run_dir)
+        if scraper:
+            scraper.stop()
         snap1 = CpuSnapshot.take()
         p_cpu1 = scope.cpu_seconds() if scope else 0.0
         o_cpu1 = self.origin.scope.cpu_seconds()
@@ -401,12 +409,17 @@ class Runner:
                 "body_bytes_in": o_after["body_bytes_in"] - o_before["body_bytes_in"],
                 "body_bytes_out": o_after["body_bytes_out"] - o_before["body_bytes_out"],
                 "connections": o_after["connections"] - o_before["connections"],
+                "requests_by_address": [
+                    a - b for a, b in zip(o_after["requests_by_listener"], o_before["requests_by_listener"])
+                ],
             },
             "proxy": {
                 "pss_peak_bytes": mem.pss_peak if mem else None,
                 "mem_current_peak_bytes": mem.current_peak if mem else None,
             },
         }
+        if scraper:
+            out["metrics_scrapes"] = scraper.summary()
         out["flags"] = flags = self._flags(spec, result, usage, out, fin.returncode)
         out["valid"] = not (INVALID & set(flags))
         return out
@@ -434,6 +447,13 @@ class Runner:
                 flags.append("work_mismatch")
         elif origin_requests > 10:
             flags.append("work_mismatch")
+        if sc.balanced and origin_requests:
+            if min(out["origin"]["requests_by_address"]) < BALANCE_SHARE_MIN * origin_requests:
+                flags.append("work_mismatch")
+        if "metrics_scrapes" in out:
+            m = out["metrics_scrapes"]
+            if m["failed"] or m["ok"] < spec.duration_s // METRICS_SCRAPE_S:
+                flags.append("work_mismatch")
         if usage["loadgen"]["idle_frac"] < LOADGEN_IDLE_MIN and spec.mode == "closed":
             flags.append("loadgen_saturated")
         if usage["origin"]["idle_frac"] < ORIGIN_IDLE_MIN:
@@ -508,6 +528,51 @@ class Runner:
         }
 
 
+class Scraper:
+    """Scrapes the server's metrics endpoint every METRICS_SCRAPE_S seconds from the harness's
+    CPUs while the load runs, as a Prometheus server would; the first scrape is immediate.
+    Every response must be a 200 with a body."""
+
+    def __init__(self, server: Server, run_dir: Path):
+        self.url = f"http://{t.HOST}:{t.ADMIN_PORTS[0]}{server.metrics_path}"
+        self.log = run_dir / "scrapes.log"
+        self.ok = 0
+        self.failed = 0
+        self.bytes = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def _run(self) -> None:
+        with self.log.open("w") as log:
+            while True:
+                started = time.monotonic()
+                try:
+                    with urllib.request.urlopen(self.url, timeout=5) as r:
+                        body = r.read()
+                        good = r.status == 200 and bool(body)
+                        self.bytes += len(body)
+                        log.write(f"{now()} {r.status} {len(body)}\n")
+                except OSError as e:
+                    good = False
+                    log.write(f"{now()} error {e}\n")
+                if good:
+                    self.ok += 1
+                else:
+                    self.failed += 1
+                if self._stop.wait(max(0.0, METRICS_SCRAPE_S - (time.monotonic() - started))):
+                    return
+
+    def summary(self) -> dict:
+        return {"url": self.url, "ok": self.ok, "failed": self.failed, "bytes": self.bytes}
+
+
 _AFFINITY = os.sched_getaffinity(0)
 
 
@@ -551,7 +616,7 @@ def matrix(
             for sc in scenarios:
                 if mode == "open" and not sc.open_loop:
                     continue
-                eligible = [s for s in servers if s.supports(sc.requires)]
+                eligible = [s for s in servers if s.runs(sc)]
                 for server in rotate(eligible, rep):
                     items.append((profile, rep, sc, server))
     total = sum(len(v) for v in by_profile.values())
@@ -562,6 +627,7 @@ def matrix(
                 runner.origin.stop()
             pin_harness(profile)
             wait_port_free(t.ORIGIN_PORT)
+            wait_port_free(t.ORIGIN_PORT2)
             runner.origin = Origin(profile, session.dir)
             queue = by_profile[profile.name]
             for attempt in range(retries + 1):

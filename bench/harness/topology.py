@@ -20,6 +20,8 @@ HOST = "127.0.0.1"
 # Never measure while another instance runs: they would share CPUs.
 _OFFSET = int(os.environ.get("BENCH_PORT_OFFSET", "0"))
 ORIGIN_PORT = 18080 + _OFFSET
+# The origin's second address, for the scenarios that balance over two origins.
+ORIGIN_PORT2 = 18081 + _OFFSET
 H1_PORT = 19080 + _OFFSET
 TLS_PORT = 19443 + _OFFSET
 STATIC_PORT = 19444 + _OFFSET

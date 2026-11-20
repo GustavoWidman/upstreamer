@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import topology as t
+from .scenarios import METRICS_PATH, Feature, Scenario
 from .scenarios import Capability as C
 from .tools import tool
 
@@ -32,6 +33,12 @@ class Context:
     cert_and_key: Path
     www: Path
     pkg: Path
+    # The run's scenario; a scenario with features renders the server's feature template.
+    scenario: Scenario | None = None
+
+    @property
+    def features(self) -> frozenset[Feature]:
+        return self.scenario.features if self.scenario else frozenset()
 
     def values(self) -> dict[str, str]:
         return {
@@ -39,6 +46,8 @@ class Context:
             "origin_host": t.HOST,
             "origin_port": str(t.ORIGIN_PORT),
             "origin": f"{t.HOST}:{t.ORIGIN_PORT}",
+            "origin_port2": str(t.ORIGIN_PORT2),
+            "origin2": f"{t.HOST}:{t.ORIGIN_PORT2}",
             "h1_port": str(t.H1_PORT),
             "tls_port": str(t.TLS_PORT),
             "static_port": str(t.STATIC_PORT),
@@ -81,6 +90,15 @@ class Server:
     launches: bool = True
     version_override: str | None = None
     meta: dict = field(default_factory=dict)
+    # Features this server has an equivalent of, the reason for each it lacks, and the
+    # template (with `feature_values` filling its feature placeholders) for a scenario that
+    # turns any on. A scenario without features always renders `template`, byte for byte.
+    features: frozenset[Feature] = frozenset()
+    feature_na: dict[Feature, str] = field(default_factory=dict)
+    feature_template: str | None = None
+    feature_values: Callable[[Context], dict[str, str]] = lambda ctx: {}
+    feature_tuning: tuple[str, ...] = ()
+    metrics_path: str = METRICS_PATH
 
     @property
     def version(self) -> str:
@@ -91,10 +109,33 @@ class Server:
     def supports(self, capability: C) -> bool:
         return capability in self.capabilities
 
+    def runs(self, scenario: Scenario) -> bool:
+        return self.supports(scenario.requires) and scenario.features <= self.features
+
+    def not_applicable_reason(self, scenario: Scenario) -> str | None:
+        if not self.supports(scenario.requires):
+            return self.not_applicable.get(scenario.requires, "not supported")
+        missing = sorted(scenario.features - self.features)
+        if missing and not self.features:
+            return NO_FEATURES
+        if missing:
+            return "; ".join(f"{f}: {self.feature_na.get(f, 'not supported')}" for f in missing)
+        return None
+
+    def template_for(self, ctx: Context) -> str | None:
+        return self.feature_template if ctx.features else self.template
+
+    def config_values(self, ctx: Context) -> dict[str, str]:
+        values = ctx.values()
+        if ctx.features:
+            values |= self.feature_values(ctx)
+        return values
+
     def write_config(self, ctx: Context) -> None:
-        if self.template:
-            text = (TEMPLATES / self.template).read_text()
-            ctx.config.write_text(render(text, ctx.values()))
+        template = self.template_for(ctx)
+        if template:
+            text = (TEMPLATES / template).read_text()
+            ctx.config.write_text(render(text, self.config_values(ctx)))
 
 
 def exe(name: str, binary: str | None = None) -> str:
@@ -103,6 +144,7 @@ def exe(name: str, binary: str | None = None) -> str:
 
 ALL = frozenset(C)
 NO_FILES = "proxy only; has no static file server"
+NO_FEATURES = "feature scenarios cover upstreamer, nginx, haproxy, caddy, envoy and traefik"
 
 DIRECT = Server(
     name="direct",

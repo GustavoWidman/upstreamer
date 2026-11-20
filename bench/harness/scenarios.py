@@ -19,6 +19,44 @@ class Capability(StrEnum):
     STATIC = "static"  # file server over TLS + HTTP/2
 
 
+class Feature(StrEnum):
+    """A proxy feature a scenario turns on. A server runs the scenario only when it has an
+    equivalent of every feature in it; otherwise the cell is n/a with the server's reason."""
+
+    LB_ROUND_ROBIN = "lb-round-robin"  # two origin addresses, taken in turn
+    LB_LEAST = "lb-least"  # two origin addresses, fewest requests in flight
+    LB_HASH = "lb-hash"  # two origin addresses, consistent hash of the client key header
+    HEALTH = "health"  # active health probes of every origin address
+    LIMIT_CLIENT = "limit-client"  # a rate limit with one bucket per client key, never rejecting
+    LIMIT_CONST = "limit-const"  # a rate limit with one bucket for every request, never rejecting
+    METRICS = "metrics"  # request metrics collected and scraped during the run
+    TRUSTED = "trusted"  # the client address taken from X-Forwarded-For of a trusted peer
+
+
+LB = frozenset({Feature.LB_ROUND_ROBIN, Feature.LB_LEAST, Feature.LB_HASH})
+
+# The header a client key travels in, and how many distinct keys the load generator cycles
+# through. wrk sends a different key on each request; h2load sends a fixed header, so an HTTP/2
+# scenario has one key for the whole run.
+CLIENT_HEADER = "X-Client"
+CLIENT_KEYS = 1024
+# Per-key and whole-step rates far above anything the host can drive, so no request is refused
+# and the limiter's bookkeeping is what the scenario measures.
+LIMIT_CLIENT_RATE = 1_000_000
+LIMIT_CONST_RATE = 10_000_000
+METRICS_PATH = "/metrics"
+METRICS_SCRAPE_S = 5
+HEALTH_PATH = "/bytes/2"
+HEALTH_INTERVAL_S = 10
+
+
+def client_key(header: str, k: int) -> str:
+    """The k-th client key: an address in 10.0.0.0/22 for X-Forwarded-For, else `c<k>`."""
+    if header == "X-Forwarded-For":
+        return f"10.0.{k // 256}.{k % 256}"
+    return f"c{k}"
+
+
 class Endpoint(StrEnum):
     H1 = "h1"  # cleartext listener, proxies to the origin
     TLS = "tls"  # TLS listener (TCP h1/h2, UDP h3), proxies to the origin
@@ -55,6 +93,14 @@ class Scenario:
     # Overrides the protocol's default load generator (wrk for HTTP/1.1,
     # h2load for HTTP/2 and HTTP/3).
     loadgen: str | None = None
+    features: frozenset[Feature] = frozenset()
+    # The request header that carries the client key (CLIENT_HEADER, or X-Forwarded-For for
+    # a scenario behind a trusted proxy); None sends none.
+    key_header: str | None = None
+
+    @property
+    def balanced(self) -> bool:
+        return bool(self.features & LB)
 
     @property
     def proxied(self) -> bool:
@@ -187,6 +233,67 @@ SCENARIOS = {
         ),
     )
 }
+
+
+
+def _h1_feature(name: str, description: str, features: set[Feature], key_header: str | None = None) -> Scenario:
+    """The `h1` scenario with features on: its cost is read against plain `h1`."""
+    return Scenario(
+        name,
+        1,
+        description,
+        Endpoint.H1,
+        Protocol.H1,
+        f"/bytes/{SMALL}",
+        SMALL,
+        connections=256,
+        features=frozenset(features),
+        key_header=key_header,
+    )
+
+
+ALL_FEATURES = {Feature.LB_ROUND_ROBIN, Feature.HEALTH, Feature.LIMIT_CLIENT, Feature.METRICS, Feature.TRUSTED}
+
+FEATURE_SCENARIOS = (
+    _h1_feature("h1-lb2", "h1, round robin over two origin addresses", {Feature.LB_ROUND_ROBIN}),
+    _h1_feature("h1-lb2-least", "h1, fewest requests in flight over two origin addresses", {Feature.LB_LEAST}),
+    _h1_feature(
+        "h1-lb2-hash",
+        f"h1, consistent hash of the {CLIENT_HEADER} header ({CLIENT_KEYS} values) over two origin addresses",
+        {Feature.LB_HASH},
+        CLIENT_HEADER,
+    ),
+    _h1_feature(
+        "h1-limit",
+        f"h1, rate limit keyed on the {CLIENT_HEADER} header ({CLIENT_KEYS} values), never rejecting",
+        {Feature.LIMIT_CLIENT},
+        CLIENT_HEADER,
+    ),
+    _h1_feature("h1-limit-const", "h1, rate limit with one bucket for every request, never rejecting", {Feature.LIMIT_CONST}),
+    _h1_feature("h1-metrics", f"h1, request metrics on, scraped every {METRICS_SCRAPE_S} s", {Feature.METRICS}),
+    _h1_feature(
+        "h1-all",
+        "h1, round robin over two health-checked origin addresses, per-client rate limit on the "
+        f"address a trusted peer forwards in X-Forwarded-For ({CLIENT_KEYS} values), metrics scraped",
+        ALL_FEATURES,
+        "X-Forwarded-For",
+    ),
+    Scenario(
+        "h2-tls-all",
+        1,
+        "h2-tls, round robin over two health-checked origin addresses, per-client rate limit on the "
+        "address a trusted peer forwards in X-Forwarded-For (one value), metrics scraped",
+        Endpoint.TLS,
+        Protocol.H2,
+        f"/bytes/{SMALL}",
+        SMALL,
+        connections=32,
+        streams=8,
+        features=frozenset(ALL_FEATURES),
+        key_header="X-Forwarded-For",
+    ),
+)
+SCENARIOS |= {s.name: s for s in FEATURE_SCENARIOS}
 
 # Scenarios that exist only to prove the harness, never part of the matrix.
 CHECKS = {

@@ -10,6 +10,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import topology as t
+from .scenarios import (
+    CLIENT_HEADER,
+    HEALTH_INTERVAL_S,
+    HEALTH_PATH,
+    LIMIT_CLIENT_RATE,
+    LIMIT_CONST_RATE,
+    METRICS_PATH,
+    Feature,
+)
 from .servers import ALL, Context, Server
 
 NAME = "upstreamer"
@@ -32,9 +41,37 @@ def _site(name: str, port: int, routes: list[dict], ctx: Context, http3: bool | 
     return site
 
 
+def _feature_routes(features: frozenset[Feature]) -> list[dict]:
+    """The proxy route of a feature scenario: a limit step, then the proxy step."""
+    origin = f"http://{t.HOST}:{t.ORIGIN_PORT}"
+    routes: list[dict] = []
+    if Feature.LIMIT_CLIENT in features:
+        # Behind a trusted peer the client is its forwarded address, the default key.
+        key = None if Feature.TRUSTED in features else f"{{header.{CLIENT_HEADER}}}"
+        limit = {"rate": f"{LIMIT_CLIENT_RATE}/s", "burst": LIMIT_CLIENT_RATE}
+        routes.append({"limit": limit | ({"key": key} if key else {})})
+    if Feature.LIMIT_CONST in features:
+        routes.append({"limit": {"rate": f"{LIMIT_CONST_RATE}/s", "burst": LIMIT_CONST_RATE, "key": "all"}})
+    proxy: dict | str = origin
+    balance = {
+        Feature.LB_ROUND_ROBIN: "roundRobin",
+        Feature.LB_LEAST: "leastRequests",
+        Feature.LB_HASH: {"hash": f"{{header.{CLIENT_HEADER}}}"},
+    }
+    for feature, policy in balance.items():
+        if feature in features:
+            proxy = {"to": [origin, f"http://{t.HOST}:{t.ORIGIN_PORT2}"], "balance": policy}
+    if Feature.HEALTH in features:
+        assert isinstance(proxy, dict), "health checks need a balanced proxy"
+        proxy["health"] = {"active": {"path": HEALTH_PATH, "interval": f"{HEALTH_INTERVAL_S}s"}}
+    routes.append({"proxy": proxy})
+    return routes
+
+
 def config(ctx: Context) -> dict:
-    proxy = [{"proxy": f"http://{t.HOST}:{t.ORIGIN_PORT}"}]
-    return {
+    features = ctx.features
+    proxy = _feature_routes(features) if features else [{"proxy": f"http://{t.HOST}:{t.ORIGIN_PORT}"}]
+    out = {
         "version": 1,
         "workers": ctx.workers,
         "sites": [
@@ -43,6 +80,13 @@ def config(ctx: Context) -> dict:
             _site("static", t.STATIC_PORT, [{"files": {"root": str(ctx.www)}}], ctx, http3=False),
         ],
     }
+    if Feature.METRICS in features:
+        out["sites"].append(
+            _site("metrics", t.ADMIN_PORTS[0], [{"when": {"path": METRICS_PATH}, "metrics": {}}], ctx)
+        )
+    if Feature.TRUSTED in features:
+        out["trustedProxies"] = {"from": [f"{t.HOST}/32"], "header": "X-Forwarded-For"}
+    return out
 
 
 @dataclass(frozen=True)
@@ -104,6 +148,7 @@ def server() -> Server:
         tool=None,
         capabilities=CAPABILITIES,
         not_applicable={},
+        features=frozenset(Feature),
         template=None,
         argv=_argv,
         competitor=False,
@@ -116,5 +161,15 @@ def server() -> Server:
             "tls with the given cert for SNI localhost; TLS 1.3 and 1.2 with rustls defaults; one session ticket per handshake; no HTTP->HTTPS redirect",
             "defaults kept: keep-alive 75 s, header timeout 10 s, 128 streams per HTTP/2 or HTTP/3 connection, pooled origin connections idle 2 m",
             "no response compression; static files from the static dir, no precompressed sidecars",
+        ),
+        feature_tuning=(
+            "balanced cells: proxy.to lists both origin addresses with balance roundRobin, leastRequests or "
+            "{hash = \"{header.X-Client}\"}; passive health and 1 retry at their defaults",
+            f"health: active GET {HEALTH_PATH} every {HEALTH_INTERVAL_S}s",
+            f"limits: a limit step before the proxy, {LIMIT_CLIENT_RATE}/s per {{header.X-Client}} key (or the "
+            f"default {{remote_net}} key behind a trusted peer), or {LIMIT_CONST_RATE}/s on the constant key \"all\"; "
+            "65536 buckets",
+            f"metrics: a metrics step on its own loopback site, {METRICS_PATH} on the first admin port",
+            "trusted: trustedProxies from 127.0.0.1/32 with header X-Forwarded-For",
         ),
     )

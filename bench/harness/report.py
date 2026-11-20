@@ -220,8 +220,9 @@ def not_applicable() -> dict:
     for name, server in registry().items():
         reasons = {}
         for sc in SCENARIOS.values():
-            if not server.supports(sc.requires):
-                reasons[sc.name] = server.not_applicable.get(sc.requires, "not supported")
+            reason = server.not_applicable_reason(sc)
+            if reason:
+                reasons[sc.name] = reason
         out[name] = reasons
     return out
 

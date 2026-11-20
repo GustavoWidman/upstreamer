@@ -13,7 +13,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from .scenarios import Endpoint, Protocol, Scenario
+from .scenarios import CLIENT_KEYS, Endpoint, Protocol, Scenario, client_key
 from .tools import tool
 from .topology import H1_PORT, HOST, STATIC_PORT, TLS_PORT
 
@@ -43,6 +43,9 @@ def h2load_flags(scenario: Scenario) -> list[str]:
         flags.append("--h1")
     elif scenario.protocol is Protocol.H3:
         flags.append("--alpn-list=h3")
+    if scenario.key_header:
+        # h2load sends fixed headers: the run has one client key.
+        flags += ["-H", f"{scenario.key_header}: {client_key(scenario.key_header, 0)}"]
     return flags
 
 
@@ -121,6 +124,33 @@ def _wrk_script(scenario: Scenario, path: Path) -> Path:
         lines.append('wrk.headers["Content-Type"] = "application/octet-stream"')
     if scenario.close_per_request:
         lines.append('wrk.headers["Connection"] = "close"')
+    if scenario.key_header:
+        # Every request carries the next of CLIENT_KEYS client keys, each wrk thread starting
+        # at its own offset. The requests are formatted once, in init; request() only picks one.
+        keys = ", ".join(f'"{client_key(scenario.key_header, k)}"' for k in range(CLIENT_KEYS))
+        lines.append(
+            f"""
+local keys = {{{keys}}}
+local requests = {{}}
+local next_key = 0
+local threads = 0
+setup = function(thread)
+  thread:set("offset", threads * 257)
+  threads = threads + 1
+end
+init = function(args)
+  for i, key in ipairs(keys) do
+    wrk.headers["{scenario.key_header}"] = key
+    requests[i] = wrk.format()
+  end
+  next_key = offset or 0
+end
+request = function()
+  next_key = next_key % #requests + 1
+  return requests[next_key]
+end
+"""
+        )
     lines.append(
         """
 done = function(summary, latency, requests)

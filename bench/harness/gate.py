@@ -152,6 +152,7 @@ def main() -> None:
     runner = Runner(session)
     pin_harness(profile)
     wait_port_free(t.ORIGIN_PORT)
+    wait_port_free(t.ORIGIN_PORT2)
     runner.origin = Origin(profile, session.dir)
     server = registry()[upstreamer.NAME]
     perf = tool("perf").exe("perf")

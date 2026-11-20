@@ -19,11 +19,14 @@ from pathlib import Path
 
 from . import report, upstreamer
 from . import topology as t
+from .loadgen import h2load_flags as loadgen_flags
 from .loadgen import plan as loadgen_plan
+from .loadgen import url as loadgen_url
 from .procs import raise_nofile, run_pinned
-from .runner import Origin, Runner, RunSpec, Session, matrix, pin_harness, probe, wait_port_free
-from .scenarios import SCENARIOS, lookup
-from .servers import registry
+from .runner import Origin, Runner, RunSpec, Scraper, Session, matrix, pin_harness, probe, wait_port_free
+from .scenarios import Feature
+from .scenarios import FEATURE_SCENARIOS, SCENARIOS, lookup
+from .servers import NO_FEATURES, registry
 from .tools import tool
 
 
@@ -44,7 +47,13 @@ def pick_servers(names: str) -> list:
 
 
 def pick_scenarios(names: str) -> list:
-    return list(SCENARIOS.values()) if names == "all" else [lookup(n) for n in split(names)]
+    """`all`, `core` (the scenarios without features), `features`, or a comma list."""
+    groups = {
+        "all": list(SCENARIOS.values()),
+        "core": [s for s in SCENARIOS.values() if not s.features],
+        "features": list(FEATURE_SCENARIOS),
+    }
+    return groups.get(names) or [lookup(n) for n in split(names)]
 
 
 def pick_profiles(names: str) -> list:
@@ -152,24 +161,38 @@ def cmd_serve(a: argparse.Namespace) -> None:
     runner = Runner(session)
     pin_harness(profile)
     wait_port_free(t.ORIGIN_PORT)
+    wait_port_free(t.ORIGIN_PORT2)
     runner.origin = Origin(profile, session.dir)
-    run_dir = session.dir / "runs" / f"serve-{server.name}"
-    run_dir.mkdir(parents=True)
-    scenarios = [s for s in SCENARIOS.values() if server.supports(s.requires)]
+    # One server start per feature set: the core scenarios share one config, each feature
+    # scenario has its own.
+    configs: dict[frozenset, list] = {}
+    for sc in pick_scenarios(a.scenarios):
+        reason = server.not_applicable_reason(sc)
+        if reason:
+            print(f"n/a   {sc.name}: {reason}")
+        else:
+            configs.setdefault(sc.features, []).append(sc)
     scope = None
     failed = False
     try:
-        spec = RunSpec(server, scenarios[0], profile, "closed", None, 0, 0, 0)
-        scope = runner.start_server(spec, run_dir)
-        runner.wait_ready(spec, scope, run_dir)
-        for sc in SCENARIOS.values():
-            if not server.supports(sc.requires):
-                print(f"n/a   {sc.name}: {server.not_applicable.get(sc.requires, 'not supported')}")
+        for scenarios in configs.values():
+            if scope:
+                scope.stop()
+            run_dir = session.dir / "runs" / f"serve-{server.name}-{scenarios[0].name}"
+            run_dir.mkdir(parents=True)
+            spec = RunSpec(server, scenarios[0], profile, "closed", None, 0, 0, 0)
+            scope = runner.start_server(spec, run_dir)
+            try:
+                runner.wait_ready(spec, scope, run_dir)
+            except RuntimeError as e:
+                failed = True
+                print(f"FAIL  {', '.join(sc.name for sc in scenarios)}: {e}")
                 continue
-            reason = probe(sc, server.port_override, run_dir)
-            failed |= reason is not None
-            print(f"{'ok  ' if reason is None else 'FAIL'}  {sc.name}{'' if reason is None else ': ' + reason}")
-        print(f"config and logs: {run_dir}")
+            for sc in scenarios:
+                reason = probe(sc, server.port_override, run_dir) or serve_checks(sc, server, runner, run_dir)
+                failed |= reason is not None
+                print(f"{'ok  ' if reason is None else 'FAIL'}  {sc.name}{'' if reason is None else ': ' + reason}")
+            print(f"config and logs: {run_dir}")
         if a.hold:
             print("holding; Ctrl-C to stop", flush=True)
             while True:
@@ -183,6 +206,29 @@ def cmd_serve(a: argparse.Namespace) -> None:
     sys.exit(1 if failed else 0)
 
 
+def serve_checks(sc, server, runner: Runner, run_dir: Path) -> str | None:
+    """Beyond the probe: a balanced scenario reaches both origin addresses over 64 requests,
+    and a metrics scenario's endpoint answers a scrape."""
+    if sc.balanced:
+        before = runner.origin.stats()["requests_by_listener"]
+        out = subprocess.run(
+            [tool("h2load").exe("h2load"), "-n", "64", "-c", "4", "-T", "5", *loadgen_flags(sc), loadgen_url(sc, server.port_override)],
+            capture_output=True, text=True, timeout=30, cwd=run_dir,
+        ).stdout
+        after = runner.origin.stats()["requests_by_listener"]
+        split = [x - y for x, y in zip(after, before)]
+        if "64 succeeded" not in out or min(split) == 0:
+            return f"balance: requests per origin address {split}"
+    if Feature.METRICS in sc.features:
+        scraper = Scraper(server, run_dir)
+        scraper.start()
+        scraper.stop()
+        m = scraper.summary()
+        if not m["ok"]:
+            return f"metrics: {m['url']} did not answer 200 with a body (see {scraper.log})"
+    return None
+
+
 def cmd_profile(a: argparse.Namespace) -> None:
     server = pick_servers(a.server)[0]
     prepare_upstreamer([server], a.upstreamer_src)
@@ -192,6 +238,7 @@ def cmd_profile(a: argparse.Namespace) -> None:
     runner = Runner(session)
     pin_harness(profile)
     wait_port_free(t.ORIGIN_PORT)
+    wait_port_free(t.ORIGIN_PORT2)
     runner.origin = Origin(profile, session.dir)
     out = a.out / "profiles" / f"{session.id}-{profile.name}-{sc.name}-{server.name}"
     out.mkdir(parents=True)
@@ -240,6 +287,12 @@ def cmd_tuning(a: argparse.Namespace) -> None:
             print(f"- {line}")
         for cap, why in sorted(server.not_applicable.items()):
             print(f"- n/a {cap}: {why}")
+        for line in server.feature_tuning:
+            print(f"- feature scenarios: {line}")
+        for feature, why in sorted(server.feature_na.items()):
+            print(f"- n/a {feature}: {why}")
+        if not server.features:
+            print(f"- n/a feature scenarios: {NO_FEATURES}")
         if server.sources:
             print("\nSources: " + ", ".join(f"<{u}>" for u in server.sources))
         print()
@@ -303,7 +356,8 @@ def main() -> None:
     sp = sub.add_parser("serve", help="start origin and one server, probe its scenarios")
     sp.add_argument("--server", required=True)
     sp.add_argument("--profile", default="fleet")
-    sp.add_argument("--hold", action="store_true", help="keep both running until Ctrl-C")
+    sp.add_argument("--hold", action="store_true", help="keep the last config running until Ctrl-C")
+    sp.add_argument("--scenarios", default="all", help="'all', 'core', 'features' or a comma list")
     sp.set_defaults(func=cmd_serve)
 
     sp = sub.add_parser("tuning", help="print every server's settings and their sources")
