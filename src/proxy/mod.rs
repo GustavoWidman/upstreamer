@@ -7,10 +7,13 @@
 //!
 //! Retry: a pooled connection that fails before any byte of the response arrived (the origin
 //! closed it while idle) is retried once on a freshly dialled connection, when the method is
-//! idempotent and no body byte was consumed. Never otherwise.
+//! idempotent and no body byte was consumed. A pool target also moves a failed attempt of such
+//! a request to another origin, up to its `retries`. Never otherwise: bodies are not buffered
+//! to make them replayable.
 //!
 //! Errors map to statuses that go through the site's error routes: dial failure or reset
-//! before the head -> 502, dial or response-header timeout -> 504.
+//! before the head -> 502, dial or response-header timeout -> 504, a pool with no origin to
+//! pick -> 503.
 //!
 //! A client that goes away is noticed while its request body is being read, while a response
 //! body is being relayed, and once the origin has taken a second to start its answer. Each
@@ -26,7 +29,7 @@ pub(crate) use conn::{UpstreamConn, UpstreamIo};
 
 use crate::body::{Body, RequestBody};
 use crate::exchange::{Exchange, Proto};
-use crate::log::debug;
+use crate::exchange::{Refused, RefusedBy};
 use crate::msg::{Known, Method, ResponseHead, Status, Version};
 use crate::net::{Socket, Transport};
 use crate::pipeline::Response;
@@ -35,6 +38,8 @@ use crate::proto::h1::client;
 use crate::proto::h1::codec::{self, Limits, OutFraming, Parsed};
 use crate::runtime::{Core, CoreSnapshot};
 use crate::upstream::Upstreams;
+use crate::upstream::balance::{self, Tried};
+use crate::upstream::health::{self, Outcome};
 use bytes::{Buf, Bytes, BytesMut};
 use relay::{Sent, Tracker};
 use rustls::pki_types::ServerName;
@@ -148,10 +153,9 @@ impl ProxyError {
 /// 1. add [`via`] to the request's fields, then serialise the upstream request head into
 ///    `ex.out` (`client::write_request_head`, which applies the plan's header ops first);
 ///    the same bytes go to any origin, since the client's Host passes through;
-/// 2. a pool target goes to [`balanced`]; one origin takes a pooled connection or [`dial`]s;
-/// 3. [`attempt`]: send head + body, read the response head;
-/// 4. retry once on a fresh connection only if the pooled one failed before any response
-///    byte and the request can be replayed.
+/// 2. one origin goes to [`on_origin`]; a pool target to [`balanced`], which picks an origin
+///    per attempt and calls [`on_origin`] for each;
+/// 3. [`attempt`]: send head + body, read the response head.
 ///
 /// `ex.origin` names the origin of the last attempt (access log, metrics).
 pub(crate) async fn forward(
@@ -164,22 +168,47 @@ pub(crate) async fn forward(
     let upgrade = wants_upgrade(ex);
     ex.req.fields.push(b"via", via(ex.req.version));
     client::write_request_head(ex, plan, up_framing(&body), upgrade);
-    let id = match plan.to {
-        Target::Origin(id) => id,
-        Target::Pool(pool) => return balanced(core, snap, plan, pool, ex, body).await,
-    };
-    ex.origin = Some(id);
-    let up = &*snap.upstreams;
+    match plan.to {
+        Target::Origin(id) => {
+            ex.origin = Some(id);
+            on_origin(core, snap, plan, id, ex, &mut body, upgrade, false).await
+        }
+        Target::Pool(pool) => balanced(core, snap, plan, pool, ex, &mut body, upgrade).await,
+    }
+}
 
+/// One attempt on origin `id`: a pooled connection or a dialled one, retried once on a fresh
+/// connection only if the pooled one failed before any response byte and the request can be
+/// replayed (the origin closed an idle connection; it is not broken, so this is neither a
+/// further attempt nor a health failure). `counted`: the connection carries a busy guard, so
+/// the requests in flight to an origin are this core's checked-out connections to it.
+#[allow(clippy::too_many_arguments)]
+async fn on_origin(
+    core: &Core,
+    snap: &CoreSnapshot,
+    plan: &ProxyPlan,
+    id: OriginId,
+    ex: &mut Exchange,
+    body: &mut RequestBody<'_>,
+    upgrade: bool,
+    counted: bool,
+) -> Result<Response, ProxyError> {
+    let up = &*snap.upstreams;
     let mut pooled = core.upstreams.checkout(up.origin(id), id, up.epoch);
     loop {
+        let busy = if counted {
+            core.upstreams.busy(id, up.epoch)
+        } else {
+            None
+        };
         let reused = pooled.is_some();
         let mut conn = match pooled.take() {
             Some(conn) => conn,
             None => dial(core, up, id, plan.dial_timeout).await?,
         };
+        conn.busy = busy;
         conn.buf = core.bufs.take();
-        match attempt(core, snap, plan, ex, &mut body, conn, upgrade).await {
+        match attempt(core, snap, plan, ex, body, conn, upgrade).await {
             Ok(resp) => return Ok(resp),
             Err(Failed {
                 replayable: true, ..
@@ -190,25 +219,79 @@ pub(crate) async fn forward(
 }
 
 /// A pool target: up to 1 + `retries` attempts, each on the origin `upstream::balance::pick`
-/// returns, each recorded by `upstream::health::observe`. The connection carries a busy guard
-/// while checked out, so the requests in flight to an origin are this core's checked-out
-/// connections to it.
+/// returns, each recorded by `upstream::health::observe`. A failed attempt (connect, TLS,
+/// reset before the head, response-header timeout, a bad head, or a status in
+/// `failStatuses`) moves to another origin when the request can be replayed: an idempotent
+/// method and no body byte consumed. When the last attempt got a `failStatuses` response,
+/// that response is passed on. With no member to pick: 503, and `ex.refused` says when to
+/// retry.
 async fn balanced(
     core: &Core,
     snap: &CoreSnapshot,
     plan: &ProxyPlan,
     pool: PoolId,
     ex: &mut Exchange,
-    body: RequestBody<'_>,
+    body: &mut RequestBody<'_>,
+    upgrade: bool,
 ) -> Result<Response, ProxyError> {
-    let _ = (snap, plan, body);
-    debug!(
-        "core {}: pool {} of {:?}: balanced targets are not built yet",
-        core.index, pool.0, ex.site
-    );
-    Err(ProxyError::Upstream(io::Error::other(
-        "balanced targets are not built yet",
-    )))
+    let spec = &snap.plan.pools[usize::from(pool.0)];
+    let up = &*snap.upstreams;
+    let members = up.members(pool);
+    let now = core.clock.mono.get();
+    let mut tried = Tried::new();
+    let mut last = None;
+    loop {
+        let picked = {
+            let state = core.upstreams.pool(pool);
+            balance::pick(spec, members, up, &core.upstreams, &state, ex, &tried, now)
+        };
+        let Some(id) = picked else {
+            return Err(last.unwrap_or_else(|| {
+                ex.refused = Some(Refused {
+                    by: RefusedBy::NoOrigin,
+                    retry_after: members.retry_after(up, now),
+                });
+                ProxyError::NoOrigin
+            }));
+        };
+        ex.origin = Some(id);
+        let result = on_origin(core, snap, plan, id, ex, body, upgrade, true).await;
+        let outcome = match &result {
+            Ok(resp) if spec.fail_statuses.contains(resp.head.status) => Outcome::Failed,
+            Ok(_) => Outcome::Answered,
+            Err(ProxyError::ClientGone) => Outcome::Neutral,
+            Err(_) => Outcome::Failed,
+        };
+        let origin = up.origin(id);
+        if let Some(local) = core.upstreams.local(id, up.epoch) {
+            health::observe(origin, &local, spec.passive.as_ref(), outcome, now);
+        }
+        let again = outcome == Outcome::Failed
+            && tried.len() < usize::from(spec.retries)
+            && ex.req.method.idempotent()
+            && body.replayable();
+        if !again {
+            return result;
+        }
+        if let Some(metrics) = &snap.metrics {
+            metrics.retried(id);
+        }
+        match result {
+            Ok(resp) => discard(core, ex, resp),
+            Err(error) => last = Some(error),
+        }
+        tried.push(id);
+    }
+}
+
+/// Drops a response that will not be passed on: its head goes back to the exchange, its
+/// connection is closed with its buffer returned.
+fn discard(core: &Core, ex: &mut Exchange, resp: Response) {
+    let Response { head, body, .. } = resp;
+    ex.recycle(head);
+    if let Body::Upstream(body) = body {
+        body.finish(core);
+    }
 }
 
 /// The Via entry a gateway MUST add to each request it forwards (RFC 9110 §7.6.3): the
@@ -666,6 +749,51 @@ mod tests {
             "core thread allocations over {requests} proxied keep-alive requests: {}",
             after - before
         );
+        assert_eq!(after - before, 0, "allocations on the core thread");
+    }
+
+    #[test]
+    fn zero_allocations_per_request_through_a_two_origin_pool_after_warm_up() {
+        const RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let (a, b) = (origin(RESPONSE), origin(RESPONSE));
+        let listen = free_addr();
+        let plan = plan_from(
+            1,
+            &serde_json::json!({
+                "version": 1,
+                "listen": { "http": [listen], "https": [] },
+                "sites": [{ "name": "pooled", "hosts": ["*"], "routes": [{ "proxy": {
+                    "to": [format!("http://{a}"), format!("http://{b}")],
+                    "failStatuses": [503],
+                } }] }],
+            }),
+        );
+        assert!(matches!(
+            plan.sites[0].routes.steps[0].action,
+            crate::plan::Action::Answer(crate::plan::Terminal::Proxy(ref p), _)
+                if matches!(p.to, crate::plan::Target::Pool(_))
+        ));
+        let generation = Arc::new(Generation::standalone(plan, None, Arc::default()));
+        let workers = spawn_workers(&[allowed_cpus()[0]], generation).unwrap();
+        let mut conn = connect(listen);
+        let mut request = || {
+            conn.write_all(REQUEST).unwrap();
+            let (head, body) = read_response(&mut conn).unwrap();
+            assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+            assert_eq!(body, b"ok");
+        };
+        for _ in 0..2_000 {
+            request();
+        }
+        let signals = no_signals();
+        let before = served(listen.port(), 0).allocations;
+        let requests = 20_000;
+        for _ in 0..requests {
+            request();
+        }
+        let after = served(listen.port(), 0).allocations;
+        drop(signals);
+        stop(workers, Instant::now());
         assert_eq!(after - before, 0, "allocations on the core thread");
     }
 
