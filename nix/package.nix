@@ -19,7 +19,16 @@
       args = {
         src = lib.fileset.toSource {
           inherit root;
-          fileset = lib.fileset.unions (cargoFiles ++ [ ../tests ]);
+          # `upstreamer example` embeds the example configs; a test holds docs/config.md to
+          # the schema.
+          fileset = lib.fileset.unions (
+            cargoFiles
+            ++ [
+              ../tests
+              (lib.fileset.fileFilter (file: file.hasExt "toml") ../examples)
+              ../docs/config.md
+            ]
+          );
         };
         strictDeps = true;
       };
