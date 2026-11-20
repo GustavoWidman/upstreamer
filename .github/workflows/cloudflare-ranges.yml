@@ -1,0 +1,20 @@
+name: cloudflare-ranges
+
+# The `cloudflare` preset of `trustedProxies` is generated from the ranges Cloudflare
+# publishes. Checking it needs the network and follows Cloudflare's changes, not this
+# repository's, so it runs on a schedule and by hand instead of gating pull requests.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compare src/trust/cloudflare.rs with the published ranges
+        run: scripts/cloudflare-ranges --check
