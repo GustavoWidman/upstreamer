@@ -134,8 +134,6 @@ pub(crate) struct Layout {
     /// By `LimitId`: the route labels of the `limit` step that owns the table.
     pub(super) limits: Box<[Arc<str>]>,
     len: usize,
-    /// The hub every snapshot of this layout publishes to.
-    pub(super) hub: Arc<Hub>,
 }
 
 impl Layout {
@@ -180,7 +178,6 @@ impl Layout {
             series: series.into(),
             limits,
             len: next,
-            hub: Hub::of_thread(),
         })
     }
 
@@ -225,6 +222,8 @@ fn limit_routes(block: &Block, plan: &Plan, out: &mut [Option<Arc<str>>]) {
 pub(crate) struct Counters {
     cells: Rc<[Cell<u64>]>,
     pub(super) layout: Arc<Layout>,
+    /// The process's hub, where this core publishes these counts.
+    pub(super) hub: Arc<Hub>,
     /// Where this snapshot's counts go when it drops.
     retired: Rc<RefCell<Retired>>,
 }
@@ -254,7 +253,7 @@ fn micros(took: Duration) -> u64 {
 }
 
 impl Counters {
-    pub fn new(layout: Arc<Layout>, retired: Rc<RefCell<Retired>>) -> Counters {
+    pub fn new(layout: Arc<Layout>, hub: Arc<Hub>, retired: Rc<RefCell<Retired>>) -> Counters {
         let cells: Rc<[Cell<u64>]> = (0..layout.len).map(|_| Cell::new(0)).collect();
         retired
             .borrow_mut()
@@ -263,6 +262,7 @@ impl Counters {
         Counters {
             cells,
             layout,
+            hub,
             retired,
         }
     }
@@ -600,7 +600,7 @@ pub(crate) fn publish(core: &crate::runtime::Core) {
     let Some(counters) = &snap.metrics else {
         return;
     };
-    let Some(slot) = counters.layout.hub.cores.get(core.index) else {
+    let Some(slot) = counters.hub.cores.get(core.index) else {
         return;
     };
     let mut retired = core.retired.borrow_mut();
@@ -684,9 +684,17 @@ mod tests {
         let retired = Rc::new(RefCell::new(Retired::default()));
         let api = slot(&plan, "api");
         let key = Key::Route(route_labels("a", "api"));
-        let old = Counters::new(Layout::build(&plan, &upstreams), retired.clone());
+        let old = Counters::new(
+            Layout::build(&plan, &upstreams),
+            Hub::new(1),
+            retired.clone(),
+        );
         old.request(api, Status::OK, Duration::from_micros(1_500));
-        let new = Counters::new(Layout::build(&plan, &upstreams), retired.clone());
+        let new = Counters::new(
+            Layout::build(&plan, &upstreams),
+            Hub::new(1),
+            retired.clone(),
+        );
         new.request(api, Status::BAD_GATEWAY, Duration::from_secs(20));
         {
             let mut r = retired.borrow_mut();
@@ -718,7 +726,11 @@ mod tests {
                 "routes": [{"metrics": {}}]}]}),
         );
         let retired = Rc::new(RefCell::new(Retired::default()));
-        let old = Counters::new(Layout::build(&plan, &upstreams), retired.clone());
+        let old = Counters::new(
+            Layout::build(&plan, &upstreams),
+            Hub::new(1),
+            retired.clone(),
+        );
         old.request(slot(&plan, "api"), Status::OK, Duration::ZERO);
         drop(old);
         let current = Layout::build(&other, &Registry::new(1).build(&other));
@@ -736,7 +748,11 @@ mod tests {
         let plan = plan();
         let upstreams = Registry::new(1).build(&plan);
         let retired = Rc::new(RefCell::new(Retired::default()));
-        let c = Counters::new(Layout::build(&plan, &upstreams), retired.clone());
+        let c = Counters::new(
+            Layout::build(&plan, &upstreams),
+            Hub::new(1),
+            retired.clone(),
+        );
         c.upstream(OriginId(0), Ok(Status::OK), Duration::from_micros(30));
         c.upstream(OriginId(0), Err(Cause::Timeout), Duration::from_secs(1));
         c.retried(OriginId(0));

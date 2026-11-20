@@ -151,10 +151,9 @@ impl CoreSnapshot {
             plan,
             upstreams: generation.upstreams.clone(),
             limits: generation.limits.clone(),
-            metrics: generation
-                .metrics
-                .as_ref()
-                .map(|(layout, _)| metrics::Counters::new(layout.clone(), retired.clone())),
+            metrics: generation.metrics.as_ref().map(|(layout, hub)| {
+                metrics::Counters::new(layout.clone(), hub.clone(), retired.clone())
+            }),
             acme: generation.acme.clone(),
             tls,
             quic,

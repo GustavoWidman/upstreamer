@@ -40,11 +40,10 @@ use crate::plan::{ListenerKind, Plan};
 use crate::runtime::{Core, CoreSnapshot};
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
-/// One per process: the hub of the thread that builds layouts, which is the control thread.
-/// Every generation that collects metrics carries the same `Arc`, so nothing about it depends
-/// on the plan.
+/// One per process, made by the control thread. Every generation that collects metrics carries
+/// the same `Arc`, so nothing about it depends on the plan.
 pub(crate) struct Hub {
     cores: Box<[Mutex<Published>]>,
     /// Written by the control thread: generation, reload results, discovery state.
@@ -61,35 +60,14 @@ pub(crate) struct Control {
     pub sources: Vec<(Arc<str>, usize, bool)>,
 }
 
-thread_local! {
-    /// The hub [`Layout::build`] hands its snapshots: the one [`Hub::new`] made on this
-    /// thread, while it lives.
-    static THREAD_HUB: RefCell<Weak<Hub>> = const { RefCell::new(Weak::new()) };
-}
-
 impl Hub {
-    /// The hub of this thread when one lives with room for `cores` cores, else a new one.
+    /// A hub with a slot for each of `cores` cores.
     pub fn new(cores: usize) -> Arc<Hub> {
-        THREAD_HUB.with_borrow_mut(|hub| {
-            if let Some(hub) = hub.upgrade().filter(|h| h.cores.len() >= cores) {
-                return hub;
-            }
-            let new = Arc::new(Hub {
-                cores: (0..cores).map(|_| Mutex::default()).collect(),
-                control: Mutex::default(),
-                started: std::time::SystemTime::now(),
-            });
-            *hub = Arc::downgrade(&new);
-            new
+        Arc::new(Hub {
+            cores: (0..cores).map(|_| Mutex::default()).collect(),
+            control: Mutex::default(),
+            started: std::time::SystemTime::now(),
         })
-    }
-
-    /// The hub of this thread, made for every CPU when none lives.
-    pub(super) fn of_thread() -> Arc<Hub> {
-        let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
-        THREAD_HUB
-            .with_borrow(Weak::upgrade)
-            .unwrap_or_else(|| Hub::new(cpus))
     }
 
     /// The control thread's facts, updated after each reload and discovery change.
@@ -113,7 +91,7 @@ pub(crate) fn serve(core: &Core, snap: &CoreSnapshot, ex: &mut Exchange) -> Resp
         out.clear();
         render::render(
             &render::Inputs {
-                hub: &counters.layout.hub,
+                hub: &counters.hub,
                 layout: &counters.layout,
                 upstreams: &snap.upstreams,
                 limits: &snap.limits,
@@ -219,6 +197,7 @@ pub mod bench {
             Requests {
                 counters: Counters::new(
                     Layout::build(&plan, &upstreams),
+                    super::Hub::new(1),
                     Rc::new(RefCell::new(Retired::default())),
                 ),
                 slot: RouteSlot(2),
@@ -243,6 +222,7 @@ pub mod bench {
     /// A hub whose cores published counts for every series of a plan with `routes` routes.
     pub struct Scrape {
         layout: Arc<Layout>,
+        hub: Arc<super::Hub>,
         upstreams: Arc<Upstreams>,
         limits: Arc<crate::limit::Limiters>,
         out: Vec<u8>,
@@ -254,10 +234,11 @@ pub mod bench {
             let plan = plan(routes);
             let upstreams = Registry::new(1).build(&plan);
             let layout = Layout::build(&plan, &upstreams);
+            let hub = super::Hub::new(cores);
             let mut counters = Vec::new();
-            for core in 0..cores.min(layout.hub.cores.len()) {
+            for core in 0..cores {
                 let retired = Rc::new(RefCell::new(Retired::default()));
-                let c = Counters::new(layout.clone(), retired.clone());
+                let c = Counters::new(layout.clone(), hub.clone(), retired.clone());
                 for (i, _) in plan.routes.iter().enumerate() {
                     for status in [200, 301, 404, 503] {
                         c.request(
@@ -272,7 +253,7 @@ pub mod bench {
                     c.upstream(id, Ok(Status::OK), Duration::from_micros(900));
                     c.upstream(id, Err(super::Cause::Connect), Duration::ZERO);
                 }
-                let mut published = layout.hub.cores[core].lock().unwrap();
+                let mut published = hub.cores[core].lock().unwrap();
                 retired
                     .borrow_mut()
                     .publish(&layout, 0, &mut published as &mut Published);
@@ -281,6 +262,7 @@ pub mod bench {
             Scrape {
                 limits: crate::limit::Limiters::carry(&plan, None),
                 layout,
+                hub,
                 upstreams,
                 out: Vec::new(),
                 _counters: counters,
@@ -292,7 +274,7 @@ pub mod bench {
             self.out.clear();
             super::render::render(
                 &super::render::Inputs {
-                    hub: &self.layout.hub,
+                    hub: &self.hub,
                     layout: &self.layout,
                     upstreams: &self.upstreams,
                     limits: &self.limits,
