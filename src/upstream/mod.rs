@@ -93,10 +93,28 @@ impl Upstreams {
 
 impl Members {
     /// Seconds until the first member could be picked again, at least 1: the Retry-After of
-    /// a pool with nothing to pick.
+    /// a pool with nothing to pick. A member failing its probe could be back after one probe
+    /// interval; a drained member never; a pool with no member at all (a source that has not
+    /// reported yet) is retried after a second.
     pub fn retry_after(&self, upstreams: &Upstreams, now: u32) -> u32 {
-        let _ = (upstreams, now);
-        1
+        self.origins
+            .iter()
+            .zip(self.weights.iter())
+            .filter(|&(_, &weight)| weight > 0)
+            .map(|(&id, _)| {
+                let origin = upstreams.origin(id);
+                let ejected = origin.health.ejected_until().saturating_sub(now);
+                let probe = match &origin.spec.probe {
+                    Some(probe) if origin.health.probe_down() => {
+                        probe.interval.as_secs().try_into().unwrap_or(u32::MAX)
+                    }
+                    _ => 0,
+                };
+                ejected.max(probe)
+            })
+            .min()
+            .unwrap_or(1)
+            .max(1)
     }
 }
 
