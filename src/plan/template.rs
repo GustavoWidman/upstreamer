@@ -182,6 +182,7 @@ impl Template {
             req,
             conn,
             client,
+            trusted_peer,
             vars,
             captures,
             arena,
@@ -208,7 +209,7 @@ impl Template {
                         let _ = write!(out, "{}", conn.remote.ip());
                     }
                     Placeholder::ForwardedFor => {
-                        crate::trust::forwarded_for(req, conn, *client, out)
+                        crate::trust::forwarded_for(req, conn, *trusted_peer, out)
                     }
                     Placeholder::RemotePort => {
                         let _ = write!(out, "{}", conn.remote.port());

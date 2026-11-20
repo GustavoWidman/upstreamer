@@ -123,6 +123,9 @@ pub(crate) struct Exchange {
     /// The client's address: the peer's, or the one a trusted proxy forwarded. What
     /// `{remote_host}`, access logs, rate-limit keys and hash keys read.
     pub client: IpAddr,
+    /// The peer is one of the plan's trusted proxies, so the `X-Forwarded-For` chain it sent
+    /// is kept in the one sent upstream, whatever its header gave as the client.
+    pub trusted_peer: bool,
     pub site: Option<SiteId>,
     /// Indexed by [`VarId`]; sized to the plan's var count when the exchange starts.
     pub vars: SmallVec<[Option<ASpan>; 8]>,
@@ -156,6 +159,7 @@ impl Exchange {
             req: RequestHead::new(),
             conn,
             client: conn.remote.ip(),
+            trusted_peer: false,
             site: None,
             vars: SmallVec::new(),
             captures: SmallVec::new(),
@@ -178,6 +182,7 @@ impl Exchange {
         self.req.clear();
         self.conn = conn;
         self.client = conn.remote.ip();
+        self.trusted_peer = false;
         self.site = None;
         self.vars.clear();
         self.vars.resize(vars as usize, None);

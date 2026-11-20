@@ -227,6 +227,7 @@ pub(crate) fn resolve(plan: &TrustPlan, ex: &mut Exchange) {
     if !plan.peers.contains(ex.conn.remote.ip()) {
         return;
     }
+    ex.trusted_peer = true;
     if let Some(client) = plan.forwarded(&ex.req) {
         ex.client = client;
     }
@@ -329,12 +330,18 @@ fn port(text: &str) -> Option<()> {
 }
 
 /// The `X-Forwarded-For` a plan with trusted proxies sends upstream, in place of
-/// `{remote_host}`: when the client address came from the header of a trusted peer, the chain
-/// that peer sent, then the peer; the peer alone otherwise, so an untrusted peer cannot plant
-/// addresses of its own.
-pub(crate) fn forwarded_for(req: &RequestHead, conn: &ConnInfo, client: IpAddr, out: &mut Vec<u8>) {
+/// `{remote_host}`: from a trusted peer, the chain that peer sent, then the peer; the peer
+/// alone otherwise, so an untrusted peer cannot plant addresses of its own. A trusted peer's
+/// chain is kept even when its client header named the peer itself or nothing usable, since
+/// the hops it lists are still the ones that peer vouches for.
+pub(crate) fn forwarded_for(
+    req: &RequestHead,
+    conn: &ConnInfo,
+    trusted_peer: bool,
+    out: &mut Vec<u8>,
+) {
     let peer = conn.remote.ip().to_canonical();
-    if client.to_canonical() != peer {
+    if trusted_peer {
         for line in req.fields.values_known(Known::XForwardedFor) {
             if !trim(line).is_empty() {
                 out.extend_from_slice(line);
@@ -813,6 +820,35 @@ mod tests {
         assert_eq!(
             forwarded(&plan, "2001:db8::5", &[("X-Forwarded-For", "1.2.3.4")]),
             "2001:db8::5"
+        );
+    }
+
+    #[test]
+    fn a_trusted_peer_keeps_its_chain_when_its_header_gives_no_other_client() {
+        let plan = plan("CF-Connecting-IP", CF);
+        let chain = ("X-Forwarded-For", "198.51.100.23, 10.1.1.1");
+        assert_eq!(
+            forwarded(
+                &plan,
+                "103.21.244.9",
+                &[("CF-Connecting-IP", "103.21.244.9"), chain]
+            ),
+            "198.51.100.23, 10.1.1.1, 103.21.244.9",
+            "the header names the peer itself"
+        );
+        assert_eq!(
+            forwarded(
+                &plan,
+                "103.21.244.9",
+                &[("CF-Connecting-IP", "unknown"), chain]
+            ),
+            "198.51.100.23, 10.1.1.1, 103.21.244.9",
+            "the header is not an address"
+        );
+        assert_eq!(
+            forwarded(&plan, "103.21.244.9", &[chain]),
+            "198.51.100.23, 10.1.1.1, 103.21.244.9",
+            "the header is absent"
         );
     }
 
