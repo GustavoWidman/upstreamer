@@ -309,7 +309,10 @@ upgrades, streamed bodies and server-sent events pass through.
 ### Weights and policies
 
 A member is a URL or `{ url = "...", weight = 2 }` (weight 1 by default): an origin of weight 2
-takes twice the share. `balance` is one of:
+takes twice the share. A weight is at most 1000, and 0 takes the origin out of rotation while it
+stays in the config; at least one member must weigh more than 0. An origin listed twice in one
+`to` is an error, even when the two URLs differ only in case or a trailing `/`: give it one entry
+with a weight. `balance` is one of:
 
 | policy | picks |
 |---|---|
@@ -318,17 +321,41 @@ takes twice the share. `balance` is one of:
 | `"p2c"` | two random members, the one with fewer requests in flight on this worker |
 | `{ hash = "<template>" }` | by consistent (Maglev) hashing of the expanded template, such as `"{cookie.cart_session}"`: the same key reaches the same origin while it is healthy, and adding or removing an origin moves only that origin's share. An empty expansion falls back to round robin |
 
+A hash key is hashed with a fixed seed, so it picks the same origin on every worker, across
+restarts, and on every replica with the same members. When the origin a key lands on is out
+(failing its probe, ejected, or already tried by this request), seven more slots derived from the
+key are tried, and then the request falls back to round robin, not to the origin of some other
+key. The key cannot read `{re.N}` or `{err.*}`.
+
+The Maglev table has the smallest prime number of slots at or above 100 per member rounded up to
+a power of two, at least 2048 and at most 65537: 2053 slots for up to 20 members, 4099 for up to
+40, and so on. The size changes only when the member count crosses one of those powers of two, so
+adding or removing a member within a band moves only the keys that Maglev has to move; crossing a
+band reshuffles every key once.
+
 In-flight counts are per worker, which is what a thread-per-core proxy can read without sharing
 memory. A request that cannot be replayed is never retried.
 
 ### Retries and failure
 
-An attempt fails when the connection is refused, times out or resets, or when the origin answers
-a status in `failStatuses`. A failed attempt of a request that may be replayed (an idempotent
-method whose body has not been consumed) moves to another origin, up to `retries` more times.
-When the last attempt gets a `failStatuses` response, that response is passed to the client. When
-no origin can be picked at all, the answer is 503 with `Retry-After`, through the site's error
-routes (`{err.retry_after}` is the suggested seconds).
+An attempt fails when the connection is refused, times out or resets before the response head,
+when the head is malformed, or when the origin answers a status in `failStatuses`. A failed
+attempt moves to another origin, up to `retries` more times, only when the request can be sent
+again unchanged: its method is idempotent (`GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE`, `TRACE`)
+and none of its body has been read, which holds for any request without a body. Bodies are never
+buffered to make a request replayable, so a `POST`, or a request whose body has started
+upstream, gets the answer of its first attempt. A retry prefers an origin this request has not
+tried; a pool whose every origin has been tried reuses one, on a fresh connection. Apart from
+`retries`, a pooled connection that the origin closed while idle is retried once on a freshly
+dialled one, for the same requests, with or without a pool.
+
+When the last attempt gets a `failStatuses` response, that response, its body included, is
+passed to the client: the origin's own error page beats one made up here. When the last attempt
+failed otherwise, the answer is 502 (refused or reset) or 504 (timed out). When no origin can be
+picked at all (every member fails its probe or weighs 0, or a discovery source has not reported
+yet), the answer is 503 with `Retry-After`, through the site's error routes
+(`{err.retry_after}` is the same number): the seconds until the first member could be back,
+which is its remaining ejection or one probe interval, and 1 for a pool with no member yet.
 
 ### Health
 
@@ -345,12 +372,17 @@ several origins:
 | key | default | meaning |
 |---|---|---|
 | `path` | required | the request path, with its query if any |
-| `host` | the origin's host | the `Host` header of the probe |
+| `host` | see below | the `Host` header of the probe |
 | `interval` | `10s` | between probes, jittered by up to 10% |
 | `timeout` | `2s` | dial, TLS and response head together |
 | `expect` | any 2xx or 3xx | statuses that pass |
 | `healthyAfter` | `2` | consecutive passes that bring a failing origin back |
 | `unhealthyAfter` | `3` | consecutive failures that take an origin out |
+
+Without `host`, a probe of an origin from a URL sends the URL's host, with its port unless it is
+the scheme's default and in brackets for IPv6 (`10.0.0.1:8080`, `storage.lan`, `[::1]`). A probe
+of a Kubernetes source sends its `serverName` when it has one, else `<service>.<namespace>.svc`;
+a source chosen by `selector` names no single host, so it must set `host`.
 
 A probe belongs to the origin, not to a step: two steps that probe one origin differently are
 an error, as two idle timeouts are. When every origin that passes its probes is also ejected by
