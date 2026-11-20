@@ -394,3 +394,365 @@ fn warnings_do_not_fail_a_check() {
         "{warnings:?}"
     );
 }
+
+const UPSTREAMER: &str = env!("CARGO_BIN_EXE_upstreamer");
+
+/// The same document as TOML, through `upstreamer convert`.
+fn convert_to_toml(json: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    std::fs::write(&path, json).unwrap();
+    let out = std::process::Command::new(UPSTREAMER)
+        .arg("convert")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "convert: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// What `check` reports for `text` written as `config.<extension>`, one diagnostic per line,
+/// without the file's path.
+fn diagnostics_of(extension: &str, text: &str) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("config.{extension}"));
+    std::fs::write(&path, text).unwrap();
+    let errors = check(CheckInput::Config {
+        path: path.clone(),
+        expect: None,
+    })
+    .expect_err("an invalid config");
+    let prefix = format!("{}:", path.display());
+    messages(&errors)
+        .into_iter()
+        .map(|m| m.replacen(&prefix, "", 1))
+        .collect()
+}
+
+/// `message (line L, column C)` as `(message, Some((L, C)))`; a message without a position
+/// as `(message, None)`.
+fn split_position(diagnostic: &str) -> (String, Option<(usize, usize)>) {
+    let Some(open) = diagnostic.rfind(" (line ") else {
+        return (diagnostic.to_owned(), None);
+    };
+    let tail = &diagnostic[open + " (line ".len()..];
+    let parsed = tail
+        .strip_suffix(')')
+        .and_then(|t| t.split_once(", column "))
+        .and_then(|(l, c)| Some((l.parse().ok()?, c.parse().ok()?)));
+    match parsed {
+        Some(position) => (diagnostic[..open].to_owned(), Some(position)),
+        None => (diagnostic.to_owned(), None),
+    }
+}
+
+/// Twenty mistakes: the config as JSON, the pointer it is reported at, and what the first
+/// diagnostic says after `<site>/<step>: `. A schema error and a compiler error each appear in
+/// both formats with the same words.
+fn corpus() -> Vec<(&'static str, String, &'static str, &'static str)> {
+    let at = |routes: &str| {
+        format!(
+            r#"{{"version":1,"sites":[{{"name":"a","hosts":["a.example"],"routes":{routes}}}]}}"#
+        )
+    };
+    let top = |extra: &str| format!(r#"{{"version":1,{extra},"sites":[]}}"#);
+    vec![
+        (
+            "unknown top-level key",
+            top(r#""lisen":{}"#),
+            "/lisen",
+            "unknown field `lisen`, expected one of ",
+        ),
+        (
+            "unknown site key",
+            r#"{"version":1,"sites":[{"name":"a","hosts":["a.example"],"tsl":{}}]}"#.into(),
+            "/sites/0/tsl",
+            "a: unknown field `tsl`, expected one of ",
+        ),
+        (
+            "hosts as a string",
+            r#"{"version":1,"sites":[{"name":"a","hosts":"a.example"}]}"#.into(),
+            "/sites/0/hosts",
+            "a: invalid type: string \"a.example\", expected a sequence",
+        ),
+        (
+            "site without a name",
+            r#"{"version":1,"sites":[{"hosts":["a.example"]}]}"#.into(),
+            "/sites/0",
+            "sites[0]: missing field `name`",
+        ),
+        (
+            "two actions",
+            at(r#"[{"error":404,"proxy":"http://127.0.0.1:1"}]"#),
+            "/sites/0/routes/0",
+            "a/0: a step has exactly one action, found `error` and `proxy`",
+        ),
+        (
+            "no action",
+            at(r#"[{"name":"x","when":{"path":"/"}}]"#),
+            "/sites/0/routes/0",
+            "a/x: a step needs one action (",
+        ),
+        (
+            "misspelt action",
+            at(r#"[{"proxi":"http://127.0.0.1:1"}]"#),
+            "/sites/0/routes/0",
+            "a/0: unknown key `proxi` in a step; expected `name`, `when` or one action (",
+        ),
+        (
+            "duration without a unit",
+            top(r#""timeouts":{"keepAlive":"5""#) + "}",
+            "/timeouts/keepAlive",
+            "invalid duration \"5\": want <integer>(ms|s|m|h)",
+        ),
+        (
+            "listen address without a port",
+            r#"{"version":1,"sites":[{"name":"a","hosts":["a.example"],"listen":["0.0.0.0"]}]}"#
+                .into(),
+            "/sites/0/listen/0",
+            "a: invalid socket address syntax",
+        ),
+        (
+            "another version",
+            r#"{"version":2,"sites":[]}"#.into(),
+            "/version",
+            "unsupported config version 2; this upstreamer reads version 1",
+        ),
+        (
+            "unknown placeholder",
+            at(r#"[{"name":"tree","set":{"tree":"/srv/{lang}"}}]"#),
+            "/sites/0/routes/0/set/tree",
+            "a/tree: unknown placeholder `{lang}` (at byte 5 of \"/srv/{lang}\")",
+        ),
+        (
+            "capture group the regex lacks",
+            at(
+                r#"[{"name":"old","when":{"pathRegex":"^/old/(.*)$"},"redirect":{"to":"/{re.2}","status":301}}]"#,
+            ),
+            "/sites/0/routes/0/redirect/to",
+            "a/old: `{re.2}`: the regex in this step's `when` has 1 capture group",
+        ),
+        (
+            "framing header",
+            at(r#"[{"name":"len","headers":{"Content-Length":"0"}}]"#),
+            "/sites/0/routes/0/headers/Content-Length",
+            "a/len: `Content-Length` is a framing or hop-by-hop header, which only the protocol layer writes",
+        ),
+        (
+            "invalid regex",
+            at(r#"[{"name":"re","when":{"pathRegex":"("},"error":404}]"#),
+            "/sites/0/routes/0/when/pathRegex",
+            "a/re: invalid regex: ",
+        ),
+        (
+            "redirect status",
+            at(r#"[{"redirect":{"to":"/","status":200}}]"#),
+            "/sites/0/routes/0/redirect/status",
+            "a/0: 200 is not a redirect status (301, 302, 303, 307, 308)",
+        ),
+        (
+            "unknown encoding",
+            at(r#"[{"encode":["lz4"]}]"#),
+            "/sites/0/routes/0/encode/0",
+            "a/0: unknown variant `lz4`, expected one of `br`, `zstd`, `gzip`",
+        ),
+        (
+            "header removal spelt true",
+            at(r#"[{"headers":{"Server":true}}]"#),
+            "/sites/0/routes/0/headers/Server",
+            "a/0: invalid value: boolean `true`, expected a header value, or `false` or `null` to remove the header",
+        ),
+        (
+            "unknown balance policy",
+            at(r#"[{"proxy":{"to":"http://127.0.0.1:1","balance":"leastConnections"}}]"#),
+            "/sites/0/routes/0/proxy/balance",
+            "a/0: unknown variant `leastConnections`, expected one of `roundRobin`, `leastRequests`, `p2c`, `hash`",
+        ),
+        (
+            "rate without a valid unit",
+            at(r#"[{"limit":{"rate":"5/min"}}]"#),
+            "/sites/0/routes/0/limit/rate",
+            "a/0: invalid rate \"5/min\": want <integer>/(s|m|h)",
+        ),
+        (
+            "after without a zone",
+            at(r#"[{"when":{"after":"2026-12-01T00:00:00"},"error":404}]"#),
+            "/sites/0/routes/0/when/after",
+            "a/0: invalid value: string \"2026-12-01T00:00:00\", expected unix seconds or an RFC 3339 date-time such as 2026-12-01T00:00:00Z",
+        ),
+    ]
+}
+
+#[test]
+fn the_same_mistake_gives_the_same_diagnostics_in_json_and_toml() {
+    let cases = corpus();
+    assert_eq!(cases.len(), 20);
+    for (name, json, pointer, message) in cases {
+        let toml = convert_to_toml(&json);
+        let (from_json, from_toml) = (diagnostics_of("json", &json), diagnostics_of("toml", &toml));
+        let bare =
+            |ds: &[String]| -> Vec<String> { ds.iter().map(|d| split_position(d).0).collect() };
+        assert_eq!(bare(&from_json), bare(&from_toml), "{name}\n{toml}");
+        let first = &bare(&from_toml)[0];
+        let want = format!("{pointer}: {message}");
+        assert!(first.starts_with(&want), "{name}: {first}\n  want {want}");
+        assert!(
+            split_position(&from_toml[0]).1.is_some(),
+            "{name}: a TOML diagnostic names its line: {}",
+            from_toml[0]
+        );
+    }
+}
+
+/// The line and column of the first `needle` in `text`, 1-based: where a diagnostic about that
+/// text must point.
+fn where_is(text: &str, needle: &str) -> (usize, usize) {
+    let at = text
+        .find(needle)
+        .unwrap_or_else(|| panic!("{needle:?} not in the text"));
+    let line = text[..at].matches('\n').count() + 1;
+    let column = at - text[..at].rfind('\n').map_or(0, |i| i + 1) + 1;
+    (line, column)
+}
+
+#[test]
+fn a_toml_diagnostic_names_the_line_and_column_of_its_value() {
+    // (the document, the pointer it must be reported at, the text where the report must point)
+    let cases: [(&str, &str, &str); 6] = [
+        (
+            "version = 1\n\n[[sites]]\nname = 'shop'\nhosts = ['shop.example']\n\n\
+             [[sites.routes]]\nname = 'web'\nproxy.to = 'http://127.0.0.1:1'\n\
+             proxy.balance = 'leastConnections'\n",
+            "/sites/0/routes/0/proxy/balance",
+            "'leastConnections'",
+        ),
+        (
+            "version = 1\n[[sites]]\nname = 'a'\nhosts = ['a.example']\nroutes = [\n  \
+             { when.path = '/a', proxy = 'http://127.0.0.1:1' },\n  { redirect = { to = '/', status = 200 } },\n]\n",
+            "/sites/0/routes/1/redirect/status",
+            "200 }",
+        ),
+        (
+            "version = 1\n[[sites]]\nname = 'a'\nhosts = ['a.example']\n\
+             tls = { cert = '/c.pem' }\n",
+            "/sites/0/tls",
+            "{ cert",
+        ),
+        (
+            "version = 1\n[[sites]]\nhosts = ['a.example']\n",
+            "/sites/0",
+            "[[sites]]",
+        ),
+        (
+            "version = 1\n[[sites]]\nname = 'a'\nhosts = ['a.example']\n\n[sites.tls]\n\
+             cert = '/c.pem'\nkye = '/k.pem'\n",
+            "/sites/0/tls/kye",
+            "'/k.pem'",
+        ),
+        (
+            "version = 1\n[[sites]]\nname = 'a'\nhosts = ['a.example']\n\n[[sites.routes]]\n\
+             name = 'old'\nwhen.pathRegex = '^/old/(.*)$'\nredirect = { to = '/{re.2}', status = 301 }\n",
+            "/sites/0/routes/0/redirect/to",
+            "'/{re.2}'",
+        ),
+    ];
+    for (text, pointer, at) in cases {
+        let diagnostics = diagnostics_of("toml", text);
+        let (message, position) = split_position(&diagnostics[0]);
+        assert!(message.starts_with(pointer), "{message}\n  want {pointer}");
+        assert_eq!(
+            position,
+            Some(where_is(text, at)),
+            "{}\n{text}",
+            diagnostics[0]
+        );
+    }
+}
+
+#[test]
+fn a_toml_syntax_error_names_its_line() {
+    let diagnostics = diagnostics_of("toml", "version = 1\n[[sites]\nname = 'a'\n");
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    let (_, position) = split_position(&diagnostics[0]);
+    assert_eq!(position.map(|(line, _)| line), Some(2), "{diagnostics:?}");
+}
+
+#[test]
+fn a_toml_time_without_a_zone_is_rejected_at_its_position() {
+    let text = "version = 1\n[[sites]]\nname = 'a'\nhosts = ['a']\n\
+                routes = [{ when = { after = 2026-12-01T00:00:00 }, error = 404 }]\n";
+    let diagnostics = diagnostics_of("toml", text);
+    let (message, position) = split_position(&diagnostics[0]);
+    assert!(message.contains("has no time zone"), "{message}");
+    assert_eq!(position, Some(where_is(text, "2026-12-01")));
+}
+
+#[test]
+fn a_toml_offset_date_time_is_an_after_matcher() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "version = 1\n[[sites]]\nname = 'a'\nhosts = ['a.example']\n\
+         routes = [{ when = { after = 2026-12-01T00:00:00Z }, error = 404 }]\n",
+    )
+    .unwrap();
+    let report = check(CheckInput::Config { path, expect: None })
+        .unwrap_or_else(|d| panic!("{:#?}", messages(&d)));
+    assert_eq!(report.steps, 1);
+}
+
+fn example(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join(format!("{name}.toml"))
+}
+
+fn check_example(name: &str) {
+    let path = example(name);
+    check(CheckInput::Config {
+        path: path.clone(),
+        expect: None,
+    })
+    .unwrap_or_else(|d| panic!("{}: {:#?}", path.display(), messages(&d)));
+}
+
+#[test]
+fn the_examples_of_core_steps_pass() {
+    for name in ["minimal", "metrics"] {
+        check_example(name);
+    }
+}
+
+/// Every example the binary prints passes `check`, the ones that use balancing, limits, trusted
+/// proxies, in-process ACME and discovery included. Discovery needs the `kubernetes` feature;
+/// without it `check` says so.
+#[test]
+#[ignore = "needs a compiler that lowers balanced targets, limits, trusted proxies and in-process ACME"]
+fn every_example_passes() {
+    for name in [
+        "minimal",
+        "metrics",
+        "acme",
+        "cloudflare",
+        "load-balanced",
+        "rate-limited-api",
+    ] {
+        check_example(name);
+    }
+    if cfg!(feature = "kubernetes") {
+        check_example("kubernetes");
+    } else {
+        let path = example("kubernetes");
+        let errors = check(CheckInput::Config { path, expect: None }).unwrap_err();
+        assert!(
+            messages(&errors)[0].contains("built without Kubernetes support"),
+            "{:?}",
+            messages(&errors)
+        );
+    }
+}

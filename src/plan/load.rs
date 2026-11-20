@@ -368,4 +368,22 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn every_example_fits_the_schema() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "toml") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            if let Err(e) = config::parse_config(Format::Toml, &bytes) {
+                panic!("{}: {}: {}", path.display(), e.pointer, e.message);
+            }
+            seen += 1;
+        }
+        assert!(seen >= 7, "the examples directory has {seen} TOML files");
+    }
 }
