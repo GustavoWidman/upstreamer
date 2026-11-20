@@ -3,7 +3,6 @@
 use super::{Compiler, Where};
 use crate::acme::AcmePlan;
 use crate::acme::http::Url;
-use crate::config::SiteTls;
 use crate::config::acme::{AcmeSettings, Challenge, SiteAcme};
 use crate::plan::CertSource;
 use std::path::{Path, PathBuf};
@@ -26,7 +25,6 @@ impl Compiler<'_> {
         names: Vec<Box<str>>,
         spec: &SiteAcme,
         settings: Option<&AcmeSettings>,
-        tls: &SiteTls,
         at: &Where,
     ) -> Option<CertSource> {
         let errors = self.diags.len();
@@ -63,14 +61,6 @@ impl Compiler<'_> {
             }
         }
         let challenge = spec.challenge.unwrap_or(Challenge::Http01);
-        if challenge == Challenge::Http01 && !tls.redirect_http {
-            self.error(
-                at,
-                "http-01 tokens are answered on the http addresses by the HTTP->HTTPS redirect, \
-                 which `redirectHttp: false` turns off; use `\"challenge\": \"tls-alpn-01\"` \
-                 or keep the redirect",
-            );
-        }
         let directory = match Url::parse(spec.directory.as_deref().unwrap_or(LETS_ENCRYPT)) {
             Ok(url) => Some(url),
             Err(e) => {

@@ -54,8 +54,10 @@ The CA connects to each name on the standard ports, so the names must resolve to
 and the ports must reach upstreamer.
 
 - `http-01`: the CA fetches `http://<name>/.well-known/acme-challenge/<token>` on port 80.
-  The site's HTTP->HTTPS redirect answers it, so the site needs `redirectHttp` (the default)
-  and the default listen addresses. This works behind anything that forwards port 80.
+  The proxy answers it on the `listen.http` addresses before routing: in the site's
+  HTTP->HTTPS redirect, or, for a site with its own `listen` or `redirectHttp = false`, on a
+  listener that answers the tokens of the site's names and 404 to anything else. This works
+  behind anything that forwards port 80.
 - `tls-alpn-01`: the CA opens a TLS connection to port 443 asking only for the `acme-tls/1`
   protocol (RFC 8737). Use it when port 80 is closed. It needs the TLS connection to end at
   upstreamer, so it does not work behind a proxy that terminates TLS, such as Cloudflare with

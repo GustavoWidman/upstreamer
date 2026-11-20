@@ -6,7 +6,7 @@
 //! serves `metrics`, nothing reads the slots, so [`Compiler::observe`] removes them from the
 //! terminals and the request path stores none.
 
-use super::{Compiler, Ctx, REDIRECT_SITE, Where};
+use super::{Compiler, Ctx, REDIRECT_SITE, TOKENS_SITE, Where};
 use crate::plan::{Action, Block, Observe, RouteLabel, RouteSlot, SitePlan};
 
 impl Compiler<'_> {
@@ -28,6 +28,14 @@ impl Compiler<'_> {
         [
             Some(self.intern_route(REDIRECT_SITE, "redirect_http")),
             Some(self.intern_route(REDIRECT_SITE, "acme_challenge")),
+        ]
+    }
+
+    /// The slots of the ACME tokens site's two steps: the token, then the 404.
+    pub(super) fn tokens_slots(&mut self) -> [Option<RouteSlot>; 2] {
+        [
+            Some(self.intern_route(TOKENS_SITE, "acme_challenge")),
+            Some(self.intern_route(TOKENS_SITE, "not_found")),
         ]
     }
 

@@ -1098,6 +1098,8 @@ impl<'s> Compiler<'s> {
         let mut listeners: Vec<(ListenerKey, Vec<HostEntry>)> = Vec::new();
         let mut certs: Vec<CertSource> = Vec::new();
         let mut redirect_hosts: Vec<HostEntry> = Vec::new();
+        // The names of http-01 sites that get no redirect: tokens only.
+        let mut token_hosts: Vec<HostEntry> = Vec::new();
         let https_port = config.listen.https.first().map_or(443, SocketAddr::port);
 
         for (i, site) in config.sites.iter().enumerate() {
@@ -1149,8 +1151,18 @@ impl<'s> Compiler<'s> {
                                 .into(),
                         );
                     }
-                    if tls.redirect_http && site.listen.is_none() {
-                        redirect_hosts.extend(patterns.iter().map(|e| HostEntry {
+                    let redirected = tls.redirect_http && site.listen.is_none();
+                    let http01 = tls.acme.as_ref().is_some_and(|a| {
+                        a.challenge.unwrap_or(config::acme::Challenge::Http01)
+                            == config::acme::Challenge::Http01
+                    });
+                    if redirected || http01 {
+                        let to = if redirected {
+                            &mut redirect_hosts
+                        } else {
+                            &mut token_hosts
+                        };
+                        to.extend(patterns.iter().map(|e| HostEntry {
                             redirect_of: Some(id),
                             ..e.clone()
                         }));
@@ -1172,7 +1184,6 @@ impl<'s> Compiler<'s> {
                             names,
                             acme,
                             config.acme.as_ref(),
-                            tls,
                             &tls_at.at("acme"),
                         ),
                         (_, _, Some(_)) => {
@@ -1209,10 +1220,33 @@ impl<'s> Compiler<'s> {
                 add(&mut listeners, addr, ListenerKind::Http, &redirect_hosts);
             }
         }
+        // The redirect answers every token, so a name it serves needs no entry here, and a name
+        // two sites list needs one.
+        let mut seen: Vec<HostPattern> = redirect_hosts.iter().map(|e| e.pattern.clone()).collect();
+        token_hosts.retain(|e| {
+            let new = !seen.contains(&e.pattern);
+            if new {
+                seen.push(e.pattern.clone());
+            }
+            new
+        });
+        let tokens_site = (!token_hosts.is_empty()).then_some(SiteId(sites.len() as u16));
+        if let Some(id) = tokens_site {
+            for e in &mut token_hosts {
+                e.site = id;
+            }
+            sites.push(tokens_site_plan(self.tokens_slots()));
+            for &addr in &config.listen.http {
+                add(&mut listeners, addr, ListenerKind::Http, &token_hosts);
+            }
+        }
 
         let name = |e: &HostEntry| {
             let site = &config.sites[e.redirect_of.unwrap_or(e.site).0 as usize].name;
             match e.redirect_of {
+                Some(_) if Some(e.site) == tokens_site => {
+                    format!("the ACME HTTP-01 tokens of site `{site}`")
+                }
                 Some(_) => format!("the HTTP->HTTPS redirect of site `{site}`"),
                 None => format!("site `{site}`"),
             }
@@ -1294,7 +1328,8 @@ struct HostEntry {
     pattern: HostPattern,
     site: SiteId,
     at: Where,
-    /// Set for the redirect site's entries: the TLS site they redirect for.
+    /// Set for the entries of the redirect site and the ACME tokens site: the TLS site they
+    /// stand for.
     redirect_of: Option<SiteId>,
 }
 
@@ -1308,6 +1343,48 @@ pub(crate) fn kind_name(kind: ListenerKind) -> &'static str {
 
 /// Where an ACME CA fetches HTTP-01 tokens (RFC 8555 section 8.3).
 const ACME_CHALLENGE_PREFIX: &[u8] = b"/.well-known/acme-challenge/";
+
+/// The step that answers ACME HTTP-01 tokens, labelled `slot`.
+fn token_step(slot: Option<RouteSlot>) -> Step {
+    Step {
+        name: Some("acme_challenge".into()),
+        when: Some(Cond::Test(Test::Path(PathPatterns {
+            exact: Box::new([]),
+            prefix: Box::new([ACME_CHALLENGE_PREFIX.into()]),
+            suffix: Box::new([]),
+            glob: Box::new([]),
+        }))),
+        action: Action::Answer(Terminal::AcmeChallenge, slot),
+    }
+}
+
+/// The site the names of an http-01 site reach on the http addresses when they get no
+/// redirect (the site has its own `listen`, or `redirectHttp: false`): the CA's tokens, and
+/// 404 for anything else. `slots` labels its two steps (the token, the 404).
+fn tokens_site_plan(slots: [Option<RouteSlot>; 2]) -> SitePlan {
+    let steps = vec![
+        token_step(slots[0]),
+        Step {
+            name: Some("not_found".into()),
+            when: None,
+            action: Action::Answer(Terminal::Error(Status::NOT_FOUND), slots[1]),
+        },
+    ];
+    SitePlan {
+        name: TOKENS_SITE.into(),
+        headers: Box::new([]),
+        routes: Block {
+            kind: BlockKind::Seq,
+            steps: steps.into(),
+        },
+        errors: Box::new([]),
+        alt_svc: None,
+        observe: None,
+    }
+}
+
+/// The name of the synthetic ACME HTTP-01 tokens site, in logs and metrics labels.
+const TOKENS_SITE: &str = "ACME HTTP-01 tokens";
 
 /// The site every TLS site's names reach on the http addresses: `308` to the same host and
 /// target on https, after answering ACME HTTP-01 tokens when in-process ACME uses them.
@@ -1323,16 +1400,7 @@ fn redirect_site(https_port: u16, acme_http01: bool, slots: [Option<RouteSlot>; 
     parts.push(Part::Ph(Placeholder::Uri));
     let mut steps = Vec::new();
     if acme_http01 {
-        steps.push(Step {
-            name: Some("acme_challenge".into()),
-            when: Some(Cond::Test(Test::Path(PathPatterns {
-                exact: Box::new([]),
-                prefix: Box::new([ACME_CHALLENGE_PREFIX.into()]),
-                suffix: Box::new([]),
-                glob: Box::new([]),
-            }))),
-            action: Action::Answer(Terminal::AcmeChallenge, slots[1]),
-        });
+        steps.push(token_step(slots[1]));
     }
     steps.push(Step {
         name: Some("redirect_http".into()),
@@ -2035,14 +2103,6 @@ mod tests {
         assert_eq!(
             tls(r#"{"cert":"/c.pem","key":"/k.pem","acme":{"email":"ops@example.com"}}"#),
             ["/sites/0/tls: a TLS site takes `cert` and `key`, or `acme`, not both"]
-        );
-        assert_eq!(
-            tls(r#"{"acme":{"email":"ops@example.com"},"redirectHttp":false}"#),
-            [
-                "/sites/0/tls/acme: http-01 tokens are answered on the http addresses by the \
-                 HTTP->HTTPS redirect, which `redirectHttp: false` turns off; use \
-                 `\"challenge\": \"tls-alpn-01\"` or keep the redirect"
-            ]
         );
     }
 

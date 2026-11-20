@@ -256,8 +256,9 @@ pub(crate) enum Terminal {
     Error(Status),
     /// The Prometheus exposition of the whole process.
     Metrics,
-    /// An ACME HTTP-01 token (`/.well-known/acme-challenge/<token>`), on the HTTP->HTTPS
-    /// redirect site of a plan with in-process ACME.
+    /// An ACME HTTP-01 token (`/.well-known/acme-challenge/<token>`), on the http addresses
+    /// of a plan with in-process ACME: in the HTTP->HTTPS redirect site, or in the tokens site
+    /// of http-01 sites that get no redirect.
     AcmeChallenge,
 }
 

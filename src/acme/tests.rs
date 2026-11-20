@@ -204,6 +204,54 @@ fn http01_puts_the_token_step_on_the_redirect_site_and_tls_alpn01_does_not() {
 }
 
 #[test]
+fn http01_tokens_reach_a_site_without_the_redirect_on_the_http_addresses() {
+    let http = "127.0.0.1:8080";
+    for (name, site) in [
+        (
+            "its own listen",
+            json!({ "name": "s", "hosts": ["a.test"], "listen": ["127.0.0.1:8443"],
+                "tls": { "acme": { "email": "ops@example.com" } } }),
+        ),
+        (
+            "redirectHttp: false",
+            json!({ "name": "s", "hosts": ["a.test"],
+                "tls": { "acme": { "email": "ops@example.com" }, "redirectHttp": false } }),
+        ),
+    ] {
+        let plan = plan_from(
+            1,
+            &config(
+                json!([site]),
+                json!({ "listen": { "http": [http], "https": ["127.0.0.1:8444"] } }),
+            ),
+        );
+        let listener = plan
+            .listeners
+            .iter()
+            .find(|l| l.key.addr.to_string() == http)
+            .unwrap_or_else(|| panic!("{name}: a listener on the http address"));
+        assert_eq!(listener.key.kind, crate::plan::ListenerKind::Http, "{name}");
+        let site = &plan.sites[usize::from(listener.hosts.lookup(b"a.test").unwrap().0)];
+        assert_eq!(&*site.name, "ACME HTTP-01 tokens", "{name}");
+        let steps: Vec<_> = site
+            .routes
+            .steps
+            .iter()
+            .map(|s| s.name.as_deref())
+            .collect();
+        assert_eq!(
+            steps,
+            [Some("acme_challenge"), Some("not_found")],
+            "{name}: tokens, and nothing else, on the http address"
+        );
+        assert!(
+            listener.hosts.lookup(b"b.test").is_none(),
+            "{name}: other names get nothing there"
+        );
+    }
+}
+
+#[test]
 fn answers_exist_only_while_their_validation_runs() {
     let challenges = Challenges::default();
     let token = "evaGxfADs6pSRb2LAv9IZf17Dt3juxGJ-PCt92wr-oA";
