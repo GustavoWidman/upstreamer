@@ -1,0 +1,68 @@
+{
+  "http3": true,
+  "listen": {
+    "http": [
+      "0.0.0.0:80",
+      "[::]:80"
+    ],
+    "https": [
+      "0.0.0.0:443",
+      "[::]:443"
+    ]
+  },
+  "sites": [
+    {
+      "errors": [],
+      "headers": {},
+      "hosts": [
+        "blog.example.com"
+      ],
+      "listen": null,
+      "name": "blog.example.com",
+      "routes": [
+        {
+          "name": "api",
+          "proxy": "http://127.0.0.1:4000",
+          "when": {
+            "path": "/api/*"
+          }
+        },
+        {
+          "files": {
+            "root": "/srv/blog"
+          },
+          "name": "static"
+        }
+      ],
+      "tls": {
+        "cert": "/var/lib/acme/blog.example.com/fullchain.pem",
+        "http3": true,
+        "key": "/var/lib/acme/blog.example.com/key.pem",
+        "redirectHttp": true
+      }
+    },
+    {
+      "hosts": [
+        "*"
+      ],
+      "listen": [
+        "127.0.0.1:9100"
+      ],
+      "name": "_metrics",
+      "routes": [
+        {
+          "metrics": {},
+          "when": {
+            "path": "/metrics"
+          }
+        }
+      ],
+      "tls": null
+    }
+  ],
+  "timeouts": {
+    "shutdown": "10s"
+  },
+  "version": 1,
+  "workers": null
+}

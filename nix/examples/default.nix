@@ -5,8 +5,11 @@
 # schema tests read), the ACME certificates and their names and groups, the unit, the firewall
 # and the kernel modules. Each host's whole system is instantiated too, so a type error anywhere
 # in the module fails here. It also evaluates misconfigured hosts and checks that the module's
-# assertions reject each one with its message. The hosts get a stub package, so evaluating them for another system
-# needs nothing built for it. `fixtures` in the dev shell rewrites tests/fixtures/config from
+# assertions reject each one with its message. It evaluates option cases too (metrics,
+# Kubernetes, in-process ACME, trusted proxies) and checks what each derives: the config's
+# pieces, the ports `check` expects and the firewall opens, the unit's credential and state
+# directory. The hosts get a stub package, so evaluating them for another system needs nothing
+# built for it. `fixtures` in the dev shell rewrites tests/fixtures/config from
 # its `hosts`.
 #
 # module-config (Linux) builds each host's config file with the real package, which runs
@@ -28,6 +31,7 @@ let
     apps = ./apps.nix;
     desktop = ./desktop.nix;
     custom = ./custom.nix;
+    observed = ./observed.nix;
   };
 
   eval =
@@ -70,6 +74,7 @@ let
       };
       tcp = sorted c.networking.firewall.allowedTCPPorts;
       udp = sorted c.networking.firewall.allowedUDPPorts;
+      expectTcp = expectTcpOf c;
       tlsModule = lib.elem "tls" c.boot.kernelModules;
       logs =
         let
@@ -89,6 +94,17 @@ let
               };
         };
     };
+
+  # The ports `upstreamer check --expect-tcp` is given when the system builds.
+  expectTcpOf =
+    c:
+    let
+      line = lib.findFirst (l: lib.hasInfix "--expect-tcp" l) "" (
+        lib.splitString "\n" c.services.upstreamer.configFile.buildCommand
+      );
+      ports = lib.head (builtins.match ".*--expect-tcp \"([0-9,]*)\".*" line);
+    in
+    sorted (map lib.toInt (lib.filter (p: p != "") (lib.splitString "," ports)));
 
   noLogs = {
     directory = null;
@@ -122,6 +138,10 @@ let
       certs = lib.genAttrs [ "app.example.com" "cache.example.com" "s3.cache.example.com" ] own;
       unit = unit [ "upstreamer-certs" ] [ "app.example.com" "cache.example.com" "s3.cache.example.com" ];
       tcp = [
+        80
+        443
+      ];
+      expectTcp = [
         80
         443
       ];
@@ -169,6 +189,10 @@ let
         80
         443
       ];
+      expectTcp = [
+        80
+        443
+      ];
       udp = [ 443 ];
       tlsModule = true;
       logs = noLogs;
@@ -178,6 +202,8 @@ let
       certs = { };
       unit = unit [ ] [ ];
       tcp = [ ];
+      # The host is served on port 80; it keeps the firewall closed.
+      expectTcp = [ 80 ];
       udp = [ ];
       tlsModule = false;
       logs = noLogs;
@@ -198,10 +224,36 @@ let
         8080
         8443
       ];
+      expectTcp = [
+        80
+        443
+        8080
+        8443
+      ];
       udp = [
         443
         8443
       ];
+      tlsModule = true;
+      logs = noLogs;
+    };
+    observed = {
+      failedAssertions = [ ];
+      certs = {
+        "blog.example.com" = own "blog.example.com";
+      };
+      unit = unit [ "upstreamer-certs" ] [ "blog.example.com" ];
+      # The firewall opens the blog; `check` is told about the metrics listener too.
+      tcp = [
+        80
+        443
+      ];
+      expectTcp = [
+        80
+        443
+        9100
+      ];
+      udp = [ 443 ];
       tlsModule = true;
       logs = noLogs;
     };
@@ -228,7 +280,7 @@ let
         proxy = "http://127.0.0.1:1";
       };
       messages = [
-        "services.upstreamer.virtualHosts.\"a.example.com\".tls: set either acmeCert, or both certFile and keyFile."
+        "services.upstreamer.virtualHosts.\"a.example.com\".tls: set one of acme, acmeCert, or both certFile and keyFile."
       ];
     };
     cert-without-key = {
@@ -237,7 +289,7 @@ let
         proxy = "http://127.0.0.1:1";
       };
       messages = [
-        "services.upstreamer.virtualHosts.\"a.example.com\".tls: set either acmeCert, or both certFile and keyFile."
+        "services.upstreamer.virtualHosts.\"a.example.com\".tls: set one of acme, acmeCert, or both certFile and keyFile."
       ];
     };
     files-without-tls = {
@@ -250,7 +302,7 @@ let
         proxy = "http://127.0.0.1:1";
       };
       messages = [
-        "services.upstreamer.virtualHosts.plain.tls: acmeCert, certFile and keyFile need tls.enable."
+        "services.upstreamer.virtualHosts.plain.tls: acme, acmeCert, certFile and keyFile need tls.enable."
       ];
     };
     acme-without-tls = {
@@ -262,7 +314,7 @@ let
         proxy = "http://127.0.0.1:1";
       };
       messages = [
-        "services.upstreamer.virtualHosts.plain.tls: acmeCert, certFile and keyFile need tls.enable."
+        "services.upstreamer.virtualHosts.plain.tls: acme, acmeCert, certFile and keyFile need tls.enable."
       ];
     };
     unknown-acme-cert = {
@@ -283,6 +335,59 @@ let
         "services.upstreamer.virtualHosts.\"*.example.com\".tls.acmeCert: a wildcard host names its certificate, e.g. \"example.com\" for \"*.example.com\"."
       ];
     };
+    in-process-acme-and-nixos-acme = {
+      module.services.upstreamer.virtualHosts."a.example.com" = {
+        tls = {
+          acme.email = "ops@example.com";
+          acmeCert = "a.example.com";
+        };
+        proxy = "http://127.0.0.1:1";
+      };
+      messages = [
+        "services.upstreamer.virtualHosts.\"a.example.com\".tls: set one of acme, acmeCert, or both certFile and keyFile."
+      ];
+    };
+    in-process-acme-and-files = {
+      module.services.upstreamer.virtualHosts."a.example.com" = {
+        tls = {
+          acme.email = "ops@example.com";
+          certFile = "/run/a.crt";
+          keyFile = "/run/a.key";
+        };
+        proxy = "http://127.0.0.1:1";
+      };
+      messages = [
+        "services.upstreamer.virtualHosts.\"a.example.com\".tls: set one of acme, acmeCert, or both certFile and keyFile."
+      ];
+    };
+    in-process-acme-without-tls = {
+      module.services.upstreamer.virtualHosts.plain = {
+        tls = {
+          enable = false;
+          acme.email = "ops@example.com";
+        };
+        proxy = "http://127.0.0.1:1";
+      };
+      messages = [
+        "services.upstreamer.virtualHosts.plain.tls: acme, acmeCert, certFile and keyFile need tls.enable."
+      ];
+    };
+    host-named-like-the-metrics-site = {
+      module.services.upstreamer = {
+        metrics.enable = true;
+        virtualHosts._metrics = {
+          tls.enable = false;
+          proxy = "http://127.0.0.1:1";
+        };
+      };
+      messages = [
+        "services.upstreamer.virtualHosts: `_metrics` names the site `metrics.enable` adds; give the virtual host another name."
+      ];
+    };
+    kubeconfig-without-kubernetes = {
+      module.services.upstreamer.kubernetes.kubeconfig = "/etc/rancher/k3s/upstreamer.yaml";
+      messages = [ "services.upstreamer.kubernetes.kubeconfig needs kubernetes.enable." ];
+    };
   };
 
   # The emitted config, as JSON would carry it.
@@ -294,6 +399,279 @@ let
   ) systems;
 
   failedAssertions = c: map (a: a.message) (lib.filter (a: !a.assertion) c.assertions);
+
+  # What the module derives from one option, without a whole host: `get` reads the pieces from
+  # the evaluated system, `want` is what the option must give.
+  optionCases =
+    let
+      plain.services.upstreamer.virtualHosts."app.example.com" = {
+        tls.enable = false;
+        proxy = "http://127.0.0.1:1";
+      };
+      settings = c: c.services.upstreamer.generatedSettings;
+      siteNamed = name: c: lib.findFirst (s: s.name == name) null (settings c).sites;
+      unit = c: c.systemd.services.upstreamer.serviceConfig;
+      selfIssued = acme: {
+        services.upstreamer.virtualHosts."app.example.com" = {
+          tls = { inherit acme; };
+          proxy = "http://127.0.0.1:1";
+        };
+      };
+      ports = c: {
+        tcp = sorted c.networking.firewall.allowedTCPPorts;
+        expectTcp = expectTcpOf c;
+      };
+    in
+    {
+      metrics-site = {
+        module.imports = [
+          plain
+          { services.upstreamer.metrics.enable = true; }
+        ];
+        get = c: { site = siteNamed "_metrics" c; } // ports c;
+        want = {
+          site = {
+            name = "_metrics";
+            hosts = [ "*" ];
+            tls = null;
+            listen = [
+              "127.0.0.1:9100"
+              "[::1]:9100"
+            ];
+            routes = [
+              {
+                when.path = "/metrics";
+                metrics = { };
+              }
+            ];
+          };
+          # `check` is told about the listener; the firewall does not open it.
+          tcp = [ 80 ];
+          expectTcp = [
+            80
+            9100
+          ];
+        };
+      };
+      metrics-opened = {
+        module.imports = [
+          plain
+          {
+            services.upstreamer.metrics = {
+              enable = true;
+              openFirewall = true;
+              path = "/m";
+              listen = [
+                "100.64.0.7:9100"
+                "[fd7a::7]:9101"
+              ];
+            };
+          }
+        ];
+        get = c: { routes = (siteNamed "_metrics" c).routes; } // ports c;
+        want = {
+          routes = [
+            {
+              when.path = "/m";
+              metrics = { };
+            }
+          ];
+          tcp = [
+            80
+            9100
+            9101
+          ];
+          expectTcp = [
+            80
+            9100
+            9101
+          ];
+        };
+      };
+      metrics-off = {
+        module = plain;
+        get = c: { site = siteNamed "_metrics" c; } // ports c;
+        want = {
+          site = null;
+          tcp = [ 80 ];
+          expectTcp = [ 80 ];
+        };
+      };
+      kubernetes-credential = {
+        module.imports = [
+          plain
+          {
+            services.upstreamer.kubernetes = {
+              enable = true;
+              kubeconfig = "/etc/rancher/k3s/upstreamer.yaml";
+            };
+          }
+        ];
+        get = c: {
+          credential = (unit c).LoadCredential;
+          environment = (unit c).Environment;
+        };
+        want = {
+          credential = [ "kubeconfig:/etc/rancher/k3s/upstreamer.yaml" ];
+          environment = [ "KUBECONFIG=%d/kubeconfig" ];
+        };
+      };
+      kubernetes-in-cluster = {
+        module.imports = [
+          plain
+          { services.upstreamer.kubernetes.enable = true; }
+        ];
+        get = c: {
+          credential = (unit c).LoadCredential;
+          environment = (unit c).Environment;
+        };
+        want = {
+          credential = [ ];
+          environment = [ ];
+        };
+      };
+      in-process-acme = {
+        module = selfIssued { email = "ops@example.com"; };
+        get =
+          c:
+          {
+            tls = (siteNamed "app.example.com" c).tls;
+            acme = (settings c).acme;
+            certs = lib.attrNames c.security.acme.certs;
+            wants = c.systemd.services.upstreamer.wants;
+            stateDirectory = (unit c).StateDirectory;
+            stateDirectoryMode = (unit c).StateDirectoryMode;
+            udp = sorted c.networking.firewall.allowedUDPPorts;
+          }
+          // ports c;
+        want = {
+          # No NixOS certificate, and nothing to wait for at boot.
+          tls = {
+            acme = {
+              email = "ops@example.com";
+              challenge = "http-01";
+            };
+            redirectHttp = true;
+            http3 = true;
+          };
+          acme.stateDirectory = "/var/lib/upstreamer";
+          certs = [ ];
+          wants = [ ];
+          stateDirectory = "upstreamer";
+          stateDirectoryMode = "0700";
+          udp = [ 443 ];
+          tcp = [
+            80
+            443
+          ];
+          expectTcp = [
+            80
+            443
+          ];
+        };
+      };
+      in-process-acme-on-the-https-port = {
+        module = {
+          services.upstreamer.virtualHosts."app.example.com" = {
+            tls.acme = {
+              email = "ops@example.com";
+              challenge = "tls-alpn-01";
+              directory = "https://acme-staging-v02.api.letsencrypt.org/directory";
+            };
+            listen = [ { port = 8443; } ];
+            proxy = "http://127.0.0.1:1";
+          };
+        };
+        get = c: { tls = (siteNamed "app.example.com" c).tls; } // ports c;
+        want = {
+          tls = {
+            acme = {
+              email = "ops@example.com";
+              challenge = "tls-alpn-01";
+              directory = "https://acme-staging-v02.api.letsencrypt.org/directory";
+            };
+            redirectHttp = false;
+            http3 = true;
+          };
+          # tls-alpn-01 needs no plain HTTP port.
+          tcp = [ 8443 ];
+          expectTcp = [ 8443 ];
+        };
+      };
+      in-process-acme-http-01-on-another-port = {
+        module = {
+          services.upstreamer.virtualHosts."app.example.com" = {
+            tls.acme.email = "ops@example.com";
+            listen = [ { port = 8443; } ];
+            proxy = "http://127.0.0.1:1";
+          };
+        };
+        get = ports;
+        want = {
+          # The CA still reaches the plain HTTP port.
+          tcp = [
+            80
+            8443
+          ];
+          expectTcp = [
+            80
+            8443
+          ];
+        };
+      };
+      in-process-acme-state-directory = {
+        module.imports = [
+          (selfIssued { email = "ops@example.com"; })
+          { services.upstreamer.acme.stateDirectory = "/var/lib/up/acme"; }
+        ];
+        get = c: {
+          acme = (settings c).acme;
+          stateDirectory = (unit c).StateDirectory;
+        };
+        want = {
+          acme.stateDirectory = "/var/lib/up/acme";
+          stateDirectory = "up/acme";
+        };
+      };
+      no-state-directory-without-in-process-acme = {
+        module = plain;
+        get = c: {
+          acme = (settings c).acme or null;
+          stateDirectory = (unit c).StateDirectory or null;
+        };
+        want = {
+          acme = null;
+          stateDirectory = null;
+        };
+      };
+      trusted-proxies = {
+        module.imports = [
+          plain
+          {
+            services.upstreamer.trustedProxies = {
+              from = [
+                "cloudflare"
+                "10.0.0.0/8"
+              ];
+              header = "CF-Connecting-IP";
+            };
+          }
+        ];
+        get = c: (settings c).trustedProxies or null;
+        want = {
+          from = [
+            "cloudflare"
+            "10.0.0.0/8"
+          ];
+          header = "CF-Connecting-IP";
+        };
+      };
+      no-trusted-proxies = {
+        module = plain;
+        get = c: (settings c).trustedProxies or null;
+        want = null;
+      };
+    };
 
   problems =
     lib.concatLists (
@@ -310,6 +688,22 @@ let
             "${name}: the emitted config differs from tests/fixtures/config/${name}.json; run `fixtures` in the dev shell"
         ++ lib.optional (builtins.typeOf c.system.build.toplevel.drvPath != "string") "${name}: no system"
       ) systems
+    )
+    ++ lib.concatLists (
+      lib.mapAttrsToList (
+        name: case:
+        let
+          seen = case.get (
+            eval (pkgs: pkgs.writeShellScriptBin "upstreamer" "") {
+              imports = [ case.module ];
+              services.upstreamer.enable = true;
+            }
+          );
+        in
+        lib.optional (
+          seen != case.want
+        ) "option ${name}: derived ${builtins.toJSON seen}\n  expected ${builtins.toJSON case.want}"
+      ) optionCases
     )
     ++ lib.concatLists (
       lib.mapAttrsToList (
