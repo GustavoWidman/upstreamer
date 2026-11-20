@@ -12,14 +12,17 @@
 # built for it. `fixtures` in the dev shell rewrites tests/fixtures/config from
 # its `hosts`.
 #
-# module-config (Linux) builds each host's config file with the real package, which runs
-# `upstreamer check` on it exactly as a system build does.
+# module-config (Linux) builds the config file of each host and each option case with the real
+# package, which runs `upstreamer check` on it exactly as a system build does, so the ports the
+# module computes and the listeners the compiler derives must agree.
 {
   pkgs,
   lib,
   nixpkgs,
   module,
   package,
+  # The flake's packages by system, which the module's `package` defaults to.
+  packages,
 }:
 let
   # NixOS hosts are Linux; a Darwin checker evaluates them for aarch64-linux.
@@ -673,8 +676,31 @@ let
       };
     };
 
+  # The module's default package, evaluated without a package set by the host.
+  defaultPackage =
+    settings:
+    (nixpkgs.lib.nixosSystem {
+      modules = [
+        module
+        ./common.nix
+        {
+          nixpkgs.hostPlatform = hostPlatform;
+          services.upstreamer = settings;
+        }
+      ];
+    }).config.services.upstreamer.package;
+
+  packageProblems =
+    lib.optional (
+      (defaultPackage { kubernetes.enable = true; }).drvPath != packages.${hostPlatform}.kubernetes.drvPath
+    ) "kubernetes.enable does not default package to the flake's kubernetes package"
+    ++ lib.optional (
+      (defaultPackage { }).drvPath != packages.${hostPlatform}.default.drvPath
+    ) "package does not default to the flake's default package";
+
   problems =
-    lib.concatLists (
+    packageProblems
+    ++ lib.concatLists (
       lib.mapAttrsToList (
         name: c:
         let
@@ -737,5 +763,13 @@ in
       name = "${name}.json";
       path = (eval (_: package) file).services.upstreamer.configFile;
     }) files
+    ++ lib.mapAttrsToList (name: case: {
+      name = "option-${name}.json";
+      path =
+        (eval (_: package) {
+          imports = [ case.module ];
+          services.upstreamer.enable = true;
+        }).services.upstreamer.configFile;
+    }) optionCases
   );
 }

@@ -975,6 +975,7 @@
         inherit pkgs lib nixpkgs;
         module = self.nixosModules.default;
         package = self'.packages.default;
+        packages = self.packages;
       };
     };
 }
