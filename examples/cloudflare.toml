@@ -1,0 +1,25 @@
+# A host behind Cloudflare (or another proxy that reports the client's address in a header).
+#
+# The TCP peer is then a Cloudflare edge address, so `{remote_host}`, the access log, rate-limit
+# keys and hash balancing would all see Cloudflare. `trustedProxies` says which peers may
+# report a client address and in which header. For a request from a trusted peer, the address
+# in the header replaces the peer's as the client's: it is what `{remote_host}` expands to, what
+# the access log and metrics record, and what `limit` and `balance.hash` keys see.
+# Requests from any other peer keep their own address; their header is ignored. The peer
+# stays available as `{peer_host}`.
+
+version = 1
+
+# `cloudflare` stands for Cloudflare's published address ranges. Any CIDR can be listed beside
+# it, for a load balancer of your own.
+trustedProxies = { from = ["cloudflare", "10.0.0.0/8"], header = "CF-Connecting-IP" }
+
+[[sites]]
+name = "app"
+hosts = ["app.example.com"]
+tls = { cert = "/etc/ssl/app/fullchain.pem", key = "/etc/ssl/app/key.pem" }
+routes = [
+  # The default key is the client's network (`{remote_net}`): now the visitor's, not Cloudflare's.
+  { name = "api", when.path = "/api/*", limit = { rate = "20/s", burst = 40 } },
+  { proxy = "http://127.0.0.1:3000" },
+]

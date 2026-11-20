@@ -1,0 +1,44 @@
+# A load-balanced shop with passive and active health checks, sticky carts, and a
+# maintenance answer when every origin is down.
+
+version = 1
+
+[[sites]]
+name = "shop"
+hosts = ["shop.example.com", "www.shop.example.com"]
+tls = { cert = "/etc/ssl/shop/fullchain.pem", key = "/etc/ssl/shop/key.pem" }
+headers = { Server = false }          # `false` removes a header (TOML has no null)
+
+# The cart service keeps sessions in memory: the same session cookie always reaches the same
+# origin while it is healthy (Maglev consistent hashing; adding or removing an origin moves
+# only that origin's share of sessions). Requests without the cookie are spread round robin.
+[[sites.routes]]
+name = "cart"
+when.path = "/cart/*"
+proxy.to = ["http://10.0.1.11:8080", "http://10.0.1.12:8080"]
+proxy.balance.hash = "{cookie.cart_session}"
+proxy.health.active = { path = "/healthz", interval = "5s" }
+
+# Everything else: the origin with the fewest requests in flight on this worker wins. The
+# third origin has twice the capacity, so it takes twice the share.
+[[sites.routes]]
+name = "web"
+[sites.routes.proxy]
+to = [
+  "http://10.0.1.21:8080",
+  "http://10.0.1.22:8080",
+  { url = "http://10.0.1.23:8080", weight = 2 },
+]
+balance = "leastRequests"
+retries = 2                     # idempotent requests move to another origin on a failed connect
+failStatuses = [502, 503]       # an origin answering these counts as failed, and is retried
+health.passive = { maxFails = 3, cooldown = "15s" }
+health.active = { path = "/healthz", interval = "5s", timeout = "1s", expect = [200], healthyAfter = 2, unhealthyAfter = 3 }
+
+# No origin left (all failing their probes): 503 with Retry-After, answered here.
+[[sites.errors]]
+status = [502, 503, 504]
+routes = [
+  { headers = { Cache-Control = "no-store" } },
+  { respond = { body = "The shop is being updated. Try again in a minute.\n" } },
+]

@@ -1,0 +1,36 @@
+# A rate-limited API. `limit` is a route step: it holds for the requests its `when` matches,
+# takes one token from the bucket of the request's key, and answers 429 (with Retry-After)
+# through the site's error routes when the bucket is empty. Limits are exact across every
+# worker: a client gets its rate however many connections it opens.
+
+version = 1
+
+[[sites]]
+name = "api"
+hosts = ["api.example.com"]
+tls = { cert = "/etc/ssl/api/fullchain.pem", key = "/etc/ssl/api/key.pem" }
+
+# Logins: 5 per minute per client network (an IPv4 address, or an IPv6 /64), at most 5 at once.
+[[sites.routes]]
+name = "login"
+when = { path = "/v1/login", method = "POST" }
+limit = { rate = "5/m", burst = 5 }
+
+# Behind Cloudflare the connection comes from Cloudflare, so the key here is the client address
+# Cloudflare forwards (`trustedProxies` in cloudflare.toml makes the default key right without
+# naming the header). Any template works as a key: "{header.X-Api-Key}", "{cookie.sid}", or a
+# constant like "all" for one bucket shared by every client.
+[[sites.routes]]
+name = "api"
+limit = { rate = "50/s", burst = 100, key = "{header.CF-Connecting-IP}", keys = 200000 }
+
+[[sites.routes]]
+proxy = "http://127.0.0.1:9000"
+
+[[sites.errors]]
+status = [429]
+routes = [
+  { headers = { Content-Type = "application/json" } },
+  # `{{` and `}}` are literal braces in a template.
+  { respond = { body = '{{"error":"rate_limited","retry_after":{err.retry_after}}}' } },
+]

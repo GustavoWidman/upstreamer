@@ -1,14 +1,25 @@
 //! `upstreamer run [--config] <file> [--workers N]`
 //! `upstreamer check [--config] <file> [--expect-tcp P,..] [--expect-udp P,..]`
 //! `upstreamer check --fragment <file>`
+//! `upstreamer example [name | --list]`
+//! `upstreamer convert <file>`
+//!
+//! A config is JSON, or TOML when the file name ends in `.toml`.
 //!
 //! Exit codes: 0 ok, 1 invalid config (diagnostics on stderr, one per line, each with the JSON
-//! pointer of the offending value and the site/step name), 2 usage, 3 runtime failure.
+//! pointer of the offending value, the site/step name and, for TOML, the line and column), 2
+//! usage, 3 runtime failure.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use upstreamer::{CheckInput, ExpectedPorts, RunOptions, StartError};
+use upstreamer::{CheckInput, CheckReport, ExpectedPorts, RunOptions, StartError};
+
+/// TOML to JSON and back, shared with the library's TOML reader. The library keeps the
+/// positions it records; `convert` has no use for them.
+#[allow(dead_code)]
+#[path = "config/toml/convert.rs"]
+mod convert;
 
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -16,11 +27,58 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const USAGE: &str = "usage:
   upstreamer run [--config] <file> [--workers N]
   upstreamer check [--config] <file> [--expect-tcp PORT,..] [--expect-udp PORT,..]
-  upstreamer check --fragment <file>";
+  upstreamer check --fragment <file>
+  upstreamer example [NAME | --list]
+  upstreamer convert <file>
+
+A config is JSON, or TOML when its name ends in .toml.
+`example` prints a commented config to start from; `convert` prints a JSON file as TOML, or
+a TOML file as JSON.";
+
+/// The configs `upstreamer example` prints; the files in `examples/`, which the tests check.
+const EXAMPLES: &[(&str, &str, &str)] = &[
+    (
+        "minimal",
+        "one origin on port 8080",
+        include_str!("../examples/minimal.toml"),
+    ),
+    (
+        "acme",
+        "HTTPS with certificates issued by upstreamer itself",
+        include_str!("../examples/acme.toml"),
+    ),
+    (
+        "load-balanced",
+        "balancing, retries and health checks over several origins",
+        include_str!("../examples/load-balanced.toml"),
+    ),
+    (
+        "rate-limited-api",
+        "a rate limit that answers 429 with Retry-After",
+        include_str!("../examples/rate-limited-api.toml"),
+    ),
+    (
+        "metrics",
+        "a Prometheus endpoint on a loopback listener",
+        include_str!("../examples/metrics.toml"),
+    ),
+    (
+        "cloudflare",
+        "the client address behind Cloudflare or another proxy",
+        include_str!("../examples/cloudflare.toml"),
+    ),
+    (
+        "kubernetes",
+        "origins discovered from Kubernetes EndpointSlices",
+        include_str!("../examples/kubernetes.toml"),
+    ),
+];
 
 enum Command {
     Run(RunOptions),
     Check(CheckInput),
+    Example(Option<String>),
+    Convert(PathBuf),
     Help,
 }
 
@@ -47,7 +105,7 @@ fn main() -> ExitCode {
                 for warning in &report.warnings {
                     eprintln!("{warning}");
                 }
-                println!("ok: {} sites, {} steps", report.sites, report.steps);
+                println!("{}", summary(&report));
                 ExitCode::SUCCESS
             }
             Err(diagnostics) => {
@@ -57,10 +115,108 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        Ok(Command::Example(name)) => example(name.as_deref()),
+        Ok(Command::Convert(path)) => convert_file(&path),
         Err(message) => {
             eprintln!("upstreamer: {message}\n{USAGE}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// What `check` prints on success: the sizes of the config, then what each feature it uses
+/// costs at run time (nothing is said about a feature the config does not use).
+fn summary(report: &CheckReport) -> String {
+    let costs = &report.costs;
+    let mut line = format!("ok: {} sites, {} steps", report.sites, report.steps);
+    if costs.pools > 0 {
+        line += &format!(
+            ", {} pools ({} origins, {} probed)",
+            costs.pools, costs.origins, costs.probed
+        );
+    }
+    if costs.sources > 0 {
+        line += &format!(", {} discovery sources", costs.sources);
+    }
+    if costs.limits > 0 {
+        line += &format!(
+            ", {} limits ({} KiB)",
+            costs.limits,
+            costs.limit_bytes.div_ceil(1024)
+        );
+    }
+    if let Some(series) = costs.series {
+        line += &format!(", metrics on ({series} series)");
+    }
+    line
+}
+
+fn example(name: Option<&str>) -> ExitCode {
+    let Some(name) = name else {
+        print!("{}", EXAMPLES[0].2);
+        return ExitCode::SUCCESS;
+    };
+    if name == "--list" {
+        for (name, about, _) in EXAMPLES {
+            println!("{name:<18}{about}");
+        }
+        return ExitCode::SUCCESS;
+    }
+    match EXAMPLES.iter().find(|(n, ..)| *n == name) {
+        Some((_, _, text)) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        None => {
+            let names: Vec<&str> = EXAMPLES.iter().map(|(n, ..)| *n).collect();
+            eprintln!(
+                "upstreamer: no example named {name:?}; the examples are {}",
+                names.join(", ")
+            );
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// A `.toml` file as JSON, any other file as TOML, on stdout. Only the syntax is converted;
+/// whether the document is a valid config is `check`'s question.
+fn convert_file(path: &Path) -> ExitCode {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("{}: cannot read: {e}", path.display());
+            return ExitCode::from(3);
+        }
+    };
+    match convert_bytes(path, &bytes) {
+        Ok(text) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("{}: {message}", path.display());
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn convert_bytes(path: &Path, bytes: &[u8]) -> Result<String, String> {
+    let text = std::str::from_utf8(bytes).map_err(|e| format!("not UTF-8: {e}"))?;
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("toml"))
+    {
+        let converted = convert::parse(text).map_err(|f| {
+            let at = f.offset.map(|at| convert::line_column(text, at));
+            match at {
+                Some((line, column)) => format!("{} (line {line}, column {column})", f.message),
+                None => f.message,
+            }
+        })?;
+        Ok(convert::emit_json(&converted.value))
+    } else {
+        let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        convert::emit(&value)
     }
 }
 
@@ -82,6 +238,14 @@ fn parse(args: &[String]) -> Result<Command, String> {
         };
         match (command, arg.as_str()) {
             (_, "-h" | "--help") => return Ok(Command::Help),
+            ("example", "--list") => {
+                set_once(&mut file, "--list".into(), "an example name")?;
+            }
+            ("example" | "convert", flag) if flag.starts_with('-') => {
+                return Err(format!("unknown option {flag}"));
+            }
+            ("example", name) => set_once(&mut file, name.into(), "an example name")?,
+            ("convert", path) => set_once(&mut file, path.into(), "a file")?,
             ("run" | "check", "--config") => {
                 set_once(&mut file, value("--config")?.into(), "a config file")?
             }
@@ -116,6 +280,10 @@ fn parse(args: &[String]) -> Result<Command, String> {
     }
     match command {
         "-h" | "--help" | "help" => Ok(Command::Help),
+        "example" => Ok(Command::Example(
+            file.map(|name| name.to_string_lossy().into_owned()),
+        )),
+        "convert" => Ok(Command::Convert(file.ok_or("convert needs a file")?)),
         "run" => Ok(Command::Run(RunOptions {
             config: file.ok_or("run needs a config file")?,
             workers,

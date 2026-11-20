@@ -1,0 +1,30 @@
+# upstreamer.toml: the smallest useful config.
+#
+#   upstreamer check --config upstreamer.toml   # validates; names the line of any mistake
+#   upstreamer run   --config upstreamer.toml   # serves; `kill -HUP` reloads without dropping connections
+#
+# The file is the same schema the NixOS module writes as JSON. Every key is documented in
+# docs/config.md; a misspelt key is an error, never ignored.
+
+version = 1
+
+# Without this, plain HTTP sites listen on port 80 and TLS sites on 443.
+listen.http = ["0.0.0.0:8080"]
+
+[[sites]]
+name = "app"
+hosts = ["*"]              # any host name; or ["app.example.com", "*.example.com"]
+routes = [
+  # Steps run top to bottom. This one answers every request by proxying it.
+  { proxy = "http://127.0.0.1:3000" },
+]
+
+# Next steps, when you need them:
+#
+#   tls = { acme = { email = "ops@example.com" } }
+#       serve HTTPS (and HTTP/3) with a certificate this process gets from Let's Encrypt
+#       (see acme.toml); or tls = { cert = "...", key = "..." } for certificate files.
+#   { when.path = "/assets/*", files.root = "/srv/app" }
+#       serve files for part of the site, before the proxy step.
+#   proxy = { to = ["http://10.0.0.1:3000", "http://10.0.0.2:3000"] }
+#       load balance across several origins (see load-balanced.toml).

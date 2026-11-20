@@ -1,0 +1,37 @@
+# Origins discovered from Kubernetes. Needs a build with `--features kubernetes`
+# (the flake's `packages.<system>.kubernetes`); a build without it fails `check` with:
+#   /sites/0/routes/0/proxy/to/kubernetes: this upstreamer is built without Kubernetes support
+#
+# Credentials: the pod's service account when this runs in a cluster, else the kubeconfig named
+# by $KUBECONFIG (a bearer token or a client certificate; exec and OIDC plugins are not supported).
+# RBAC: see docs/kubernetes-rbac.yaml (get/list/watch on endpointslices in each namespace).
+#
+# Members are the ready endpoints of the Service's EndpointSlices, by pod IP, so requests go to
+# pods directly (no kube-proxy hop) and connections to a pod are pooled per worker. When the API
+# server is unreachable the last known endpoints keep serving; health checks still eject dead
+# pods. Before the first successful list a discovered pool has no member and answers 503.
+
+version = 1
+
+[[sites]]
+name = "web"
+hosts = ["app.example.com"]
+tls = { cert = "/etc/ssl/app/fullchain.pem", key = "/etc/ssl/app/key.pem" }
+
+[[sites.routes]]
+name = "web"
+proxy.to.kubernetes = { namespace = "shop", service = "web", port = "http" }
+proxy.balance = "p2c"
+proxy.health.active = { path = "/readyz", interval = "5s" }
+
+# Every Service labelled upstreamer.example/pool=api in namespace "shop", merged into one pool,
+# over TLS to the pods with the name their certificates carry.
+[[sites.routes]]
+name = "api"
+when.path = "/api/*"
+[sites.routes.proxy.to.kubernetes]
+namespace = "shop"
+selector = "upstreamer.example/pool=api"
+port = 8443
+scheme = "https"
+serverName = "api.shop.svc"

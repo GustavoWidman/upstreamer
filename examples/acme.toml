@@ -1,0 +1,28 @@
+# HTTPS with certificates issued and renewed by upstreamer itself (ACME, RFC 8555), no other
+# tool needed. The CA is Let's Encrypt unless `directory` names another.
+#
+# - Both names must resolve to this host, and port 80 must be reachable from the internet: the
+#   CA proves control of each name by fetching a token over HTTP (`http-01`, the default).
+#   Plain HTTP requests are redirected to HTTPS as usual; the token path is answered first.
+# - `challenge = "tls-alpn-01"` proves control over port 443 instead, for hosts that cannot
+#   open port 80.
+# - Until a certificate is issued, clients get a self-signed one for the name; the real one
+#   replaces it without a reload and is renewed before it expires.
+# - Wildcard names and IP addresses cannot be issued this way; `upstreamer check` rejects them.
+# - The account key and the issued certificates live in `stateDirectory`, which the process
+#   must be able to write.
+
+version = 1
+
+acme.stateDirectory = "/var/lib/upstreamer"
+
+[[sites]]
+name = "app"
+hosts = ["app.example.com", "www.example.com"]
+tls.acme.email = "ops@example.com"
+# To try it against Let's Encrypt's staging CA (certificates no browser trusts, generous
+# limits) before going live:
+# tls.acme.directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
+routes = [
+  { proxy = "http://127.0.0.1:3000" },
+]
