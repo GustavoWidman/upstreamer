@@ -644,6 +644,73 @@ mod tests {
         assert_eq!(accepted, 2.0, "both connections were accepted");
     }
 
+    /// An origin that closes every connection it accepts before reading it, and the count of
+    /// connections it accepted.
+    fn closing_origin() -> (SocketAddr, Arc<AtomicU64>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicU64::new(0));
+        let count = accepted.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                count.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        (addr, accepted)
+    }
+
+    #[test]
+    fn an_attempt_moved_off_an_origin_counts_as_its_retry() {
+        let listen = free_addr();
+        let live = origin();
+        let (dead, attempts) = closing_origin();
+        let config = serde_json::json!({
+            "version": 1,
+            "listen": { "http": [listen], "https": [] },
+            "sites": [{
+                "name": "t",
+                "hosts": ["*"],
+                "routes": [
+                    { "name": "scrape", "when": { "path": "/metrics" }, "metrics": {} },
+                    { "name": "api", "proxy": {
+                        "to": [format!("http://{dead}"), format!("http://{live}")],
+                        "retries": 1,
+                        "health": { "passive": { "maxFails": 0 } },
+                    } },
+                ],
+            }],
+        });
+        let workers = spawn_workers(&[allowed_cpus()[0]], generation(1, &config)).unwrap();
+        let mut conn = connect(listen);
+        for _ in 0..10 {
+            request(&mut conn, "/api");
+        }
+        let (_, body) = request(&mut conn, "/metrics");
+        stop(workers, Instant::now());
+        let (_, samples) = parse(&String::from_utf8(body).unwrap());
+        let (dead, live) = (dead.to_string(), live.to_string());
+        let at = |label: &str| {
+            let label = label.to_owned();
+            move |s: &Sample| s.label("origin") == Some(label.as_str())
+        };
+        let attempts = attempts.load(Ordering::SeqCst) as f64;
+        assert!(attempts >= 1.0, "round robin tried the closing origin");
+        assert_eq!(
+            total(&samples, "upstreamer_upstream_retries_total", at(&dead)),
+            attempts,
+            "every attempt on the closing origin moved to the live one"
+        );
+        assert_eq!(
+            total(&samples, "upstreamer_upstream_retries_total", at(&live)),
+            0.0
+        );
+        assert_eq!(
+            total(&samples, "upstreamer_upstream_responses_total", at(&live)),
+            10.0
+        );
+    }
+
     #[test]
     fn counts_are_exact_across_reloads_and_discovery_epochs() {
         let listen = free_addr();
