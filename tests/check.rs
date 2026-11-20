@@ -721,18 +721,10 @@ fn check_example(name: &str) {
     .unwrap_or_else(|d| panic!("{}: {:#?}", path.display(), messages(&d)));
 }
 
-#[test]
-fn the_examples_of_core_steps_pass() {
-    for name in ["minimal", "metrics"] {
-        check_example(name);
-    }
-}
-
 /// Every example the binary prints passes `check`, the ones that use balancing, limits, trusted
 /// proxies, in-process ACME and discovery included. Discovery needs the `kubernetes` feature;
 /// without it `check` says so.
 #[test]
-#[ignore = "needs a compiler that lowers balanced targets, limits, trusted proxies and in-process ACME"]
 fn every_example_passes() {
     for name in [
         "minimal",
