@@ -594,6 +594,8 @@ mod tests {
     /// against the allowance: never more than `burst + rate x run`, and no fewer than that less
     /// `idle` of it for time a starved thread asked for nothing.
     fn hammer(keys: Vec<u64>, rate_per_second: u64, burst: u64, run: Duration, idle: f64) {
+        // Spinning threads starve the core threads of tests that count allocations.
+        let _quiet = crate::runtime::testing::raising_signals();
         let unit_shift = 30;
         let interval = ((1u64 << unit_shift) + rate_per_second / 2) / rate_per_second;
         let tolerance = interval * burst;
