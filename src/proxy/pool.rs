@@ -67,6 +67,13 @@ pub(crate) struct OriginLocal {
 #[derive(Debug)]
 pub(crate) struct Busy(Rc<OriginLocal>);
 
+impl Busy {
+    /// The counters of the origin this guard counts.
+    pub fn local(&self) -> &OriginLocal {
+        &self.0
+    }
+}
+
 impl Drop for Busy {
     fn drop(&mut self) {
         self.0.in_flight.set(self.0.in_flight.get() - 1);
@@ -141,19 +148,48 @@ impl Pools {
         Some(Busy(slot.local.clone()))
     }
 
+    /// Requests in flight to `id` on this core: 0 for another epoch or an origin never used.
+    #[inline]
+    pub fn in_flight(&self, id: OriginId, epoch: Epoch) -> u32 {
+        let origins = self.origins.borrow();
+        if origins.epoch != Some(epoch) {
+            return 0;
+        }
+        origins
+            .slots
+            .get(id.0 as usize)
+            .map_or(0, |slot| slot.local.in_flight.get())
+    }
+
     /// This core's counters of `id`; `None` for another epoch.
     pub fn local(&self, id: OriginId, epoch: Epoch) -> Option<Rc<OriginLocal>> {
         Some(self.slot(id, epoch)?.local.clone())
     }
 
-    /// This core's state of a pool of the current plan.
+    /// This core's state of a pool of the current plan. A new one starts at a cursor and a
+    /// random state that differ per core and per process.
     pub fn pool(&self, id: PoolId) -> RefMut<'_, PoolLocal> {
         let mut pools = self.pools.borrow_mut();
         let index = id.0 as usize;
         if pools.len() <= index {
-            pools.resize_with(index + 1, PoolLocal::default);
+            let base = self as *const Pools as u64 ^ self.seed();
+            let mut next = pools.len() as u64;
+            pools.resize_with(index + 1, || {
+                next += 1;
+                PoolLocal::seeded(base.wrapping_add(next.wrapping_mul(0x9e37_79b9_7f4a_7c15)))
+            });
         }
         RefMut::map(pools, |p| &mut p[index])
+    }
+
+    /// Varies per process and over time; read only when pool state is created.
+    fn seed(&self) -> u64 {
+        let since = self.now.get().elapsed().as_nanos() as u64;
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        since ^ wall.rotate_left(17)
     }
 
     /// A new plan: pool ids name other pools now, so their state starts over.
@@ -161,8 +197,10 @@ impl Pools {
         self.pools.borrow_mut().clear();
     }
 
-    /// Closes connections idle past their origin's limit, and those the origin closed. Run by
-    /// a core-local timer every few seconds, with the table the core serves.
+    /// Closes connections idle past their origin's limit, those the origin closed, and every
+    /// idle connection to an origin failing its probe (when it passes again, requests start
+    /// on fresh connections). Run by a core-local timer every few seconds, with the table the
+    /// core serves.
     pub fn sweep(&self, upstreams: &Upstreams, now: Instant) {
         self.now.set(now);
         let mut origins = self.origins.borrow_mut();
@@ -170,6 +208,10 @@ impl Pools {
             return;
         }
         for (slot, origin) in origins.slots.iter_mut().zip(upstreams.origins()) {
+            if origin.health.probe_down() {
+                slot.idle.clear();
+                continue;
+            }
             slot.idle.retain(|conn| {
                 now.duration_since(conn.idle_since) < origin.spec.idle
                     && !conn.io.hung_up_or_readable()
