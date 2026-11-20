@@ -4,9 +4,11 @@
 //! body. Request bodies (Content-Length or chunked) are read and discarded.
 //! `GET /__stats` reports counters as JSON and is not counted itself.
 //!
-//! One thread per core, each with its own SO_REUSEPORT listener and a
-//! single-threaded runtime, so no lock or cross-thread wakeup sits on the
-//! request path.
+//! One thread per core, each with its own SO_REUSEPORT listener per address and
+//! a single-threaded runtime, so no lock or cross-thread wakeup sits on the
+//! request path. `--listen` may repeat: every address serves the same thing,
+//! and `/__stats` counts the requests each address after the first took, so a
+//! balancing proxy's split is visible.
 
 use std::net::SocketAddr;
 use std::sync::OnceLock;
@@ -24,6 +26,11 @@ static CONNECTIONS: AtomicU64 = AtomicU64::new(0);
 static BODY_BYTES_IN: AtomicU64 = AtomicU64::new(0);
 static BODY_BYTES_OUT: AtomicU64 = AtomicU64::new(0);
 static NON_GET_REQUESTS: AtomicU64 = AtomicU64::new(0);
+const MAX_LISTEN: usize = 4;
+/// Requests per address after the first. The first address's share is `REQUESTS` minus
+/// these, so a single-address origin does no extra counting.
+static LISTENER_REQUESTS: [AtomicU64; MAX_LISTEN] = [const { AtomicU64::new(0) }; MAX_LISTEN];
+static LISTENERS: OnceLock<usize> = OnceLock::new();
 
 fn payload() -> &'static [u8] {
     static PAYLOAD: OnceLock<Vec<u8>> = OnceLock::new();
@@ -31,22 +38,26 @@ fn payload() -> &'static [u8] {
 }
 
 struct Args {
-    listen: SocketAddr,
+    listen: Vec<SocketAddr>,
     threads: usize,
 }
 
 fn parse_args() -> Args {
-    let mut listen: SocketAddr = "127.0.0.1:18080".parse().unwrap();
+    let mut listen = Vec::new();
     let mut threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let value = it.next().unwrap_or_else(|| panic!("{flag} needs a value"));
         match flag.as_str() {
-            "--listen" => listen = value.parse().expect("--listen <addr:port>"),
+            "--listen" => listen.push(value.parse().expect("--listen <addr:port>")),
             "--threads" => threads = value.parse().expect("--threads <n>"),
             _ => panic!("unknown flag {flag}"),
         }
     }
+    if listen.is_empty() {
+        listen.push("127.0.0.1:18080".parse().unwrap());
+    }
+    assert!(listen.len() <= MAX_LISTEN, "at most {MAX_LISTEN} --listen addresses");
     Args { listen, threads }
 }
 
@@ -67,10 +78,11 @@ fn listener(addr: SocketAddr) -> std::net::TcpListener {
 
 fn main() {
     let args = parse_args();
+    LISTENERS.set(args.listen.len()).unwrap();
     payload();
     let workers: Vec<_> = (0..args.threads)
         .map(|_| {
-            let std_listener = listener(args.listen);
+            let std_listeners: Vec<_> = args.listen.iter().map(|&addr| listener(addr)).collect();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_io()
@@ -78,19 +90,30 @@ fn main() {
                     .unwrap();
                 let local = tokio::task::LocalSet::new();
                 local.block_on(&rt, async move {
-                    let listener = TcpListener::from_std(std_listener).unwrap();
-                    loop {
-                        let Ok((stream, _)) = listener.accept().await else { continue };
-                        CONNECTIONS.fetch_add(1, Ordering::Relaxed);
-                        tokio::task::spawn_local(async move {
-                            let _ = serve(stream).await;
-                        });
+                    let accepts: Vec<_> = std_listeners
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, std_listener)| {
+                            tokio::task::spawn_local(async move {
+                                let listener = TcpListener::from_std(std_listener).unwrap();
+                                loop {
+                                    let Ok((stream, _)) = listener.accept().await else { continue };
+                                    CONNECTIONS.fetch_add(1, Ordering::Relaxed);
+                                    tokio::task::spawn_local(async move {
+                                        let _ = serve(stream, index).await;
+                                    });
+                                }
+                            })
+                        })
+                        .collect();
+                    for accept in accepts {
+                        let _ = accept.await;
                     }
                 });
             })
         })
         .collect();
-    eprintln!("bench-origin listening on {} with {} threads", args.listen, args.threads);
+    eprintln!("bench-origin listening on {:?} with {} threads", args.listen, args.threads);
     for worker in workers {
         worker.join().unwrap();
     }
@@ -236,9 +259,14 @@ impl Conn {
 }
 
 fn stats_json() -> String {
+    let requests = REQUESTS.load(Ordering::Relaxed);
+    let others: Vec<u64> = LISTENER_REQUESTS[1..*LISTENERS.get().unwrap()].iter().map(|c| c.load(Ordering::Relaxed)).collect();
+    let mut by_listener = vec![requests.saturating_sub(others.iter().sum())];
+    by_listener.extend(others);
     format!(
-        "{{\"requests\":{},\"connections\":{},\"body_bytes_in\":{},\"body_bytes_out\":{},\"non_get_requests\":{}}}",
-        REQUESTS.load(Ordering::Relaxed),
+        "{{\"requests\":{},\"requests_by_listener\":{:?},\"connections\":{},\"body_bytes_in\":{},\"body_bytes_out\":{},\"non_get_requests\":{}}}",
+        requests,
+        by_listener,
         CONNECTIONS.load(Ordering::Relaxed),
         BODY_BYTES_IN.load(Ordering::Relaxed),
         BODY_BYTES_OUT.load(Ordering::Relaxed),
@@ -246,7 +274,7 @@ fn stats_json() -> String {
     )
 }
 
-async fn serve(stream: TcpStream) -> std::io::Result<()> {
+async fn serve(stream: TcpStream, listener: usize) -> std::io::Result<()> {
     stream.set_nodelay(true)?;
     let mut conn = Conn { stream, buf: Vec::with_capacity(2 * READ_CHUNK), start: 0 };
     let mut out = Vec::with_capacity(READ_CHUNK);
@@ -290,6 +318,9 @@ async fn serve(stream: TcpStream) -> std::io::Result<()> {
         };
         if head.counted {
             REQUESTS.fetch_add(1, Ordering::Relaxed);
+            if listener > 0 {
+                LISTENER_REQUESTS[listener].fetch_add(1, Ordering::Relaxed);
+            }
             BODY_BYTES_IN.fetch_add(body_in as u64, Ordering::Relaxed);
             BODY_BYTES_OUT.fetch_add(body.len() as u64, Ordering::Relaxed);
         }
