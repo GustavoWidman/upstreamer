@@ -123,8 +123,13 @@ impl Cluster {
         }
     }
 
-    /// Waits until the source's synced set is exactly the cluster's ready pods.
-    async fn converge(&mut self, source: &Arc<KubeWatch>, what: &str) -> BTreeSet<SocketAddr> {
+    /// Waits until the cluster has `pods` ready pods and the source's synced set is exactly them.
+    async fn converge(
+        &mut self,
+        source: &Arc<KubeWatch>,
+        what: &str,
+        pods: usize,
+    ) -> BTreeSet<SocketAddr> {
         let deadline = Instant::now() + Duration::from_secs(120);
         loop {
             let truth = ready_pods();
@@ -132,7 +137,9 @@ impl Cluster {
                 .until(source, Duration::from_secs(3), what, |_| true)
                 .await;
             let reported: BTreeSet<SocketAddr> = found.endpoints.iter().copied().collect();
-            if matches!(found.state, SourceState::Synced) && reported == truth && !truth.is_empty()
+            if matches!(found.state, SourceState::Synced)
+                && reported == truth
+                && truth.len() == pods
             {
                 return truth;
             }
@@ -174,21 +181,28 @@ async fn kind_1_service_and_selector_follow_scaling() {
         "--timeout=180s",
     ]);
     let mut cluster = Cluster::start(&[by_service.clone(), by_labels.clone()]);
-    let three = cluster.converge(&by_service, "three pods by service").await;
+    let three = cluster
+        .converge(&by_service, "three pods by service", 3)
+        .await;
     assert_eq!(three.len(), 3);
-    let copied = cluster.converge(&by_labels, "three pods by selector").await;
+    let copied = cluster
+        .converge(&by_labels, "three pods by selector", 3)
+        .await;
     assert_eq!(
         copied, three,
         "the selector reads the Service labels the slices carry"
     );
 
     scale(5);
-    let five = cluster.converge(&by_service, "scaled to five").await;
+    let five = cluster.converge(&by_service, "scaled to five", 5).await;
     assert_eq!(five.len(), 5);
-    assert_eq!(cluster.converge(&by_labels, "five by selector").await, five);
+    assert_eq!(
+        cluster.converge(&by_labels, "five by selector", 5).await,
+        five
+    );
 
     scale(1);
-    let one = cluster.converge(&by_service, "scaled to one").await;
+    let one = cluster.converge(&by_service, "scaled to one", 1).await;
     assert_eq!(one.len(), 1);
 }
 
@@ -206,7 +220,7 @@ async fn kind_2_a_rollout_restart_never_leaves_the_set_empty() {
         "--timeout=180s",
     ]);
     let mut cluster = Cluster::start(std::slice::from_ref(&source));
-    let before = cluster.converge(&source, "three pods").await;
+    let before = cluster.converge(&source, "three pods", 3).await;
 
     kubectl(&["-n", "shop", "rollout", "restart", "deploy/web"]);
     let rollout = std::thread::spawn(|| {
@@ -235,7 +249,7 @@ async fn kind_2_a_rollout_restart_never_leaves_the_set_empty() {
         }
     }
     rollout.join().unwrap();
-    let after = cluster.converge(&source, "the new pods").await;
+    let after = cluster.converge(&source, "the new pods", 3).await;
     assert!(
         reports >= 2,
         "a rollout is several reports, not one: {reports}"
@@ -306,7 +320,7 @@ async fn kind_4_an_api_server_outage_keeps_the_endpoints_and_resyncs() {
         "--timeout=180s",
     ]);
     let mut cluster = Cluster::start(std::slice::from_ref(&source));
-    let before = cluster.converge(&source, "three pods").await;
+    let before = cluster.converge(&source, "three pods", 3).await;
 
     let node = env("UPSTREAMER_KIND_NODE");
     let manifest = "/etc/kubernetes/manifests/kube-apiserver.yaml";
@@ -339,6 +353,8 @@ async fn kind_4_an_api_server_outage_keeps_the_endpoints_and_resyncs() {
             |found| matches!(found.state, SourceState::Synced),
         )
         .await;
-    let after = cluster.converge(&source, "the set after the outage").await;
+    let after = cluster
+        .converge(&source, "the set after the outage", 3)
+        .await;
     assert_eq!(after, before, "nothing changed while it was away");
 }
