@@ -32,7 +32,7 @@
 //!
 //! # Public surface
 //!
-//! [`run`] and [`check`]. Everything else is crate-private, so no caller can reach into the
+//! [`run`], [`check`] and [`convert`]. Everything else is crate-private, so no caller can reach into the
 //! hot path's internals.
 
 // Modules whose bodies are still `todo!()` leave parameters and items unused.
@@ -86,6 +86,13 @@ pub mod bench {
     pub use crate::limit::bench as limit;
     pub use crate::metrics::bench as metrics;
     pub use crate::upstream::balance::bench as balance;
+}
+
+/// The JSON and TOML spellings of one document, converted both ways by the same code that
+/// reads TOML configs. Only the syntax is converted; whether the document is a valid config is
+/// [`check`]'s question.
+pub mod convert {
+    pub use crate::config::toml::{json_to_toml, toml_to_json};
 }
 
 /// Options of `upstreamer run`.

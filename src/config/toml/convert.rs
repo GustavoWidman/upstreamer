@@ -1,7 +1,7 @@
 //! TOML to a JSON value, and back.
 //!
-//! This file depends on nothing in the crate: the library reads configs through it and the
-//! `upstreamer` binary includes it for `upstreamer convert`, so both read TOML one way.
+//! The library reads configs through it, and `upstreamer convert` through
+//! `upstreamer::convert`, so both read TOML one way.
 //!
 //! Reading, all the rules:
 //! - tables become objects, arrays arrays, strings, integers, floats and booleans themselves;

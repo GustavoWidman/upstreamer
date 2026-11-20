@@ -43,14 +43,14 @@ slot and gives no site an `Observe` for metrics; a plan without `trustedProxies`
 ## Modules
 
 The crate is one library with private modules. Its public items are `run`, `check`,
-`Diagnostic` and their argument and result types, in `src/lib.rs`. `src/main.rs` is the
+`convert`, `Diagnostic` and their argument and result types, in `src/lib.rs`. `src/main.rs` is the
 command line.
 
 | file | owns |
 |---|---|
 | `src/config/mod.rs` | the schema and its parsers (JSON or TOML by extension), with errors that carry the JSON pointer of the failing value |
 | `src/config/toml.rs` | TOML to the JSON value of the same document, with positions for diagnostics |
-| `src/config/toml/convert.rs` | the conversion itself, and JSON to TOML. It depends on nothing else in the crate: the library reads TOML through it and `src/main.rs` includes it for `upstreamer convert` |
+| `src/config/toml/convert.rs` | the conversion itself, and JSON to TOML: the library reads TOML through it, and `upstreamer convert` reaches it through `upstreamer::convert` |
 | `src/main.rs` | the command line: `run`, `check`, `example` and `convert`, and the summary `check` prints |
 | `src/config/trust.rs`, `src/config/acme.rs` | the schema of `trustedProxies` and of in-process ACME |
 | `src/plan/mod.rs` | the compiled plan's types and `Diagnostic` |

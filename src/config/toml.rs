@@ -49,6 +49,27 @@ pub(crate) fn emit(value: &serde_json::Value) -> Result<String, String> {
     convert::emit(value)
 }
 
+/// A TOML document as JSON text, for `upstreamer convert`. A syntax error names its line and
+/// column.
+pub fn toml_to_json(text: &str) -> Result<String, String> {
+    match convert::parse(text) {
+        Ok(converted) => Ok(convert::emit_json(&converted.value)),
+        Err(convert::Failure { offset, message }) => Err(match offset {
+            Some(at) => {
+                let (line, column) = convert::line_column(text, at);
+                format!("{message} (line {line}, column {column})")
+            }
+            None => message,
+        }),
+    }
+}
+
+/// A JSON document as TOML text, for `upstreamer convert`.
+pub fn json_to_toml(text: &str) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    convert::emit(&value)
+}
+
 /// Parses TOML and converts it. A syntax error carries the TOML line and column and an empty
 /// pointer, as a JSON syntax error does.
 pub(crate) fn to_json(bytes: &[u8]) -> Result<(serde_json::Value, Positions), SchemaError> {

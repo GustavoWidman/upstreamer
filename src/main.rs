@@ -15,12 +15,6 @@ use std::process::ExitCode;
 
 use upstreamer::{CheckInput, CheckReport, ExpectedPorts, RunOptions, StartError};
 
-/// TOML to JSON and back, shared with the library's TOML reader. The library keeps the
-/// positions it records; `convert` has no use for them.
-#[allow(dead_code)]
-#[path = "config/toml/convert.rs"]
-mod convert;
-
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -212,17 +206,9 @@ fn convert_bytes(path: &Path, bytes: &[u8]) -> Result<String, String> {
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("toml"))
     {
-        let converted = convert::parse(text).map_err(|f| {
-            let at = f.offset.map(|at| convert::line_column(text, at));
-            match at {
-                Some((line, column)) => format!("{} (line {line}, column {column})", f.message),
-                None => f.message,
-            }
-        })?;
-        Ok(convert::emit_json(&converted.value))
+        upstreamer::convert::toml_to_json(text)
     } else {
-        let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-        convert::emit(&value)
+        upstreamer::convert::json_to_toml(text)
     }
 }
 
