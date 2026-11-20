@@ -24,7 +24,7 @@ from .loadgen import plan as loadgen_plan
 from .loadgen import url as loadgen_url
 from .procs import raise_nofile, run_pinned
 from .runner import Origin, Runner, RunSpec, Scraper, Session, matrix, pin_harness, probe, wait_port_free
-from .scenarios import Feature
+from .scenarios import Feature, client_key
 from .scenarios import FEATURE_SCENARIOS, SCENARIOS, lookup
 from .servers import NO_FEATURES, registry
 from .tools import tool
@@ -181,8 +181,8 @@ def cmd_serve(a: argparse.Namespace) -> None:
             run_dir = session.dir / "runs" / f"serve-{server.name}-{scenarios[0].name}"
             run_dir.mkdir(parents=True)
             spec = RunSpec(server, scenarios[0], profile, "closed", None, 0, 0, 0)
-            scope = runner.start_server(spec, run_dir)
             try:
+                scope = runner.start_server(spec, run_dir)
                 runner.wait_ready(spec, scope, run_dir)
             except RuntimeError as e:
                 failed = True
@@ -207,17 +207,29 @@ def cmd_serve(a: argparse.Namespace) -> None:
 
 
 def serve_checks(sc, server, runner: Runner, run_dir: Path) -> str | None:
-    """Beyond the probe: a balanced scenario reaches both origin addresses over 64 requests,
-    and a metrics scenario's endpoint answers a scrape."""
+    """Beyond the probe: a balanced scenario reaches both origin addresses (over 64 requests, or
+    4 requests with each of 16 client keys when the scenario sends keys), and a metrics
+    scenario's endpoint answers a scrape."""
     if sc.balanced:
         before = runner.origin.stats()["requests_by_listener"]
-        out = subprocess.run(
-            [tool("h2load").exe("h2load"), "-n", "64", "-c", "4", "-T", "5", *loadgen_flags(sc), loadgen_url(sc, server.port_override)],
-            capture_output=True, text=True, timeout=30, cwd=run_dir,
-        ).stdout
+        flags = loadgen_flags(sc)
+        if sc.key_header:
+            at = flags.index("-H")
+            del flags[at : at + 2]
+        h2load = [tool("h2load").exe("h2load"), "-c", "1", "-T", "5", *flags]
+        target = loadgen_url(sc, server.port_override)
+        runs = (
+            [[*h2load, "-n", "4", "-H", f"{sc.key_header}: {client_key(sc.key_header, k)}", target] for k in range(16)]
+            if sc.key_header
+            else [[*h2load, "-n", "64", target]]
+        )
+        for argv in runs:
+            out = subprocess.run(argv, capture_output=True, text=True, timeout=30, cwd=run_dir).stdout
+            if "status codes: 0 2xx" in out or "succeeded" not in out:
+                return f"balance: {' '.join(argv)} failed"
         after = runner.origin.stats()["requests_by_listener"]
         split = [x - y for x, y in zip(after, before)]
-        if "64 succeeded" not in out or min(split) == 0:
+        if min(split) == 0:
             return f"balance: requests per origin address {split}"
     if Feature.METRICS in sc.features:
         scraper = Scraper(server, run_dir)

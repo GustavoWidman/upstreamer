@@ -110,8 +110,9 @@ the servers that ship the feature.
 wrk sends each request with the next of 1024 client keys (`X-Client: c<k>`,
 or `X-Forwarded-For: 10.0.x.y`), from a Lua `request()` that picks one of 1024
 requests formatted in `init`. h2load sends fixed headers, so `h2-tls-all` has
-one client for the whole run. The limits run at 1,000,000 req/s per key and
-10,000,000 req/s for the single bucket, far above what the host can drive:
+one client for the whole run. The limits run at 1,000,000 req/s, per key and
+for the single bucket (the most upstreamer accepts), about five times what
+the host can drive:
 the bookkeeping is measured, never a refusal (a 429 is an error). Active
 health checks probe `GET /bytes/2` every 10 s.
 

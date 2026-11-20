@@ -40,10 +40,11 @@ LB = frozenset({Feature.LB_ROUND_ROBIN, Feature.LB_LEAST, Feature.LB_HASH})
 # scenario has one key for the whole run.
 CLIENT_HEADER = "X-Client"
 CLIENT_KEYS = 1024
-# Per-key and whole-step rates far above anything the host can drive, so no request is refused
-# and the limiter's bookkeeping is what the scenario measures.
+# Per-key and whole-step rates far above anything the host can drive (about 200k req/s), so no
+# request is refused and the limiter's bookkeeping is what the scenario measures. 1M/s is the
+# highest rate upstreamer accepts.
 LIMIT_CLIENT_RATE = 1_000_000
-LIMIT_CONST_RATE = 10_000_000
+LIMIT_CONST_RATE = 1_000_000
 METRICS_PATH = "/metrics"
 METRICS_SCRAPE_S = 5
 HEALTH_PATH = "/bytes/2"
