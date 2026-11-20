@@ -1961,29 +1961,17 @@ mod tests {
         assert!(removed.value.is_none(), "`false` removes the header");
     }
 
+    #[cfg(not(feature = "kubernetes"))]
     #[test]
-    fn features_not_built_yet_fail_at_their_pointer() {
-        let cases = [
-            (
-                r#"[{"proxy":{"to":["http://a:1","http://b:1"]}}]"#,
-                "/sites/0/routes/0/proxy/to: a list of origins is not supported by this upstreamer yet",
-            ),
-            (
-                r#"[{"proxy":{"to":"http://a:1","balance":"p2c"}}]"#,
-                "/sites/0/routes/0/proxy/balance: `balance` is not supported by this upstreamer yet",
-            ),
-            (
-                r#"[{"proxy":{"to":{"kubernetes":{"namespace":"n","service":"s","port":80}}}}]"#,
-                "/sites/0/routes/0/proxy/to/kubernetes: this upstreamer is built without Kubernetes support; use the `kubernetes` package",
-            ),
-            (
-                r#"[{"limit":{"rate":"5/s"}}]"#,
-                "/sites/0/routes/0/limit: `limit` is not supported by this upstreamer yet",
-            ),
-        ];
-        for (routes, want) in cases {
-            assert_eq!(errors(&site(routes), &[]), [want], "{routes}");
-        }
+    fn a_kubernetes_source_needs_the_kubernetes_build() {
+        let routes =
+            r#"[{"proxy":{"to":{"kubernetes":{"namespace":"n","service":"s","port":80}}}}]"#;
+        assert_eq!(
+            errors(&site(routes), &[]),
+            [
+                "/sites/0/routes/0/proxy/to/kubernetes: this upstreamer is built without Kubernetes support; use the `kubernetes` package"
+            ]
+        );
     }
 
     #[test]
