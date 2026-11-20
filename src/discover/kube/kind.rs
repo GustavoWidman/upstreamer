@@ -80,6 +80,15 @@ impl Cluster {
         }
     }
 
+    /// Takes the reports that are already waiting.
+    async fn drain(&mut self) {
+        while let Ok(Some(found)) =
+            tokio::time::timeout(Duration::from_millis(50), self.thread.recv()).await
+        {
+            self.last.insert(found.source.clone(), found);
+        }
+    }
+
     /// Reads reports until `done` accepts the latest of `source`, or `within` passes.
     async fn until(
         &mut self,
@@ -91,6 +100,7 @@ impl Cluster {
         let key = SourceKey::Kubernetes(source.clone());
         let deadline = Instant::now() + within;
         loop {
+            self.drain().await;
             if let Some(found) = self.last.get(&key)
                 && done(found)
             {
@@ -100,21 +110,15 @@ impl Cluster {
                     state: found.state.clone(),
                 };
             }
-            let left = deadline.saturating_duration_since(Instant::now());
-            let report =
-                tokio::time::timeout(left.min(Duration::from_secs(2)), self.thread.recv()).await;
-            match report {
-                Ok(Some(found)) => {
-                    self.last.insert(found.source.clone(), found);
-                }
-                Ok(None) => panic!("the discovery thread ended"),
-                Err(_) if Instant::now() >= deadline => {
-                    panic!(
-                        "timed out waiting for {what}; last report: {:?}",
-                        self.last.get(&key)
-                    )
-                }
-                Err(_) => {}
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what}; last report: {:?}",
+                self.last.get(&key)
+            );
+            if let Ok(Some(found)) =
+                tokio::time::timeout(Duration::from_secs(1), self.thread.recv()).await
+            {
+                self.last.insert(found.source.clone(), found);
             }
         }
     }
