@@ -834,7 +834,7 @@ mod tests {
         // The first ticks size what each tick reuses.
         std::thread::sleep(Duration::from_millis(2_200));
         warm(&mut conn);
-        let signals = counting(|| {
+        let counted = counted_section_after(|| {
             request(&mut conn, "/");
         });
         let before = served(listen.port(), 0).allocations;
@@ -847,7 +847,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1_200));
         request(&mut conn, "/");
         let after = served(listen.port(), 0).allocations;
-        drop(signals);
+        drop(counted);
         stop(workers, Instant::now());
         println!(
             "core thread allocations over {} requests with metrics on: {}",

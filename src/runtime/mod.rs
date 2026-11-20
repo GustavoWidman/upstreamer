@@ -888,33 +888,37 @@ pub(crate) mod testing {
         ALLOCS.with(Cell::get)
     }
 
-    /// Held while a test raises process signals, and while a test counts the allocations of a
-    /// thread that runs a tokio runtime. A signal wakes the signal driver of every runtime in
-    /// the process, and the first to wake broadcasts it on that thread. On macOS a broadcast
-    /// can allocate: the first one of each signal kind sets up the mutexes of tokio's watch
-    /// channel for it (`std`'s pthread mutexes are boxed on first lock), so a counted thread
-    /// would charge a test's signal to the requests it measures.
-    static SIGNALS: RwLock<()> = RwLock::new(());
+    /// Keeps counted sections and disruptive sections of tests apart. A counted section reads
+    /// a thread's allocations or its timing and holds a read guard, so any number run at once.
+    /// A disruptive section does something that would show in those counts on another
+    /// thread, and holds the write guard:
+    /// - raising a process signal. A signal wakes the signal driver of every runtime in the
+    ///   process, and the first to wake broadcasts it on that thread. On macOS a broadcast can
+    ///   allocate: the first one of each signal kind sets up the mutexes of tokio's watch
+    ///   channel for it (`std`'s pthread mutexes are boxed on first lock), so a counted thread
+    ///   would charge a test's signal to the requests it measures;
+    /// - keeping every CPU busy, which starves the core threads a counted section waits on.
+    static DISRUPTION: RwLock<()> = RwLock::new(());
 
-    /// Keeps process signals from being raised until the guard drops.
-    pub fn no_signals() -> RwLockReadGuard<'static, ()> {
-        SIGNALS.read().unwrap_or_else(PoisonError::into_inner)
+    /// A counted section: no disruptive section runs until the guard drops.
+    pub fn counted_section() -> RwLockReadGuard<'static, ()> {
+        DISRUPTION.read().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The guard for counting a core's allocations, taken around one more request (`settle`)
+    /// A counted section of a core's allocations, entered around one more request (`settle`)
     /// so the count the test starts from is read after it. A signal raised before the guard
     /// can be broadcast on the core thread after the core's previous request, and a count read
     /// from that request would charge the broadcast to the measured ones.
-    pub fn counting(settle: impl FnOnce()) -> RwLockReadGuard<'static, ()> {
-        let guard = no_signals();
+    pub fn counted_section_after(settle: impl FnOnce()) -> RwLockReadGuard<'static, ()> {
+        let guard = counted_section();
         settle();
         guard
     }
 
-    /// Waits until no test counts allocations, and keeps them from starting until the guard
-    /// drops.
-    pub fn raising_signals() -> RwLockWriteGuard<'static, ()> {
-        SIGNALS.write().unwrap_or_else(PoisonError::into_inner)
+    /// A disruptive section: waits until no counted section runs, and keeps them from starting
+    /// until the guard drops.
+    pub fn disruptive_section() -> RwLockWriteGuard<'static, ()> {
+        DISRUPTION.write().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// What one core has answered on one listening port.
@@ -1170,7 +1174,7 @@ mod tests {
         for _ in 0..2_000 {
             get(&mut conn).unwrap();
         }
-        let signals = counting(|| {
+        let counted = counted_section_after(|| {
             get(&mut conn).unwrap();
         });
         let before = served(addr.port(), 0).allocations;
@@ -1179,7 +1183,7 @@ mod tests {
             assert_eq!(get(&mut conn).unwrap(), 7);
         }
         let after = served(addr.port(), 0).allocations;
-        drop(signals);
+        drop(counted);
         stop(workers, Instant::now());
         println!(
             "core thread allocations over {requests} keep-alive requests: {}",
@@ -1215,7 +1219,7 @@ mod tests {
         for _ in 1..warm_up {
             get(&mut conn).unwrap();
         }
-        let signals = counting(|| {
+        let counted = counted_section_after(|| {
             get(&mut conn).unwrap();
         });
         let before = served(addr.port(), 0);
@@ -1224,7 +1228,7 @@ mod tests {
             assert_eq!(get(&mut conn).unwrap(), 9);
         }
         let after = served(addr.port(), 0);
-        drop(signals);
+        drop(counted);
         stop(workers, Instant::now());
         let allocations = after.allocations - before.allocations;
         let writes = after.log_writes - before.log_writes;

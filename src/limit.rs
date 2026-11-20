@@ -594,8 +594,8 @@ mod tests {
     /// against the allowance: never more than `burst + rate x run`, and no fewer than that less
     /// `idle` of it for time a starved thread asked for nothing.
     fn hammer(keys: Vec<u64>, rate_per_second: u64, burst: u64, run: Duration, idle: f64) {
-        // Spinning threads starve the core threads of tests that count allocations.
-        let _quiet = crate::runtime::testing::raising_signals();
+        // Spinning threads starve the core threads of counted sections.
+        let _quiet = crate::runtime::testing::disruptive_section();
         let unit_shift = 30;
         let interval = ((1u64 << unit_shift) + rate_per_second / 2) / rate_per_second;
         let tolerance = interval * burst;
@@ -805,7 +805,7 @@ mod tests {
     #[test]
     fn a_limited_request_allocates_nothing_after_warm_up() {
         use crate::runtime::testing::{
-            connect, counting, free_addr, plan_from, read_response, served,
+            connect, counted_section_after, free_addr, plan_from, read_response, served,
         };
         use crate::runtime::{Generation, allowed_cpus, spawn_workers, stop};
         use std::io::Write;
@@ -844,7 +844,7 @@ mod tests {
             assert!(head.contains("\r\nretry-after: "), "{head}");
             assert!(body.starts_with(b"slow down "), "{body:?}");
         }
-        let signals = counting(|| {
+        let counted = counted_section_after(|| {
             request();
         });
         let before = served(listen.port(), 0).allocations;
@@ -853,7 +853,7 @@ mod tests {
             request();
         }
         let after = served(listen.port(), 0).allocations;
-        drop(signals);
+        drop(counted);
         stop(workers, Instant::now());
         println!(
             "core thread allocations over {requests} limited keep-alive requests: {}",

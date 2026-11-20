@@ -951,7 +951,7 @@ mod tests {
     #[test]
     fn a_proxied_request_with_trusted_proxies_allocates_nothing() {
         use crate::runtime::testing::{
-            connect, counting, free_addr, plan_from, read_response, served,
+            connect, counted_section_after, free_addr, plan_from, read_response, served,
         };
         use crate::runtime::{Generation, allowed_cpus, spawn_workers, stop};
         use std::io::{Read, Write};
@@ -1009,13 +1009,13 @@ mod tests {
             for _ in 0..2_000 {
                 request();
             }
-            let signals = counting(&mut request);
+            let counted = counted_section_after(&mut request);
             let before = served(listen.port(), 0).allocations;
             for _ in 0..20_000 {
                 request();
             }
             let after = served(listen.port(), 0).allocations;
-            drop(signals);
+            drop(counted);
             stop(workers, Instant::now());
             assert_eq!(
                 after - before,

@@ -469,7 +469,9 @@ fn monotonic_usec() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::testing::{connect, free_addr, get, plan, raising_signals, read_response};
+    use crate::runtime::testing::{
+        connect, disruptive_section, free_addr, get, plan, read_response,
+    };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -524,7 +526,7 @@ mod tests {
     #[test]
     fn lifecycle_under_signals() {
         const RELOADS: u64 = 100;
-        let _signals = raising_signals();
+        let _signals = disruptive_section();
         let (_dir, path, notifications) = listen_notify();
         let (a, b) = (free_addr(), free_addr());
         // Generations up to RELOADS listen on a and b; later ones on b alone. Generation
