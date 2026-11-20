@@ -1,0 +1,31 @@
+http:
+  routers:
+    h1:
+      entryPoints: [h1]
+      rule: "PathPrefix(`/`)"
+      service: origin
+{{router_extra}}
+    tls:
+      entryPoints: [tls]
+      rule: "PathPrefix(`/`)"
+      service: origin
+{{router_extra}}
+      tls: {}
+  services:
+    origin:
+      loadBalancer:
+{{lb_extra}}
+        servers:
+          - url: "http://{{origin}}"
+{{servers_extra}}
+{{middlewares}}
+
+tls:
+  options:
+    default:
+      minVersion: VersionTLS13
+  stores:
+    default:
+      defaultCertificate:
+        certFile: "{{cert}}"
+        keyFile: "{{key}}"
