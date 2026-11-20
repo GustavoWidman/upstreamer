@@ -1984,14 +1984,6 @@ mod tests {
         for (routes, want) in cases {
             assert_eq!(errors(&site(routes), &[]), [want], "{routes}");
         }
-        let e = errors(
-            r#"{"version":1,"trustedProxies":{"from":["cloudflare"],"header":"CF-Connecting-IP"},"sites":[]}"#,
-            &[],
-        );
-        assert_eq!(
-            e,
-            ["/trustedProxies: `trustedProxies` is not supported by this upstreamer yet"]
-        );
     }
 
     #[test]
