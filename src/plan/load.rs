@@ -320,4 +320,52 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("(line 2, column"), "{errors:?}");
     }
+
+    /// The fixtures name an include by a store path that only exists on the machine that built
+    /// them; the copy kept in `tests/fixtures/site` stands in for it.
+    fn with_local_includes(text: &str) -> String {
+        let marker = "-example-site-fragments";
+        let Some(start) = text.find("/nix/store/") else {
+            return text.to_owned();
+        };
+        let end = start + text[start..].find(marker).unwrap() + marker.len();
+        let local = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/site/upstreamer");
+        text.replace(&text[start..end], &local.display().to_string())
+    }
+
+    fn debug_of(path: &Path) -> String {
+        match load(path, 0) {
+            Ok((plan, warnings)) => format!("{plan:?}\n{warnings:?}"),
+            Err(diagnostics) => panic!("{}: {diagnostics:#?}", path.display()),
+        }
+    }
+
+    #[test]
+    fn a_fixture_written_as_toml_compiles_to_the_same_plan() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/config");
+        let mut fixtures: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .collect();
+        fixtures.sort();
+        assert!(fixtures.len() >= 4, "{fixtures:?}");
+        for fixture in fixtures {
+            let json = with_local_includes(&std::fs::read_to_string(&fixture).unwrap());
+            let out = tempfile::tempdir().unwrap();
+            let name = fixture.file_stem().unwrap().to_str().unwrap();
+            let json_path = out.path().join(format!("{name}.json"));
+            let toml_path = out.path().join(format!("{name}.toml"));
+            std::fs::write(&json_path, &json).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let toml = config::toml::emit(&value).unwrap();
+            std::fs::write(&toml_path, &toml).unwrap();
+            let (from_json, from_toml) = (debug_of(&json_path), debug_of(&toml_path));
+            assert!(from_json.len() > 400, "{name}: a plan with its sites");
+            assert!(
+                from_json == from_toml,
+                "{name}: the TOML plan differs from the JSON plan\n{toml}"
+            );
+        }
+    }
 }

@@ -16,15 +16,17 @@
 //! the same text mean different values than the schema reads, and JSON already serves
 //! generators.
 
+mod convert;
+
 use super::SchemaError;
-use std::ops::Range;
+use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Byte span of every value, by JSON pointer. Kept only for diagnostics; never consulted by
-/// the compiler.
+/// Where each value starts, by JSON pointer. Kept only for diagnostics; never consulted by the
+/// compiler.
 pub(crate) struct Positions {
     source: Arc<str>,
-    spans: Vec<(String, Range<usize>)>,
+    starts: HashMap<String, usize>,
 }
 
 impl Positions {
@@ -33,25 +35,18 @@ impl Positions {
     pub fn position(&self, pointer: &str) -> Option<(usize, usize)> {
         let mut pointer = pointer;
         loop {
-            if let Some((_, span)) = self.spans.iter().find(|(p, _)| p == pointer) {
-                return Some(line_column(&self.source, span.start));
+            if let Some(&start) = self.starts.get(pointer) {
+                return Some(convert::line_column(&self.source, start));
             }
             pointer = &pointer[..pointer.rfind('/')?];
         }
     }
 }
 
-/// 1-based line and column of byte `at` of `text`.
-fn line_column(text: &str, at: usize) -> (usize, usize) {
-    let before = &text.as_bytes()[..at.min(text.len())];
-    let line = before.iter().filter(|&&b| b == b'\n').count() + 1;
-    let column = before.len()
-        - before
-            .iter()
-            .rposition(|&b| b == b'\n')
-            .map_or(0, |i| i + 1)
-        + 1;
-    (line, column)
+/// A JSON value as TOML text (what `upstreamer convert` prints, and what the tests write).
+#[cfg(test)]
+pub(crate) fn emit(value: &serde_json::Value) -> Result<String, String> {
+    convert::emit(value)
 }
 
 /// Parses TOML and converts it. A syntax error carries the TOML line and column and an empty
@@ -64,15 +59,19 @@ pub(crate) fn to_json(bytes: &[u8]) -> Result<(serde_json::Value, Positions), Sc
         message,
     };
     let text = std::str::from_utf8(bytes).map_err(|e| error(0, 0, format!("not UTF-8: {e}")))?;
-    if let Err(e) = toml_edit::Document::parse(text) {
-        let (line, column) = e.span().map_or((0, 0), |s| line_column(text, s.start));
-        return Err(error(line, column, e.message().to_owned()));
+    match convert::parse(text) {
+        Ok(convert::Converted { value, starts }) => {
+            let positions = Positions {
+                source: Arc::from(text),
+                starts,
+            };
+            Ok((value, positions))
+        }
+        Err(convert::Failure { offset, message }) => {
+            let (line, column) = offset.map_or((0, 0), |at| convert::line_column(text, at));
+            Err(error(line, column, message))
+        }
     }
-    Err(error(
-        0,
-        0,
-        "this upstreamer reads JSON configs only; converting TOML is not built yet".into(),
-    ))
 }
 
 #[cfg(test)]
@@ -84,7 +83,20 @@ mod tests {
         let e = to_json(b"version = 1\n[[sites]\n").err().unwrap();
         assert_eq!((e.pointer.as_str(), e.line), ("", 2));
         assert!(e.column > 0, "{}", e.column);
-        assert_eq!(line_column("a\nbc\nd", 4), (2, 3));
-        assert_eq!(line_column("a\nbc\nd", 0), (1, 1));
+    }
+
+    #[test]
+    fn a_missing_key_points_at_its_table() {
+        let (_, positions) = to_json(b"version = 1\n[[sites]]\nname = 'a'\n").unwrap();
+        assert_eq!(positions.position("/sites/0/hosts"), Some((2, 1)));
+        assert_eq!(positions.position("/version"), Some((1, 11)));
+        assert_eq!(positions.position("/nope"), None);
+    }
+
+    #[test]
+    fn a_local_time_is_reported_at_its_position() {
+        let e = to_json(b"version = 1\nafter = 2026-12-01\n").err().unwrap();
+        assert_eq!((e.line, e.column), (2, 9));
+        assert!(e.message.contains("no time zone"), "{}", e.message);
     }
 }
