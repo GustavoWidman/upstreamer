@@ -6,11 +6,11 @@
 //! `pipeline::handle` never calls in here.
 
 use crate::access;
-use crate::exchange::{ASpan, Exchange};
+use crate::exchange::{ASpan, Exchange, RefusedBy};
 use crate::msg::Status;
 use crate::plan::{LogId, Observe};
 use crate::runtime::{Core, CoreSnapshot};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// What the pipeline noted about a request, until the driver finishes it. `Copy` and as small
 /// as the access log's record was (32 bytes on Linux): the pipeline future holds it across the
@@ -37,9 +37,19 @@ pub(crate) struct Upstream {
     pub answer: Answer,
 }
 
-/// A status, or the cause of a failed last attempt, in two bytes.
+/// A status, or the cause of a failed last attempt, in two bytes: 0 for no answer, a
+/// `metrics::Cause` (1 to 5), or a status code (100 and up).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Answer(u16);
+
+impl Answer {
+    fn get(self) -> Option<Result<Status, crate::metrics::Cause>> {
+        match crate::metrics::Cause::from_code(self.0) {
+            Some(cause) => Some(Err(cause)),
+            None => Status::new(self.0).map(Ok),
+        }
+    }
+}
 
 /// One clock read; for a logging site, the request's fields into the arena.
 pub(crate) fn start(observe: &Observe, ex: &mut Exchange) -> Started {
@@ -118,8 +128,9 @@ pub(crate) fn finish(
     }
 }
 
-/// The metrics half of [`finish`]: the request's series, and its upstream series when it was
-/// proxied (`ex.upstream`).
+/// The metrics half of [`finish`]: the request's series, its rejection by a `limit` step,
+/// and its upstream series when it was proxied (`ex.upstream`). Three to eight `Cell` adds.
+#[inline]
 fn record_metrics(
     snap: &CoreSnapshot,
     ex: &Exchange,
@@ -127,7 +138,20 @@ fn record_metrics(
     status: Status,
     end: Instant,
 ) {
-    let _ = (snap, ex, started, status, end);
+    let Some(counters) = &snap.metrics else {
+        return;
+    };
+    counters.request(ex.route, status, end.saturating_duration_since(started.at));
+    if matches!(ex.refused, Some(r) if r.by == RefusedBy::Limit) {
+        counters.limited(ex.route);
+    }
+    if let (Some(origin), Some(answer)) = (ex.origin, ex.upstream.answer.get()) {
+        let took = ex
+            .upstream
+            .answered_at
+            .saturating_sub(ex.upstream.started_at);
+        counters.upstream(origin, answer, Duration::from_micros(u64::from(took)));
+    }
 }
 
 #[cfg(test)]
