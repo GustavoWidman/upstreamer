@@ -284,7 +284,8 @@ pub(crate) struct LimitSpec {
     pub key: Box<str>,
     /// Bucket slots, a power of two of at least 8 (a constant key gets 8: one cache line).
     pub slots: u32,
-    /// Bits of a slot word that hold the arrival time; the rest is the key's fingerprint.
+    /// `k` of the table's time unit, 2^-k seconds: the finest unit in which the step's
+    /// interval and burst still fit the 40-bit arrival times of a slot word.
     pub unit_shift: u8,
 }
 
