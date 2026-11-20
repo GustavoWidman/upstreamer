@@ -1,10 +1,13 @@
 # services.upstreamer: the NixOS module (flake output nixosModules.default), and the checks that
 # evaluate it for the example hosts in ./examples.
 #
-# The module owns everything about the proxy's certificates: which security.acme certs exist
+# A virtual host's certificate comes from one of three places: a NixOS ACME certificate
+# (`tls.acmeCert`, the default), files (`tls.certFile`, `tls.keyFile`), or issuance by the proxy
+# itself (`tls.acme`). For the first the module owns everything: which security.acme certs exist
 # for virtual hosts, their names (derived from the hosts that use them), the group the proxy
 # reads them through, reload on renewal, and boot ordering. lego defaults (DNS provider,
-# credentials, email) stay with the host, in security.acme.defaults.
+# credentials, email) stay with the host, in security.acme.defaults. For the third it provides
+# the proxy a state directory for the account key and the certificates.
 #
 # Routes are typed as JSON values, not as a recursive Nix submodule tree: the schema is
 # defined once, in upstreamer's Rust config types, and the config file is validated at build
@@ -71,21 +74,26 @@
                 type = types.bool;
                 default = true;
                 description = ''
-                  Serve HTTPS (and HTTP/3 when `http3` is on). The certificate is an ACME one
-                  named by `tls.acmeCert` (by default, one named after `serverName`), or the
-                  files `tls.certFile` and `tls.keyFile`. Off: plain HTTP, and the `tls.*`
-                  certificate options must stay unset.
+                  Serve HTTPS (and HTTP/3 when `http3` is on). The certificate is a NixOS ACME one
+                  named by `tls.acmeCert` (by default, one named after `serverName`), the files
+                  `tls.certFile` and `tls.keyFile`, or one the proxy issues itself (`tls.acme`).
+                  Off: plain HTTP, and the `tls.*` certificate options must stay unset.
                 '';
               };
 
               acmeCert = mkOption {
                 type = types.nullOr types.str;
                 default =
-                  if config.tls.enable && config.tls.certFile == null && config.tls.keyFile == null then
+                  if
+                    config.tls.enable
+                    && config.tls.certFile == null
+                    && config.tls.keyFile == null
+                    && config.tls.acme == null
+                  then
                     config.serverName
                   else
                     null;
-                defaultText = lib.literalExpression "serverName, when tls.enable and no certFile or keyFile";
+                defaultText = lib.literalExpression "serverName, when tls.enable and none of certFile, keyFile and acme is set";
                 example = "example.com";
                 description = ''
                   Name of the `security.acme.certs` entry this host's certificate comes from. The
@@ -124,6 +132,59 @@
                 default = null;
                 example = "/var/lib/tailscale/certs/host.tailnet.ts.net.key";
                 description = "PEM private key for `certFile`, as a string path (never copied into the Nix store).";
+              };
+
+              acme = mkOption {
+                type = types.nullOr (
+                  types.submodule {
+                    options = {
+                      email = mkOption {
+                        type = types.str;
+                        example = "ops@example.com";
+                        description = "The contact address of the ACME account the CA registers.";
+                      };
+                      directory = mkOption {
+                        type = types.nullOr types.str;
+                        default = null;
+                        example = "https://acme-staging-v02.api.letsencrypt.org/directory";
+                        description = "The CA's directory URL. Null: Let's Encrypt's production directory.";
+                      };
+                      challenge = mkOption {
+                        type = types.enum [
+                          "http-01"
+                          "tls-alpn-01"
+                        ];
+                        default = "http-01";
+                        description = ''
+                          How the CA validates the host's names. `http-01` fetches a token over
+                          plain HTTP on `services.upstreamer.listen.httpPort`, which the module
+                          opens; `tls-alpn-01` validates over the HTTPS port and needs no plain
+                          HTTP port.
+                        '';
+                      };
+                    };
+                  }
+                );
+                default = null;
+                example = {
+                  email = "ops@example.com";
+                };
+                description = ''
+                  Get this host's certificate from an ACME CA (Let's Encrypt unless `directory`
+                  says otherwise), issued and renewed by the proxy itself, without
+                  `security.acme` and without any DNS provider. The CA reaches the host over
+                  the Internet, so every name of the host (`serverName` and `serverAliases`)
+                  must resolve to this machine and be a plain DNS name: wildcards and IP
+                  addresses cannot be issued this way, and `upstreamer check` rejects them.
+
+                  The account key and the issued certificates are kept in
+                  `services.upstreamer.acme.stateDirectory`. Until the first issuance finishes,
+                  the host's names are answered with a self-signed certificate, and the issued
+                  one replaces it without a reload.
+
+                  An alternative to `acmeCert`, `certFile` and `keyFile`: a host sets one of the
+                  three.
+                '';
               };
 
               redirectHttp = mkOption {
@@ -209,15 +270,22 @@
                 - Actions that change the request or the pending response and continue:
                   `set`, `rewrite`, `stripPrefix`, `tryFiles`, `headers`, `requestHeaders`,
                   `encode`.
+                - `limit = { rate = "50/s"; burst; key; keys; }` takes a token from the bucket of
+                  the request's key (default `"{remote_net}"`: an IPv4 address, or an IPv6
+                  /64) and answers 429 with `Retry-After` through the error routes when it is
+                  empty. It applies to the requests its `when` matches, at its place in the
+                  list.
                 - Actions that answer and end routing: `proxy`, `files`, `respond`, `redirect`,
-                  `error`.
+                  `error`, and `metrics = { }`, which answers with the Prometheus exposition
+                  (see `services.upstreamer.metrics`).
                 - `routes` nests steps; `firstOf` runs only the first step whose `when` holds;
                   `include` splices the steps of a JSON fragment file (a store path, typically
                   generated by a package's build).
 
                 A request that reaches the end without an answer gets 404. Strings are
-                templates (`{host}`, `{path}`, `{query}`, `{remote_host}`, `{scheme}`,
-                `{vars.x}`, and `{re.1}` for a capture of the step's own `pathRegex`).
+                templates (`{host}`, `{path}`, `{query}`, `{remote_host}`, `{remote_net}`,
+                `{scheme}`, `{vars.x}`, and `{re.1}` for a capture of the step's own
+                `pathRegex`; in an error route, `{err.retry_after}`).
 
                 The steps are plain attribute sets serialised to JSON. `upstreamer check`
                 validates them when the system is built, so a mistake fails the build and names
@@ -297,10 +365,25 @@
               description = ''
                 Short form for a reverse-proxy host: appended as the last route step,
                 `{ proxy = <this>; }`. A string is the upstream URL (`http://`, or `https://`
-                for a TLS upstream); an attribute set is the full proxy step (`to`,
-                `tlsSkipVerify`, `headers` for request headers sent upstream, `timeouts`).
+                for a TLS upstream); an attribute set is the full proxy step:
+
+                - `to`: an origin URL, a list of origins (each a URL or `{ url; weight; }`), or
+                  an origin source, `{ kubernetes = { namespace; service or selector; port;
+                  scheme; serverName; }; }` (needs `services.upstreamer.kubernetes.enable`).
+                - `balance`: `"roundRobin"` (the default), `"leastRequests"`, `"p2c"`, or
+                  `{ hash = "<template>"; }` for consistent hashing of a request key such as
+                  `"{cookie.session}"`.
+                - `retries`: further attempts on other origins after a failed attempt of a
+                  request that may be replayed.
+                - `failStatuses`: origin statuses that count as a failed attempt.
+                - `health`: `passive = { maxFails; cooldown; }` ejects an origin after
+                  consecutive failures; `active = { path; interval; timeout; expect;
+                  healthyAfter; unhealthyAfter; host; }` probes it.
+                - `tlsSkipVerify`, `headers` for request headers sent upstream, `timeouts`.
+
                 The client's `Host` is passed through, and `X-Forwarded-For`,
-                `X-Forwarded-Proto` and `X-Forwarded-Host` are set.
+                `X-Forwarded-Proto` and `X-Forwarded-Host` are set. The reference of every key,
+                with its default, is `docs/config.md` in the upstreamer repository.
               '';
             };
           };
@@ -309,6 +392,9 @@
       vhosts = attrValues cfg.virtualHosts;
       tlsHosts = filter (v: v.tls.enable) vhosts;
       acmeHosts = filter (v: v.tls.acmeCert != null) tlsHosts;
+      # Hosts whose certificate the proxy issues itself.
+      selfIssued = filter (v: v.tls.enable && v.tls.acme != null) vhosts;
+      stateDir = cfg.acme.stateDirectory;
       # A name with `*` is not a valid security.acme.certs entry (its unit names would be
       # rejected before any assertion could explain why); the wildcard assertion reports it.
       certNames = filter (c: !(lib.hasInfix "*" c)) (unique (map (v: v.tls.acmeCert) acmeHosts));
@@ -331,11 +417,23 @@
               null
             else
               {
-                cert = if v.tls.certFile != null then v.tls.certFile else "${certDir v.tls.acmeCert}/fullchain.pem";
-                key = if v.tls.keyFile != null then v.tls.keyFile else "${certDir v.tls.acmeCert}/key.pem";
                 redirectHttp = v.tls.redirectHttp && v.listen == [ ];
                 inherit (v) http3;
-              };
+              }
+              // (
+                if v.tls.acme != null then
+                  {
+                    acme = {
+                      inherit (v.tls.acme) email challenge;
+                    }
+                    // optionalAttrs (v.tls.acme.directory != null) { inherit (v.tls.acme) directory; };
+                  }
+                else
+                  {
+                    cert = if v.tls.certFile != null then v.tls.certFile else "${certDir v.tls.acmeCert}/fullchain.pem";
+                    key = if v.tls.keyFile != null then v.tls.keyFile else "${certDir v.tls.acmeCert}/key.pem";
+                  }
+              );
           listen =
             if v.listen == [ ] then
               null
@@ -354,15 +452,34 @@
       # ("-": a directory that does not exist does not fail the unit).
       outsideLogDirs = unique (map dirOf (filter (p: dirOf p != logDir) logPaths));
 
-      settings = recursiveUpdate {
-        version = 1;
-        inherit (cfg) workers http3;
-        listen = {
-          http = defaultAddrs cfg.listen.httpPort;
-          https = defaultAddrs cfg.listen.httpsPort;
-        };
-        sites = mapAttrsToList site cfg.virtualHosts;
-      } cfg.settings;
+      # The metrics endpoint is a site of its own, on its own listener, so no virtual host's
+      # routes, TLS or access rules apply to it.
+      metricsSite = {
+        name = "_metrics";
+        hosts = [ "*" ];
+        tls = null;
+        listen = cfg.metrics.listen;
+        routes = [
+          {
+            when.path = cfg.metrics.path;
+            metrics = { };
+          }
+        ];
+      };
+
+      settings = recursiveUpdate (
+        {
+          version = 1;
+          inherit (cfg) workers http3;
+          listen = {
+            http = defaultAddrs cfg.listen.httpPort;
+            https = defaultAddrs cfg.listen.httpsPort;
+          };
+          sites = mapAttrsToList site cfg.virtualHosts ++ optional cfg.metrics.enable metricsSite;
+        }
+        // optionalAttrs (cfg.trustedProxies != null) { inherit (cfg) trustedProxies; }
+        // optionalAttrs (selfIssued != [ ]) { acme.stateDirectory = stateDir; }
+      ) cfg.settings;
 
       # Validated at build time; a bad route fails the system build, never the running proxy.
       # The firewall ports below are computed here in Nix; `check` compares them with the listeners
@@ -385,11 +502,28 @@
         else
           [ cfg.listen.httpPort ];
 
-      usedPorts = unique (
+      # `http-01` validation arrives on the plain HTTP port.
+      needsHttpPort = v: v.tls.enable && v.tls.acme != null && v.tls.acme.challenge == "http-01";
+
+      # The ports the virtual hosts are served on, and the firewall opens these.
+      hostPorts = unique (
         concatMap (
-          v: ports v ++ optional (v.tls.enable && v.tls.redirectHttp && v.listen == [ ]) cfg.listen.httpPort
+          v:
+          ports v
+          ++ optional (
+            (v.tls.enable && v.tls.redirectHttp && v.listen == [ ]) || needsHttpPort v
+          ) cfg.listen.httpPort
         ) vhosts
       );
+      # "127.0.0.1:9100" and "[::1]:9100" are both port 9100.
+      metricsPorts = unique (
+        map (a: lib.toInt (lib.last (lib.splitString ":" a))) (
+          optionals cfg.metrics.enable cfg.metrics.listen
+        )
+      );
+      # What `check --expect-tcp` compares with the listeners the sites derive.
+      usedPorts = unique (hostPorts ++ metricsPorts);
+      firewallPorts = unique (hostPorts ++ optionals cfg.metrics.openFirewall metricsPorts);
       udpPorts = unique (concatMap (v: optionals (v.tls.enable && v.http3) (ports v)) vhosts);
 
       # "10s" -> 10, "1500ms" -> 2 (rounded up), as the shutdown timeout's type allows.
@@ -413,8 +547,12 @@
 
         package = mkOption {
           type = types.package;
-          default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-          defaultText = lib.literalExpression "upstreamer.packages.\${system}.default";
+          default =
+            if cfg.kubernetes.enable then
+              self.packages.${pkgs.stdenv.hostPlatform.system}.kubernetes
+            else
+              self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+          defaultText = lib.literalExpression "upstreamer.packages.\${system}.default, or .kubernetes when `kubernetes.enable` is set";
           description = "The upstreamer package (also runs `upstreamer check` at build time).";
         };
 
@@ -487,6 +625,108 @@
           '';
         };
 
+        acme.stateDirectory = mkOption {
+          type = types.strMatching "/var/lib/.+";
+          default = "/var/lib/upstreamer";
+          description = ''
+            Where the proxy keeps the account key and the certificates it issues for hosts
+            with `tls.acme`. It is the service's `StateDirectory`, so it lies under `/var/lib`,
+            belongs to the service's dynamic user and is readable by nobody else.
+          '';
+        };
+
+        trustedProxies = mkOption {
+          type = types.nullOr (
+            types.submodule {
+              options = {
+                from = mkOption {
+                  type = types.listOf types.str;
+                  example = [
+                    "cloudflare"
+                    "10.0.0.0/8"
+                  ];
+                  description = ''
+                    The peers whose word about the client's address is believed: CIDR ranges
+                    (`10.0.0.0/8`, `2001:db8::/32`), and `cloudflare` for Cloudflare's published
+                    ranges.
+                  '';
+                };
+                header = mkOption {
+                  type = types.str;
+                  example = "CF-Connecting-IP";
+                  description = ''
+                    The request header that carries the client's address: `CF-Connecting-IP`,
+                    `X-Real-IP`, or `X-Forwarded-For` (its rightmost address that is not itself
+                    a trusted proxy).
+                  '';
+                };
+              };
+            }
+          );
+          default = null;
+          example = {
+            from = [ "cloudflare" ];
+            header = "CF-Connecting-IP";
+          };
+          description = ''
+            Behind a CDN or a load balancer the TCP peer is the proxy in front, not the client.
+            With this set, a request from one of the `from` peers has its client address taken
+            from `header`, and that address is what `{remote_host}` (and `{remote_net}`) expand
+            to, what the access log and the metrics record, and what rate-limit and hash keys
+            see. Requests from any other peer keep their own address and their header is
+            ignored. The peer's own address stays available as `{peer_host}`. Null: the TCP peer
+            is always the client.
+          '';
+        };
+
+        metrics = {
+          enable = mkEnableOption ''
+            Prometheus metrics: a site on `metrics.listen` whose `metrics.path` answers with the
+            exposition. Collection runs only while a metrics step exists, so off costs nothing.
+            Request series are labelled by virtual host, by route step `name`, and by status
+            class'';
+          listen = mkOption {
+            type = types.listOf types.str;
+            default = [
+              "127.0.0.1:9100"
+              "[::1]:9100"
+            ];
+            description = "Addresses of the metrics listener (plain HTTP).";
+          };
+          path = mkOption {
+            type = types.strMatching "/.*";
+            default = "/metrics";
+            description = "Path of the exposition; every other path answers 404.";
+          };
+          openFirewall = mkOption {
+            type = types.bool;
+            default = false;
+            description = ''
+              Open the metrics port. Off by default even when `openFirewall` is on: metrics are
+              for a scraper on this host or on a private network you open yourself.
+            '';
+          };
+        };
+
+        kubernetes = {
+          enable = mkEnableOption ''
+            origins discovered from Kubernetes (`proxy.to.kubernetes`). Switches the default
+            `package` to the build with Kubernetes support'';
+          kubeconfig = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            example = "/etc/rancher/k3s/upstreamer.yaml";
+            description = ''
+              Kubeconfig for the API server, as a string path (never copied to the Nix store).
+              Passed to the unit as a systemd credential, so the dynamic user reads it without
+              a group. The credentials in it must be inline (a bearer `token` or
+              `client-certificate-data` and `client-key-data`): files it names are read by the
+              dynamic user, who may not be able to. Null: the in-cluster service account, for a
+              proxy that runs in a pod.
+            '';
+          };
+        };
+
         settings = mkOption {
           type = types.submodule {
             freeformType = json;
@@ -509,7 +749,8 @@
             Top-level settings of upstreamer's config file, merged over what the module
             generates: `timeouts` (`header`, `keepAlive`, `shutdown`; durations such
             as `"300ms"`, `"5s"`, `"2m"`, `"1h"`) and `limits` (`maxHeadBytes`,
-            `maxHeaderFields`, `maxStreams`).
+            `maxHeaderFields`, `maxStreams`). `docs/config.md` in the upstreamer repository
+            lists every key.
           '';
         };
 
@@ -559,13 +800,22 @@
               [
                 {
                   assertion =
-                    v.tls.enable -> (v.tls.acmeCert != null) != (v.tls.certFile != null && v.tls.keyFile != null);
-                  message = "${at}: set either acmeCert, or both certFile and keyFile.";
+                    v.tls.enable
+                    ->
+                      lib.length (
+                        filter lib.id [
+                          (v.tls.acmeCert != null)
+                          (v.tls.certFile != null && v.tls.keyFile != null)
+                          (v.tls.acme != null)
+                        ]
+                      ) == 1;
+                  message = "${at}: set one of acme, acmeCert, or both certFile and keyFile.";
                 }
                 {
                   assertion =
-                    !v.tls.enable -> v.tls.acmeCert == null && v.tls.certFile == null && v.tls.keyFile == null;
-                  message = "${at}: acmeCert, certFile and keyFile need tls.enable.";
+                    !v.tls.enable
+                    -> v.tls.acmeCert == null && v.tls.certFile == null && v.tls.keyFile == null && v.tls.acme == null;
+                  message = "${at}: acme, acmeCert, certFile and keyFile need tls.enable.";
                 }
                 {
                   assertion = v.tls.acmeCert == null || !(lib.hasInfix "*" v.tls.acmeCert);
@@ -587,6 +837,14 @@
             }
           ) certNames
           ++ [
+            {
+              assertion = !(cfg.metrics.enable && cfg.virtualHosts ? "_metrics");
+              message = "services.upstreamer.virtualHosts: `_metrics` names the site `metrics.enable` adds; give the virtual host another name.";
+            }
+            {
+              assertion = cfg.kubernetes.kubeconfig == null || cfg.kubernetes.enable;
+              message = "services.upstreamer.kubernetes.kubeconfig needs kubernetes.enable.";
+            }
             {
               assertion = !(lib.elem "upstreamer" certGroups);
               message = "services.upstreamer: a certificate group is named upstreamer, the name of the unit's dynamic user and group; systemd will not start the unit while a static group has that name.";
@@ -658,6 +916,13 @@
             RestrictSUIDSGID = true;
             SystemCallArchitectures = "native";
             LogsDirectory = mkIf (logPaths != [ ]) "upstreamer";
+            # The account key and the issued certificates: readable by the service alone.
+            StateDirectory = mkIf (selfIssued != [ ]) (lib.removePrefix "/var/lib/" stateDir);
+            StateDirectoryMode = mkIf (selfIssued != [ ]) "0700";
+            LoadCredential = optional (
+              cfg.kubernetes.kubeconfig != null
+            ) "kubeconfig:${cfg.kubernetes.kubeconfig}";
+            Environment = optional (cfg.kubernetes.kubeconfig != null) "KUBECONFIG=%d/kubeconfig";
             ReadWritePaths = mkIf (outsideLogDirs != [ ]) (map (d: "-${d}") outsideLogDirs);
             # @system-service keeps sched_setaffinity (worker pinning) and setsockopt (kTLS).
             SystemCallFilter = [
@@ -692,7 +957,7 @@
         );
 
         networking.firewall = mkIf cfg.openFirewall {
-          allowedTCPPorts = usedPorts;
+          allowedTCPPorts = firewallPorts;
           allowedUDPPorts = udpPorts;
         };
       };
