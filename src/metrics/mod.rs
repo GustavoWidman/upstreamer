@@ -388,7 +388,9 @@ mod tests {
     }
 
     fn request(conn: &mut TcpStream, path: &str) -> (String, Vec<u8>) {
-        write!(conn, "GET {path} HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+        // One write: a head sent in pieces waits on Nagle and the server's delayed ACK.
+        let head = format!("GET {path} HTTP/1.1\r\nHost: t\r\n\r\n");
+        conn.write_all(head.as_bytes()).unwrap();
         let (head, body) = read_response(conn).unwrap();
         assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
         (head, body)
@@ -753,7 +755,9 @@ mod tests {
         // The first ticks size what each tick reuses.
         std::thread::sleep(Duration::from_millis(2_200));
         warm(&mut conn);
-        let signals = no_signals();
+        let signals = counting(|| {
+            request(&mut conn, "/");
+        });
         let before = served(listen.port(), 0).allocations;
         let requests = 10_000;
         for _ in 0..requests {
