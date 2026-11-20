@@ -29,7 +29,8 @@ impl Compiler<'_> {
     ///
     /// Errors: inside an error route; a rate of 0 or above 10^6/s; a burst of 0;
     /// `burst x interval` above 30 days; `keys` of 0 or above 2^24; a key template reading
-    /// `{re.N}` or `{err.*}`.
+    /// `{re.N}` or `{err.*}`. A constant key with no `when` on the step or around it is
+    /// recorded for the site's `metrics` steps, which warn about it.
     pub(super) fn limit(
         &mut self,
         spec: &Spec,
@@ -101,6 +102,9 @@ impl Compiler<'_> {
         let key = self.key(text, &at.at("key"), scope)?;
         if !valid {
             return None;
+        }
+        if matches!(key, KeyPlan::Const(_)) && self.site.guarded == 0 {
+            self.site.unguarded_limits.push(at.clone());
         }
         let (unit_shift, interval) = unit(u128::from(count), period, u128::from(burst));
         let slots = match key {

@@ -419,6 +419,10 @@ fingerprint share it, about 5 in 10 million new keys. Buckets survive a reload w
 site, position, key and size are unchanged, and are lost on restart. Limits are not shared
 between proxy instances.
 
+`check` warns about a constant-key `limit` with no `when` (on the step or a block around it)
+that comes before a `metrics` step of the same site: every scrape would take a token from the
+bucket the rest of the traffic drains, and be refused with it.
+
 ## Metrics
 
 A `metrics` step answers with the Prometheus text exposition (format 0.0.4), so the endpoint is

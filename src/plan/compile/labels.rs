@@ -50,9 +50,20 @@ impl Compiler<'_> {
     }
 
     /// A `metrics` step: collection is on for the whole plan. Warns when neither the step nor
-    /// an enclosing step has a `when` and the site listens on an address other than loopback.
+    /// an enclosing step has a `when` and the site listens on an address other than loopback,
+    /// and at each earlier unguarded constant-key `limit` of the site, which every scrape
+    /// passes through and shares one bucket with all other traffic.
     pub(super) fn metrics(&mut self, at: &Where) {
         self.metrics = true;
+        for limit in std::mem::take(&mut self.site.unguarded_limits) {
+            self.warn(
+                &limit,
+                format!(
+                    "this limit has one bucket for every request, so it also limits the scrapes of {}; add a `when`",
+                    super::describe(at)
+                ),
+            );
+        }
         if let (0, Some(addr)) = (self.site.guarded, self.site.exposed) {
             self.warn(
                 at,

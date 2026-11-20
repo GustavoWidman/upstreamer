@@ -196,6 +196,9 @@ struct Site {
     guarded: u32,
     /// An address the site listens on that is not loopback, if any.
     exposed: Option<SocketAddr>,
+    /// `limit` steps with a constant key and no `when` on them or around them, met so far:
+    /// they take a token from every request that reaches them, scrapes included.
+    unguarded_limits: Vec<Where>,
 }
 
 /// A value's location: its file (`None`: the config) and JSON pointer.
@@ -1897,6 +1900,47 @@ mod tests {
         labels(&plan, &plan.sites[0].routes, &mut found);
         assert_eq!(found, [None, None, None]);
         assert!(plan.sites.iter().all(|s| s.observe.is_none()));
+    }
+
+    #[test]
+    fn a_constant_limit_without_a_when_before_a_metrics_step_warns() {
+        let warnings = |routes: &str| -> Vec<String> {
+            let (_, warnings) = compile_json(&site(routes), &[]).unwrap();
+            warnings.iter().map(ToString::to_string).collect()
+        };
+        let limit = r#"{"limit":{"rate":"100/s","key":"all"}}"#;
+        let scrape = r#"{"name":"m","when":{"path":"/metrics"},"metrics":{}}"#;
+        assert_eq!(
+            warnings(&format!(r#"[{limit},{scrape},{{"respond":{{}}}}]"#)),
+            [
+                "warning: /sites/0/routes/0/limit: this limit has one bucket for every request, so it also limits the scrapes of /sites/0/routes/1/metrics; add a `when`"
+            ]
+        );
+        assert_eq!(
+            warnings(&format!(
+                r#"[{{"routes":[{limit}]}},{{"routes":[{scrape}]}},{{"respond":{{}}}}]"#
+            ))
+            .len(),
+            1,
+            "a block without a `when` guards nothing"
+        );
+        for quiet in [
+            format!(r#"[{scrape},{limit},{{"respond":{{}}}}]"#),
+            format!(
+                r#"[{{"when":{{"path":"/api/*"}},"limit":{{"rate":"100/s","key":"all"}}}},{scrape},{{"respond":{{}}}}]"#
+            ),
+            format!(
+                r#"[{{"when":{{"path":"/api/*"}},"routes":[{limit}]}},{scrape},{{"respond":{{}}}}]"#
+            ),
+            format!(r#"[{{"limit":{{"rate":"100/s"}}}},{scrape},{{"respond":{{}}}}]"#),
+            format!(r#"[{limit},{{"respond":{{}}}}]"#),
+        ] {
+            assert!(
+                warnings(&quiet).is_empty(),
+                "{quiet}: {:?}",
+                warnings(&quiet)
+            );
+        }
     }
 
     #[test]
