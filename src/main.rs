@@ -131,17 +131,19 @@ fn summary(report: &CheckReport) -> String {
     let mut line = format!("ok: {} sites, {} steps", report.sites, report.steps);
     if costs.pools > 0 {
         line += &format!(
-            ", {} pools ({} origins, {} probed)",
-            costs.pools, costs.origins, costs.probed
+            ", {} ({}, {} probed)",
+            count(costs.pools, "pool"),
+            count(costs.origins, "origin"),
+            costs.probed
         );
     }
     if costs.sources > 0 {
-        line += &format!(", {} discovery sources", costs.sources);
+        line += &format!(", {}", count(costs.sources, "discovery source"));
     }
     if costs.limits > 0 {
         line += &format!(
-            ", {} limits ({} KiB)",
-            costs.limits,
+            ", {} ({} KiB)",
+            count(costs.limits, "limit"),
             costs.limit_bytes.div_ceil(1024)
         );
     }
@@ -149,6 +151,10 @@ fn summary(report: &CheckReport) -> String {
         line += &format!(", metrics on ({series} series)");
     }
     line
+}
+
+fn count(n: usize, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }
 
 fn example(name: Option<&str>) -> ExitCode {
@@ -317,4 +323,52 @@ fn ports(list: &str) -> Result<Vec<u16>, String> {
         .filter(|p| !p.is_empty())
         .map(|p| p.parse().map_err(|_| format!("not a port: {p:?}")))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use upstreamer::Costs;
+
+    fn report(costs: Costs) -> CheckReport {
+        CheckReport {
+            sites: 3,
+            steps: 14,
+            warnings: Vec::new(),
+            costs,
+        }
+    }
+
+    #[test]
+    fn the_summary_says_nothing_of_features_the_config_does_not_use() {
+        assert_eq!(summary(&report(Costs::default())), "ok: 3 sites, 14 steps");
+    }
+
+    #[test]
+    fn the_summary_counts_what_each_feature_costs() {
+        let costs = Costs {
+            pools: 3,
+            origins: 7,
+            probed: 2,
+            limits: 2,
+            limit_bytes: 265 * 1024,
+            series: Some(212),
+            sources: 1,
+        };
+        assert_eq!(
+            summary(&report(costs)),
+            "ok: 3 sites, 14 steps, 3 pools (7 origins, 2 probed), 1 discovery source, \
+             2 limits (265 KiB), metrics on (212 series)"
+        );
+    }
+
+    #[test]
+    fn a_partial_kibibyte_of_buckets_counts_as_a_whole_one() {
+        let costs = Costs {
+            limits: 1,
+            limit_bytes: 1025,
+            ..Costs::default()
+        };
+        assert!(summary(&report(costs)).ends_with("1 limit (2 KiB)"));
+    }
 }
