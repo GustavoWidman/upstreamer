@@ -386,4 +386,98 @@ mod tests {
         }
         assert!(seen >= 7, "the examples directory has {seen} TOML files");
     }
+
+    /// The field names serde lists for an unknown key at each table of the schema, plus the
+    /// action keys and the enum spellings.
+    fn schema_keys() -> Vec<String> {
+        let site =
+            |extra: &str| format!(r#"{{"version":1,"sites":[{{"name":"a","hosts":[]{extra}}}]}}"#);
+        let step = |step: &str| site(&format!(r#","routes":[{step}]"#));
+        let documents = [
+            r#"{"version":1,"zz":1,"sites":[]}"#.to_owned(),
+            r#"{"version":1,"listen":{"zz":1},"sites":[]}"#.to_owned(),
+            r#"{"version":1,"timeouts":{"zz":1},"sites":[]}"#.to_owned(),
+            r#"{"version":1,"limits":{"zz":1},"sites":[]}"#.to_owned(),
+            r#"{"version":1,"trustedProxies":{"from":[],"header":"x","zz":1},"sites":[]}"#
+                .to_owned(),
+            r#"{"version":1,"acme":{"zz":1},"sites":[]}"#.to_owned(),
+            site(r#","zz":1"#),
+            site(r#","tls":{"zz":1}"#),
+            site(r#","tls":{"acme":{"email":"e","zz":1}}"#),
+            site(r#","errors":[{"routes":[],"zz":1}]"#),
+            step(r#"{"when":{"zz":1},"error":404}"#),
+            step(r#"{"proxy":{"to":"http://a:1","zz":1}}"#),
+            step(r#"{"proxy":{"to":"http://a:1","health":{"zz":1}}}"#),
+            step(r#"{"proxy":{"to":"http://a:1","health":{"passive":{"zz":1}}}}"#),
+            step(r#"{"proxy":{"to":"http://a:1","health":{"active":{"path":"/","zz":1}}}}"#),
+            step(r#"{"proxy":{"to":"http://a:1","timeouts":{"zz":1}}}"#),
+            step(r#"{"proxy":{"to":{"kubernetes":{"namespace":"n","port":1,"zz":1}}}}"#),
+            step(r#"{"proxy":{"to":[{"url":"u","weight":1,"zz":1}]}}"#),
+            step(r#"{"limit":{"rate":"1/s","zz":1}}"#),
+            step(r#"{"files":{"root":"/","zz":1}}"#),
+            step(r#"{"respond":{"zz":1}}"#),
+            step(r#"{"redirect":{"to":"/","status":301,"zz":1}}"#),
+            step(r#"{"tryFiles":{"root":"/","paths":[],"zz":1}}"#),
+        ];
+        let mut keys: Vec<String> = Vec::new();
+        for document in &documents {
+            let e = config::parse_config(Format::Json, document.as_bytes())
+                .err()
+                .unwrap_or_else(|| panic!("{document} is a valid config"));
+            let listed = e
+                .message
+                .split_once("expected")
+                .map_or("", |(_, rest)| rest);
+            assert!(listed.contains('`'), "{}: {}", e.pointer, e.message);
+            keys.extend(listed.split('`').skip(1).step_by(2).map(str::to_owned));
+        }
+        let fragment = br#"{"fragment":1,"routes":[],"zz":1}"#;
+        let e = config::parse_fragment(Format::Json, fragment)
+            .err()
+            .unwrap();
+        keys.extend(e.message.split('`').skip(3).step_by(2).map(str::to_owned));
+        keys.extend(config::ACTIONS.iter().map(|a| (*a).to_owned()));
+        keys.extend(
+            [
+                "roundRobin",
+                "leastRequests",
+                "p2c",
+                "hash",
+                "http-01",
+                "tls-alpn-01",
+                "br",
+                "zstd",
+                "gzip",
+            ]
+            .map(str::to_owned),
+        );
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    #[test]
+    fn the_reference_names_every_key_of_the_schema() {
+        let doc =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/config.md"))
+                .unwrap();
+        let keys = schema_keys();
+        assert!(keys.len() > 90, "{} keys: {keys:?}", keys.len());
+        let missing: Vec<&String> = keys
+            .iter()
+            .filter(|k| {
+                let spellings = [
+                    format!("`{k}`"),
+                    format!(".{k}`"),
+                    format!("\"{k}\""),
+                    format!("{k} ="),
+                ];
+                !spellings.iter().any(|spelling| doc.contains(spelling))
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "docs/config.md does not mention {missing:?}"
+        );
+    }
 }
