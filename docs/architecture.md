@@ -1,8 +1,9 @@
 # Architecture
 
-upstreamer is a reverse proxy and static file server for NixOS hosts. You configure it with
-Nix options, the NixOS module writes one JSON file, and `upstreamer check` validates that file
-when the system builds. At run time one thread per CPU serves HTTP/1.1, HTTP/2 and HTTP/3 over
+upstreamer is a reverse proxy and static file server. On NixOS you configure it with Nix
+options, the module writes one JSON file, and `upstreamer check` validates that file when the
+system builds. Anywhere else you write the same schema as a TOML file, which
+[config.md](config.md) documents. At run time one thread per CPU serves HTTP/1.1, HTTP/2 and HTTP/3 over
 TLS, and every protocol feeds the same request pipeline.
 
 Functions whose body is `todo!()` are not built yet. Their doc comments state the contract
@@ -49,6 +50,8 @@ command line.
 |---|---|
 | `src/config/mod.rs` | the schema and its parsers (JSON or TOML by extension), with errors that carry the JSON pointer of the failing value |
 | `src/config/toml.rs` | TOML to the JSON value of the same document, with positions for diagnostics |
+| `src/config/toml/convert.rs` | the conversion itself, and JSON to TOML. It depends on nothing else in the crate: the library reads TOML through it and `src/main.rs` includes it for `upstreamer convert` |
+| `src/main.rs` | the command line: `run`, `check`, `example` and `convert`, and the summary `check` prints |
 | `src/config/trust.rs`, `src/config/acme.rs` | the schema of `trustedProxies` and of in-process ACME |
 | `src/plan/mod.rs` | the compiled plan's types and `Diagnostic` |
 | `src/plan/load.rs` | reading a config into a plan for `run` and `check`, locating diagnostics, `check`'s costs |
@@ -185,7 +188,26 @@ gets an in-memory self-signed certificate for that name, until a reload finds a 
 The NixOS module reloads the service when ACME renews a certificate, and reload re-reads every
 pair.
 
-## Configuration and Nix
+## Configuration, TOML and Nix
+
+One schema, two syntaxes. The format follows the file's extension (`config::Format::of`).
+`config::parse_config` reads JSON straight from its bytes, so serde_json's errors keep their
+line and column. For TOML it first converts the document to a `serde_json::Value`
+(`config::toml::to_json`) and runs the same deserializer over that value, so TOML cannot mean
+something JSON could not, and every diagnostic has the same pointer, site, step and message in
+both. The conversion also records where each value starts in the text, by JSON pointer.
+`Diagnostic::locate` appends the position of the value a pointer names, or of its nearest
+ancestor that has one, so a key the schema missed points at its table.
+
+The only two differences are inherent. A TOML table has no `null`, so a header removal is
+`false` (the schema reads `null` and `false` alike there). And `serde_json::Value` orders keys
+alphabetically while a JSON file keeps its own order, so when one table has several mistakes the
+TOML diagnostic names the one that sorts first.
+
+`upstreamer convert` is the same conversion exposed: a `.toml` input becomes JSON, anything else
+becomes TOML, and it writes `null` as `false` in a header map and drops it elsewhere.
+`upstreamer example` prints one of the files in `examples/`, which `include_str!` embeds in the
+binary and the tests check.
 
 The NixOS module lives in `nix/module.nix`. Virtual hosts are Nix options. Routes are JSON
 values in the schema of `src/config/mod.rs`, and the module does not restate that schema in Nix.
@@ -193,6 +215,15 @@ The module writes the config with `builtins.toJSON` and runs `upstreamer check` 
 the system builds, so a bad route fails the build with its JSON pointer and step name. A
 package can generate route fragments at build time, and a host names them with an `include`
 step, so Nix never reads the generated file.
+
+The module's options for features beyond virtual hosts are `metrics.*` (a `_metrics` site on its
+own listener, whose port the module passes to `check --expect-tcp` and keeps out of the
+firewall unless `metrics.openFirewall`), `kubernetes.*` (the package with the feature, and the
+kubeconfig as a systemd credential), `trustedProxies`, and per host `tls.acme` with the
+top-level `acme.stateDirectory` (in-process ACME instead of a `security.acme` certificate, with
+the unit's `StateDirectory`). A host sets one certificate source: `acme`, `acmeCert`, or
+`certFile` with `keyFile`. Load balancing, health and limits are keys of the route steps and
+need no option.
 
 The flake is built from these files:
 
@@ -205,8 +236,11 @@ The flake is built from these files:
 - `nix/examples/` holds example hosts and the checks that evaluate the module for them.
 
 `checks.<system>.module-eval` evaluates each example host without building anything. It
-compares the certificates, groups, unit, firewall and kernel modules the module derives with
-expected values, and the emitted config with `tests/fixtures/config/<host>.json`. After you
+compares the certificates, groups, unit, firewall, the ports given to `check` and the kernel
+modules the module derives with expected values, and the emitted config with
+`tests/fixtures/config/<host>.json`. It also evaluates single options (the metrics site and its
+ports, the Kubernetes credential, in-process ACME, trusted proxies) and the assertions that
+reject conflicting settings. After you
 change the module or an example host, run `fixtures` in the dev shell to rewrite those files.
 On Linux, `checks.<system>.module-config` also builds each example's checked config file.
 
@@ -222,5 +256,8 @@ nix flake check --no-build
 ```
 
 `tests/check.rs` runs `check` on the example configs and on the generated fragments in
-`tests/fixtures/site/upstreamer`, where `@out@` stands for the site package's store path.
-`tests/cli.rs` covers the exit codes of the command line.
+`tests/fixtures/site/upstreamer`, where `@out@` stands for the site package's store path. It
+holds twenty mistakes that give the same diagnostics from JSON and from TOML, and the positions
+TOML diagnostics must name. Compiling every fixture written as TOML to a plan equal to the JSON
+one is a unit test in `src/plan/load.rs`. `tests/cli.rs` covers the command line: exit codes,
+`.toml` files, `example` and `convert`.
