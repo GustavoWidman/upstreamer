@@ -1,0 +1,47 @@
+# What upstreamer's Kubernetes discovery needs: read and watch EndpointSlices in each namespace a
+# `proxy.to.kubernetes` source names. Nothing cluster-wide, nothing writable, no Secrets, no Services
+# (a `selector` source matches the labels the EndpointSlice controller copies from each Service
+# onto its slices, so it does not read Services either).
+#
+# The same Role and RoleBinding go in every namespace a source names.
+#
+# Running as a pod: use the ServiceAccount below as the pod's serviceAccountName. Upstreamer
+# reads the projected token and CA from /var/run/secrets/kubernetes.io/serviceaccount and reads
+# the token file again whenever the kubelet rotates it.
+#
+# Running outside the cluster: give upstreamer a kubeconfig whose user is this ServiceAccount's
+# token, for instance
+#
+#   kubectl -n shop create token upstreamer --duration=8760h
+#
+# (a bearer token or a client certificate; `exec` and `auth-provider` plugins, which OIDC and
+# cloud CLIs use, are not supported). On NixOS: services.upstreamer.kubernetes.kubeconfig.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: upstreamer
+  namespace: shop
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: upstreamer-discovery
+  namespace: shop
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: upstreamer-discovery
+  namespace: shop
+subjects:
+  - kind: ServiceAccount
+    name: upstreamer
+    namespace: shop
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: upstreamer-discovery
