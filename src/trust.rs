@@ -842,6 +842,39 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_and_hash_keys_see_the_client() {
+        use crate::key::hash;
+        use crate::plan::KeyPlan;
+        let plan = plan("CF-Connecting-IP", CF);
+        let key = |plan: Option<&TrustPlan>, peer: &str, forwarded: &[(&str, &str)]| {
+            let mut ex = exchange(peer, forwarded);
+            if let Some(plan) = plan {
+                resolve(plan, &mut ex);
+            }
+            (
+                hash(&KeyPlan::RemoteHost, &mut ex, 7),
+                hash(&KeyPlan::RemoteNet, &mut ex, 7),
+            )
+        };
+        let forwarded = [("CF-Connecting-IP", "2001:db8:1:2::9")];
+        assert_eq!(
+            key(Some(&plan), "103.21.244.9", &forwarded),
+            key(None, "2001:db8:1:2::9", &[]),
+            "keyed by the forwarded client"
+        );
+        assert_ne!(
+            key(Some(&plan), "103.21.244.9", &forwarded),
+            key(None, "103.21.244.9", &[]),
+            "not by the edge"
+        );
+        assert_eq!(
+            key(Some(&plan), "203.0.113.5", &forwarded),
+            key(None, "203.0.113.5", &[]),
+            "an untrusted peer is keyed by itself"
+        );
+    }
+
+    #[test]
     fn resolving_and_forwarding_allocate_nothing_after_warm_up() {
         let plan = plan("X-Forwarded-For", &["10.0.0.0/8", "2400:cb00::/32"]);
         let t = Template::from_parts(vec![Part::Ph(Placeholder::ForwardedFor)]);
