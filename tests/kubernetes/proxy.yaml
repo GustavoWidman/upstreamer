@@ -1,6 +1,9 @@
 # upstreamer as a pod of the cluster it discovers in (the in-cluster service account, with only
 # the Role of docs/kubernetes-rbac.yaml), proxying to Service `web`, and a client that sends
-# a request every 50 ms and prints each status.
+# a request every 50 ms and prints each status. A pod that a rollout stops can still be in the
+# discovered set for the moment its EndpointSlice change takes to arrive, and once its network
+# is gone a dial to it hears nothing; the 1 s dial timeout, generous inside a cluster, lets the
+# retry reach another pod well within the client's 5 s.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -19,6 +22,7 @@ data:
           "proxy": {
             "to": {"kubernetes": {"namespace": "shop", "service": "web", "port": "http"}},
             "retries": 1,
+            "timeouts": {"dial": "1s"},
             "health": {"passive": {"maxFails": 1, "cooldown": "5s"}}
           }
         }]
