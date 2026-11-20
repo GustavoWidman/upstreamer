@@ -470,7 +470,7 @@ fn monotonic_usec() -> u64 {
 mod tests {
     use super::*;
     use crate::runtime::testing::{
-        connect, disruptive_section, free_addr, get, plan, read_response,
+        connect, disruptive_section, free_addr, get, listening_here, plan, read_response,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -547,6 +547,10 @@ mod tests {
             }
         });
         assert_eq!(recv(&notifications), "READY=1\nSTATUS=serving generation 1");
+        assert!(
+            listening_here(a) && listening_here(b),
+            "both listeners are bound"
+        );
 
         let stop = Arc::new(AtomicBool::new(false));
         let hammered = Arc::new(AtomicUsize::new(0));
@@ -595,7 +599,7 @@ mod tests {
             format!("READY=1\nSTATUS=serving generation {}", RELOADS + 1)
         );
         assert!(
-            std::net::TcpStream::connect(a).is_err(),
+            !listening_here(a),
             "the listener the reload removed is closed"
         );
         std::io::Write::write_all(&mut keep_alive, b"GET / HTTP/1.1\r\nHost: test\r\n\r\n")
@@ -638,7 +642,10 @@ mod tests {
             0,
             "drain closes idle connections"
         );
-        assert!(std::net::TcpStream::connect(b).is_err());
+        assert!(
+            !listening_here(b),
+            "every listener is closed once serve returns"
+        );
         assert_eq!(
             *attempts.lock().unwrap(),
             (1..=RELOADS + 2).collect::<Vec<_>>()

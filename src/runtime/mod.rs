@@ -1055,6 +1055,48 @@ pub(crate) mod testing {
         conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         conn
     }
+
+    /// Whether a socket of this process listens on TCP `addr`: a stream socket bound to it
+    /// without a peer (accepted connections have one). A connect cannot tell: with
+    /// `SO_REUSEPORT`, any process of the same user (another test binary, say) may listen on
+    /// the same port and accept it.
+    pub fn listening_here(addr: SocketAddr) -> bool {
+        let address = |fd, call: unsafe extern "C" fn(_, _, _) -> _| {
+            // SAFETY: `try_init` hands a zeroed storage and its length to the call; a closed
+            // fd only fails.
+            unsafe {
+                socket2::SockAddr::try_init(|storage, len| {
+                    if call(fd, storage.cast(), len) == 0 {
+                        Ok(())
+                    } else {
+                        Err(io::Error::last_os_error())
+                    }
+                })
+            }
+            .ok()
+            .and_then(|(_, a)| a.as_socket())
+        };
+        // SAFETY: getdtablesize has no preconditions.
+        let max = unsafe { libc::getdtablesize() };
+        (0..max).any(|fd| {
+            let mut kind: libc::c_int = 0;
+            let mut len = size_of::<libc::c_int>() as libc::socklen_t;
+            // SAFETY: the option buffer and its length match; a closed fd only fails.
+            let stream = unsafe {
+                libc::getsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_TYPE,
+                    (&raw mut kind).cast(),
+                    &mut len,
+                )
+            } == 0
+                && kind == libc::SOCK_STREAM;
+            stream
+                && address(fd, libc::getsockname) == Some(addr)
+                && address(fd, libc::getpeername).is_none()
+        })
+    }
 }
 
 #[cfg(test)]
