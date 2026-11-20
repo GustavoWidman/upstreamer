@@ -448,10 +448,15 @@ impl Core {
             self.drain_started.notified().await;
         }
     }
-    /// Counts a connection until the guard drops, so draining knows when the core is empty.
-    fn track(self: &Rc<Self>) -> ConnGuard {
+    /// Counts a connection accepted on `key` until the guard drops, so draining knows when
+    /// the core is empty and the listener's metrics count it as closed.
+    fn track(self: &Rc<Self>, key: ListenerKey) -> ConnGuard {
+        self.connections.accepted(key);
         self.conns.set(self.conns.get() + 1);
-        ConnGuard { core: self.clone() }
+        ConnGuard {
+            core: self.clone(),
+            key,
+        }
     }
     /// Stops accepting, wakes idle connections so they close, and waits for the others to
     /// finish until `deadline`. Whatever is still open then is cut when the runtime drops.
@@ -526,8 +531,7 @@ async fn close(listeners: Vec<Bound>) {
 /// Accept loop of one QUIC endpoint: a local task per incoming connection.
 async fn quic_accept_loop(core: Rc<Core>, key: ListenerKey, endpoint: quinn::Endpoint) {
     while let Some(incoming) = endpoint.accept().await {
-        core.connections.accepted(key);
-        let guard = core.track();
+        let guard = core.track(key);
         let core = core.clone();
         tokio::task::spawn_local(async move {
             crate::proto::h3::serve(core, incoming, key).await;
@@ -538,10 +542,12 @@ async fn quic_accept_loop(core: Rc<Core>, key: ListenerKey, endpoint: quinn::End
 
 struct ConnGuard {
     core: Rc<Core>,
+    key: ListenerKey,
 }
 
 impl Drop for ConnGuard {
     fn drop(&mut self) {
+        self.core.connections.closed(self.key);
         let left = self.core.conns.get() - 1;
         self.core.conns.set(left);
         if left == 0 && self.core.draining.get() {
@@ -775,8 +781,7 @@ async fn accept_loop(core: Rc<Core>, listener: Listener) {
             proto: Proto::H1,
             listener: key,
         };
-        core.connections.accepted(key);
-        let guard = core.track();
+        let guard = core.track(key);
         tokio::task::spawn_local(connection(core.clone(), sock, info, guard));
     }
 }

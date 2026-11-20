@@ -615,6 +615,36 @@ mod tests {
     }
 
     #[test]
+    fn a_closed_connection_leaves_the_open_gauge_and_stays_in_the_total() {
+        let listen = free_addr();
+        let workers = spawn_workers(
+            &[allowed_cpus()[0]],
+            generation(1, &config(listen, origin(), "web")),
+        )
+        .unwrap();
+        let mut kept = connect(listen);
+        let mut closed = connect(listen);
+        request(&mut closed, "/");
+        drop(closed);
+        let name = format!("{listen}/tcp");
+        let on_listener = |s: &Sample| s.label("listener") == Some(name.as_str());
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        let (open, accepted) = loop {
+            let (_, body) = request(&mut kept, "/metrics");
+            let (_, samples) = parse(&String::from_utf8(body).unwrap());
+            let open = total(&samples, "upstreamer_connections_open", on_listener);
+            let all = total(&samples, "upstreamer_connections_total", on_listener);
+            if open == 1.0 || Instant::now() > deadline {
+                break (open, all);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        stop(workers, Instant::now());
+        assert_eq!(open, 1.0, "only the scraping connection is open");
+        assert_eq!(accepted, 2.0, "both connections were accepted");
+    }
+
+    #[test]
     fn counts_are_exact_across_reloads_and_discovery_epochs() {
         let listen = free_addr();
         let origin = origin();
