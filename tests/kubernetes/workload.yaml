@@ -1,0 +1,46 @@
+# What the discovery tests watch: three pods behind Service `web` in namespace `shop`. The
+# Service's label is what a `selector` source matches (the EndpointSlice controller copies it
+# onto the slices). maxUnavailable 0 makes a rollout keep at least one ready pod.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shop
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: shop
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: web}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      terminationGracePeriodSeconds: 2
+      containers:
+        - name: web
+          image: registry.k8s.io/e2e-test-images/agnhost:2.47
+          args: ["netexec", "--http-port=8080"]
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: shop
+  labels:
+    upstreamer.example/pool: web
+spec:
+  selector: {app: web}
+  ports:
+    - {name: http, port: 80, targetPort: http}

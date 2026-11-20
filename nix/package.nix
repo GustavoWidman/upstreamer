@@ -48,10 +48,13 @@
         );
       # RUSTFLAGS reach the dependencies too, so profile-guided builds instrument and optimise
       # them along with upstreamer itself.
+      #
+      # `extra` selects a variant: cargoExtraArgs with the cargo features it builds.
       depsWith =
-        rustflags:
+        extra: rustflags:
         craneLib.buildDepsOnly (
           removeAttrs args [ "src" ]
+          // extra
           // lib.optionalAttrs (rustflags != null) { RUSTFLAGS = rustflags; }
           // {
             pname = "upstreamer";
@@ -70,15 +73,16 @@
           }
         );
 
-      cargoArtifacts = depsWith null;
+      cargoArtifacts = depsWith { } null;
 
       packageWith =
-        rustflags:
+        extra: rustflags:
         craneLib.buildPackage (
           args
+          // extra
           // lib.optionalAttrs (rustflags != null) { RUSTFLAGS = rustflags; }
           // {
-            cargoArtifacts = depsWith rustflags;
+            cargoArtifacts = depsWith extra rustflags;
             # checks.upstreamer-test runs the tests.
             doCheck = false;
             meta = {
@@ -90,32 +94,66 @@
         );
 
       # Linux builds are profile-guided (nix/pgo.nix). The instrumented build writes its counters
-      # where LLVM_PROFILE_FILE says when the training runs.
-      profile = import ./pgo.nix {
-        inherit pkgs craneLib;
-        inherit (toolchain) llvm-tools;
-        instrumented = packageWith "-Cprofile-generate=/build/pgo";
-      };
-      upstreamer =
+      # where LLVM_PROFILE_FILE says when the training runs. Each variant trains its own profile.
+      variant =
+        extra:
+        let
+          profile = import ./pgo.nix {
+            inherit pkgs craneLib;
+            inherit (toolchain) llvm-tools;
+            instrumented = packageWith extra "-Cprofile-generate=/build/pgo";
+          };
+        in
         if pkgs.stdenv.hostPlatform.isLinux then
-          packageWith "-Cprofile-use=${profile}"
+          packageWith extra "-Cprofile-use=${profile}"
         else
-          packageWith null;
+          packageWith extra null;
+      upstreamer = variant { };
+
+      # Origins from Kubernetes EndpointSlices (`proxy.to.kubernetes`): the default build with
+      # the `kubernetes` cargo feature, which adds the discovery thread and its API client.
+      kubernetesArgs = {
+        cargoExtraArgs = "--locked --features kubernetes";
+      };
+      kubernetes = variant kubernetesArgs;
     in
     {
       packages = {
-        inherit upstreamer;
+        inherit upstreamer kubernetes;
         default = upstreamer;
+      }
+      // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+        # The `kubernetes` variant as a container image: tests/kubernetes runs it as a pod.
+        kubernetes-image = pkgs.dockerTools.buildLayeredImage {
+          name = "upstreamer";
+          tag = "kubernetes";
+          compressor = "none";
+          config.Entrypoint = [ (lib.getExe kubernetes) ];
+        };
       };
 
       checks = {
-        inherit upstreamer;
+        inherit upstreamer kubernetes;
         upstreamer-test = craneLib.cargoTest (args // { inherit cargoArtifacts; });
         upstreamer-clippy = craneLib.cargoClippy (
           args
           // {
             inherit cargoArtifacts;
             cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+          }
+        );
+        upstreamer-test-kubernetes = craneLib.cargoTest (
+          args
+          // kubernetesArgs
+          // {
+            cargoArtifacts = depsWith kubernetesArgs null;
+          }
+        );
+        upstreamer-clippy-kubernetes = craneLib.cargoClippy (
+          args
+          // {
+            cargoArtifacts = depsWith kubernetesArgs null;
+            cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
           }
         );
         upstreamer-fmt = craneLib.cargoFmt { inherit (args) src; };

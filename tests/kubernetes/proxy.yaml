@@ -1,0 +1,84 @@
+# upstreamer as a pod of the cluster it discovers in (the in-cluster service account, with only
+# the Role of docs/kubernetes-rbac.yaml), proxying to Service `web`, and a client that sends
+# a request every 50 ms and prints each status.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: upstreamer
+  namespace: shop
+data:
+  config.json: |
+    {
+      "version": 1,
+      "workers": 1,
+      "sites": [{
+        "name": "shop",
+        "hosts": ["*"],
+        "listen": ["0.0.0.0:8080"],
+        "routes": [{
+          "proxy": {
+            "to": {"kubernetes": {"namespace": "shop", "service": "web", "port": "http"}},
+            "retries": 1,
+            "health": {"passive": {"maxFails": 1, "cooldown": "5s"}}
+          }
+        }]
+      }]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: upstreamer
+  namespace: shop
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: upstreamer}
+  template:
+    metadata:
+      labels: {app: upstreamer}
+    spec:
+      serviceAccountName: upstreamer
+      containers:
+        - name: upstreamer
+          image: upstreamer:kubernetes
+          imagePullPolicy: Never
+          args: ["run", "--config", "/etc/upstreamer/config.json"]
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 1
+          volumeMounts:
+            - {name: config, mountPath: /etc/upstreamer}
+      volumes:
+        - name: config
+          configMap: {name: upstreamer}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: upstreamer
+  namespace: shop
+spec:
+  selector: {app: upstreamer}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: loadgen
+  namespace: shop
+spec:
+  containers:
+    - name: curl
+      image: docker.io/curlimages/curl:8.11.1
+      command:
+        - sh
+        - -c
+        - |
+          while true; do
+            curl -s -o /dev/null -m 5 -w '%{http_code}\n' http://upstreamer:8080/hostname
+            sleep 0.05
+          done

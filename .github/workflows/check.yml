@@ -145,3 +145,43 @@ jobs:
               command -v pebble pebble-challtestsrv promtool
               UPSTREAMER_REQUIRE_PROMTOOL=1 cargo test --locked
             '
+
+  # The default build compiles none of the Kubernetes client, so the checks above never see it.
+  kubernetes:
+    name: cargo test --features kubernetes
+    if: ${{ !inputs.skip-nix }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: nixbuild/nix-quick-install-action@v34
+        with:
+          nix_conf: |
+            substituters = https://cache.nixos.org/ https://cache.r3dlust.com
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= cache.r3dlust.com-1:Wdkf9mes2ued0P7C7CL3Jax1b4KPuJwQpM3h4G/Z+yI=
+      - name: Test and lint with the Kubernetes client built in
+        run: |
+          nix develop --command bash -euo pipefail -c '
+            cargo test --locked --features kubernetes
+            cargo clippy --locked --all-targets --all-features -- --deny warnings
+            # The default build has no Kubernetes dependency in its graph.
+            ! cargo tree --locked -e normal | grep -q saphyr
+          '
+
+  # Discovery against a real API server: kind on the runner's docker, the Role of
+  # docs/kubernetes-rbac.yaml and nothing more (tests/kubernetes/run.sh).
+  kind:
+    name: kind e2e
+    if: ${{ !inputs.skip-nix }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: nixbuild/nix-quick-install-action@v34
+        with:
+          nix_conf: |
+            substituters = https://cache.nixos.org/ https://cache.r3dlust.com
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= cache.r3dlust.com-1:Wdkf9mes2ued0P7C7CL3Jax1b4KPuJwQpM3h4G/Z+yI=
+      - name: Run the client against a kind cluster
+        run: |
+          nix shell --inputs-from . nixpkgs#kind nixpkgs#kubectl --command \
+            nix develop --command tests/kubernetes/run.sh client
