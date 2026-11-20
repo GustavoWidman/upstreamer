@@ -134,13 +134,14 @@ jobs:
           nix_conf: |
             substituters = https://cache.nixos.org/ https://cache.r3dlust.com
             trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= cache.r3dlust.com-1:Wdkf9mes2ued0P7C7CL3Jax1b4KPuJwQpM3h4G/Z+yI=
-      - name: Run every test in the dev shell, with Caddy, h2load and an HTTP/3 curl
+      - name: Run every test in the dev shell, with Caddy, h2load, an HTTP/3 curl, pebble and promtool
         run: |
-          nix shell --inputs-from . nixpkgs#caddy nixpkgs#nghttp2 nixpkgs#curl --command \
+          nix shell --inputs-from . nixpkgs#caddy nixpkgs#nghttp2 nixpkgs#curl nixpkgs#pebble nixpkgs#prometheus.cli --command \
             nix develop --command bash -euo pipefail -c '
               # A missing tool makes its tests skip rather than fail.
               caddy version
               h2load --version
               curl --version | grep -qw HTTP3 || { echo "::error::curl is built without HTTP/3"; exit 1; }
-              cargo test --locked
+              command -v pebble pebble-challtestsrv promtool
+              UPSTREAMER_REQUIRE_PROMTOOL=1 cargo test --locked
             '
