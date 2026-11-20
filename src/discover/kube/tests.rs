@@ -718,11 +718,16 @@ async fn a_failing_server_is_unreachable_then_synced_with_growing_pauses() {
     assert!(
         matches!(&waiting.state, SourceState::Unreachable { error, .. } if error.contains("first list"))
     );
+    let failed = source.next().await;
+    assert!(
+        matches!(&failed.state, SourceState::Unreachable { error, .. } if error.contains("HTTP 503 etcd is down")),
+        "the first failure replaces the placeholder with its cause: {failed:?}"
+    );
     let found = source.next().await;
     assert_eq!(
         synced(&found),
         [sa("10.0.0.1:80")],
-        "no report per failed attempt, one when it works"
+        "no report per repeated failure, one when it works"
     );
 
     let gaps: Vec<Duration> = fake.lists().windows(2).map(|w| w[1].at - w[0].at).collect();
@@ -1155,6 +1160,11 @@ mod tls {
         let load: Loader = Arc::new(move || config::from_kubeconfig(&path));
         let mut source = Source::with_loader(load, web(), quick());
         source.next().await;
+        let refused = source.next().await;
+        assert!(
+            matches!(&refused.state, SourceState::Unreachable { error, .. } if error.contains("certificate")),
+            "the handshake fails on the certificate: {refused:?}"
+        );
         source.silent_for(Duration::from_millis(600)).await;
         assert_eq!(
             fake.lists().len(),

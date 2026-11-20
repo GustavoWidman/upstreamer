@@ -28,6 +28,8 @@
 mod api;
 mod config;
 #[cfg(test)]
+mod kind;
+#[cfg(test)]
 mod tests;
 
 use super::{Found, SourceKey, SourceState};
@@ -143,6 +145,7 @@ async fn watch(source: Arc<KubeWatch>, load: Loader, timing: Timing, out: Unboun
         version: String::new(),
         reported: None,
         unreachable_since: None,
+        unreachable_error: String::new(),
         dirty_since: None,
         events: 0,
         backoff: Backoff::new(timing),
@@ -183,6 +186,8 @@ struct Run {
     /// The set the control thread last got.
     reported: Option<Arc<[SocketAddr]>>,
     unreachable_since: Option<SystemTime>,
+    /// Why the control thread last heard the source was unreachable.
+    unreachable_error: String,
     /// When the oldest change not yet reported happened.
     dirty_since: Option<Instant>,
     /// Watch events handled, for telling a relist that made progress from one that did not.
@@ -374,14 +379,15 @@ impl Run {
         });
     }
 
-    /// Reports the source unreachable with the endpoints the control thread already has, once
-    /// per outage.
+    /// Reports the source unreachable with the endpoints the control thread already has: on
+    /// the first failure of an outage, and again when the cause changes (the placeholder
+    /// that stands for "no list yet" gives way to the real error).
     fn send_unreachable(&mut self, error: String) {
-        if self.unreachable_since.is_some() {
+        if self.unreachable_since.is_some() && self.unreachable_error == error {
             return;
         }
-        let since = SystemTime::now();
-        self.unreachable_since = Some(since);
+        let since = *self.unreachable_since.get_or_insert_with(SystemTime::now);
+        self.unreachable_error.clone_from(&error);
         let endpoints = self.reported.get_or_insert_with(|| Arc::from([])).clone();
         let _ = self.out.send(Found {
             source: self.key.clone(),
