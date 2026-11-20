@@ -113,20 +113,41 @@ impl Feed {
     }
 }
 
-/// Appends to the systemd status line what is wrong with the sources: those that never
-/// synced, or lost their API server.
+/// Appends to the systemd status line what is wrong with the sources: those that have not
+/// reported yet, and those that lost their API server, with the error and since when.
 pub(crate) fn status(registry: &crate::upstream::Registry, out: &mut String) {
-    let mut unsynced: Vec<String> = registry
+    use std::fmt::Write;
+    let mut wrong: Vec<(String, &Option<SourceState>)> = registry
         .sources()
-        .filter(|(_, endpoints)| !endpoints.synced)
-        .map(|(source, _)| source.label())
+        .filter(|(_, endpoints)| !endpoints.synced())
+        .map(|(source, endpoints)| (source.label(), &endpoints.state))
         .collect();
-    unsynced.sort();
-    for label in unsynced {
-        out.push_str("; discovery source ");
-        out.push_str(&label);
-        out.push_str(" is not synced");
+    wrong.sort_by(|a, b| a.0.cmp(&b.0));
+    for (label, state) in wrong {
+        let _ = match state {
+            Some(SourceState::Unreachable { since, error }) => write!(
+                out,
+                "; discovery source {label} unreachable since {}: {error}",
+                utc(*since)
+            ),
+            _ => write!(out, "; discovery source {label} has not synced yet"),
+        };
     }
+}
+
+/// `2026-03-01T12:00:05Z`.
+fn utc(at: std::time::SystemTime) -> String {
+    let secs = at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let (year, month, day) = crate::runtime::civil(secs.div_euclid(86_400));
+    let t = secs.rem_euclid(86_400);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        t / 3600,
+        t / 60 % 60,
+        t % 60
+    )
 }
 
 /// The sources' state, for `upstreamer_discovery_*`.
@@ -137,7 +158,7 @@ pub(crate) fn publish(registry: &crate::upstream::Registry, hub: &crate::metrics
             (
                 Arc::from(source.label()),
                 endpoints.addrs.len(),
-                endpoints.synced,
+                endpoints.synced(),
             )
         })
         .collect();
@@ -171,6 +192,94 @@ mod tests {
         assert_eq!(
             key(KubeSelect::Labels("app=web".into()), KubePort::Number(8080)).label(),
             "kubernetes:shop/app=web:8080"
+        );
+    }
+
+    #[cfg(feature = "kubernetes")]
+    /// A plan whose one pool is fed by the source `shop/web:8080`.
+    fn plan_with_source() -> crate::plan::Plan {
+        crate::runtime::testing::plan_from(
+            1,
+            &serde_json::json!({
+                "version": 1,
+                "listen": { "http": ["127.0.0.1:1"] },
+                "sites": [{ "name": "a", "hosts": ["*"], "routes": [{ "proxy": { "to": {
+                    "kubernetes": { "namespace": "shop", "service": "web", "port": 8080 },
+                } } }] }],
+            }),
+        )
+    }
+
+    #[cfg(feature = "kubernetes")]
+    fn status_of(registry: &crate::upstream::Registry) -> String {
+        let mut out = String::new();
+        status(registry, &mut out);
+        out
+    }
+
+    #[cfg(feature = "kubernetes")]
+    #[test]
+    fn the_status_line_says_why_and_since_when_a_source_is_unreachable() {
+        let plan = plan_with_source();
+        let source = key(KubeSelect::Service("web".into()), KubePort::Number(8080));
+        let mut registry = crate::upstream::Registry::new(1);
+        registry.build(&plan);
+        assert_eq!(
+            status_of(&registry),
+            "; discovery source kubernetes:shop/web:8080 has not synced yet"
+        );
+        let report = |state| Found {
+            source: source.clone(),
+            endpoints: Arc::from(["10.1.0.5:8080".parse().unwrap()]),
+            state,
+        };
+        registry.discovered(&plan, report(SourceState::Synced));
+        assert_eq!(status_of(&registry), "", "a synced source is not news");
+        let since = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_772_366_405);
+        registry.discovered(
+            &plan,
+            report(SourceState::Unreachable {
+                since,
+                error: "HTTP 503 etcd is down".into(),
+            }),
+        );
+        assert_eq!(
+            status_of(&registry),
+            "; discovery source kubernetes:shop/web:8080 unreachable since \
+             2026-03-01T12:00:05Z: HTTP 503 etcd is down"
+        );
+    }
+
+    #[cfg(feature = "kubernetes")]
+    #[test]
+    fn every_source_of_the_plan_has_discovery_samples_from_the_start() {
+        let plan = plan_with_source();
+        let mut registry = crate::upstream::Registry::new(1);
+        registry.build(&plan);
+        let hub = crate::metrics::Hub::new(1);
+        publish(&registry, &hub);
+        assert_eq!(
+            hub.control().sources,
+            [(Arc::from("kubernetes:shop/web:8080"), 0, false)],
+            "a source that has not reported is there, empty and not synced"
+        );
+        let source = key(KubeSelect::Service("web".into()), KubePort::Number(8080));
+        let endpoints: Arc<[SocketAddr]> = Arc::from([
+            "10.1.0.5:8080".parse().unwrap(),
+            "10.1.0.6:8080".parse().unwrap(),
+        ]);
+        registry.discovered(
+            &plan,
+            Found {
+                source,
+                endpoints,
+                state: SourceState::Synced,
+            },
+        );
+        publish(&registry, &hub);
+        assert_eq!(
+            hub.control().sources,
+            [(Arc::from("kubernetes:shop/web:8080"), 2, true)]
         );
     }
 

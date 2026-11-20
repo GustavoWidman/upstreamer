@@ -122,7 +122,14 @@ impl Members {
 #[derive(Clone, Debug)]
 pub(crate) struct Endpoints {
     pub addrs: Arc<[SocketAddr]>,
-    pub synced: bool,
+    /// `None` until the source's first report.
+    pub state: Option<SourceState>,
+}
+
+impl Endpoints {
+    pub fn synced(&self) -> bool {
+        matches!(self.state, Some(SourceState::Synced))
+    }
 }
 
 /// The control thread's builder of [`Upstreams`]. Owns the health cells and the last endpoints
@@ -133,7 +140,8 @@ pub(crate) struct Registry {
     /// Cells of the origins in the current epoch, by identity. An origin that leaves drops
     /// its cell.
     health: HashMap<OriginKey, Arc<Health>>,
-    /// Last endpoints by source identity, for the sources of the current plan.
+    /// Last endpoints and state by source identity, for every source of the current plan
+    /// (empty and without a state until its first report).
     found: HashMap<SourceKey, Endpoints>,
 }
 
@@ -156,6 +164,14 @@ impl Registry {
         self.next_epoch = self.next_epoch.wrapping_add(1);
         self.found
             .retain(|key, _| plan.sources.iter().any(|s| source_key(s) == *key));
+        for source in plan.sources.iter() {
+            self.found
+                .entry(source_key(source))
+                .or_insert_with(|| Endpoints {
+                    addrs: Arc::from([]),
+                    state: None,
+                });
+        }
         let mut health = HashMap::new();
         let mut origins: Vec<Origin> = Vec::with_capacity(plan.origins.len());
         for spec in plan.origins.iter() {
@@ -210,10 +226,9 @@ impl Registry {
         if !plan.sources.iter().any(|s| source_key(s) == found.source) {
             return None;
         }
-        let synced = matches!(found.state, SourceState::Synced);
         let endpoints = Endpoints {
             addrs: found.endpoints,
-            synced,
+            state: Some(found.state),
         };
         let changed = self
             .found
@@ -223,7 +238,8 @@ impl Registry {
         changed.then(|| self.build(plan))
     }
 
-    /// For `upstreamer_discovery_*` and the systemd status line.
+    /// Every source of the plan last built, with what it last reported. For
+    /// `upstreamer_discovery_*` and the systemd status line.
     pub fn sources(&self) -> impl Iterator<Item = (&SourceKey, &Endpoints)> {
         self.found.iter()
     }

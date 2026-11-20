@@ -105,12 +105,13 @@ pub(crate) fn serve(
         live.hub.control().generation = generation;
         let workers = super::spawn_workers(&cpus, current.clone())?;
         live.adopted(&current);
+        crate::discover::publish(&live.registry, &live.hub);
         info!(
             "serving generation {generation} on {} cores, {} listeners",
             workers.len(),
             current.plan.listeners.len()
         );
-        notifier.notify(&format!("READY=1\nSTATUS=serving generation {generation}"));
+        notifier.notify(&format!("READY=1\nSTATUS={}", status_line(&current, &live)));
 
         let mut rotate = tokio::time::interval_at(
             tokio::time::Instant::now() + TICKET_ROTATION,
