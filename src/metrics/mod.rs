@@ -513,6 +513,23 @@ mod tests {
     }
 
     #[test]
+    fn check_counts_each_named_route_and_origin_once() {
+        let listen = "127.0.0.1:1".parse().unwrap();
+        let origin = "127.0.0.1:2".parse().unwrap();
+        let one = super::series(&plan_from(1, &config(listen, origin, "web")));
+        let mut more = config(listen, origin, "web");
+        more["sites"][0]["routes"].as_array_mut().unwrap().insert(
+            2,
+            serde_json::json!({ "name": "other", "when": { "path": "/o" },
+                "proxy": "http://127.0.0.1:3" }),
+        );
+        let two = super::series(&plan_from(1, &more));
+        // A route: five classes and a 14-bucket histogram with its sum and count. An origin:
+        // five classes, five causes, a histogram, health, in-flight and retries.
+        assert_eq!(two - one, (5 + 16) + (5 + 5 + 16 + 3));
+    }
+
+    #[test]
     fn a_scrape_has_every_family_with_its_type_and_counts_each_request_once() {
         let listen = free_addr();
         let origin = origin();
