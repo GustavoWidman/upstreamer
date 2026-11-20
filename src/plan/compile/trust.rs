@@ -49,7 +49,8 @@ impl Compiler<'_> {
                 format!("`{}` is not a header to read; use {HEADERS}", spec.header),
             );
         }
-        Some(TrustPlan::new(Nets::new(ranges), header?)).filter(|_| valid)
+        let header = header?;
+        valid.then(|| TrustPlan::new(Nets::new(ranges), header))
     }
 }
 
