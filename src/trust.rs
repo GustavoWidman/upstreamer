@@ -909,6 +909,86 @@ mod tests {
         );
     }
 
+    /// A proxied keep-alive request under a plan with trusted proxies allocates nothing on
+    /// the core's thread: the trusted-peer path (client from the header, chain appended) and
+    /// the untrusted-peer path both run in the steady state.
+    #[test]
+    fn a_proxied_request_with_trusted_proxies_allocates_nothing() {
+        use crate::runtime::testing::{
+            connect, free_addr, no_signals, plan_from, read_response, served,
+        };
+        use crate::runtime::{Generation, allowed_cpus, spawn_workers, stop};
+        use std::io::{Read, Write};
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        const RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    while let Ok(n) = stream.read(&mut buf) {
+                        if n == 0 || stream.write_all(RESPONSE).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+
+        for from in ["127.0.0.0/8", "10.0.0.0/8"] {
+            let listen = free_addr();
+            let plan = plan_from(
+                1,
+                &serde_json::json!({
+                    "version": 1,
+                    "listen": { "http": [listen], "https": [] },
+                    "trustedProxies": { "from": [from], "header": "X-Forwarded-For" },
+                    "sites": [{
+                        "name": "proxied",
+                        "hosts": ["*"],
+                        "routes": [{ "proxy": {
+                            "to": format!("http://{origin}"),
+                            "headers": { "X-Real-IP": "{remote_host}", "X-Peer": "{peer_host}" },
+                        } }],
+                    }],
+                }),
+            );
+            let generation = Arc::new(Generation::standalone(plan, None, Arc::default()));
+            let workers = spawn_workers(&[allowed_cpus()[0]], generation).unwrap();
+            let mut conn = connect(listen);
+            let mut request = || {
+                conn.write_all(
+                    b"GET /api HTTP/1.1\r\nHost: app.example.com\r\n\
+                      X-Forwarded-For: 198.51.100.23, 10.0.0.9\r\n\r\n",
+                )
+                .unwrap();
+                let (head, body) = read_response(&mut conn).unwrap();
+                assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+                assert_eq!(body, b"ok");
+            };
+            for _ in 0..2_000 {
+                request();
+            }
+            let signals = no_signals();
+            let before = served(listen.port(), 0).allocations;
+            for _ in 0..20_000 {
+                request();
+            }
+            let after = served(listen.port(), 0).allocations;
+            drop(signals);
+            stop(workers, Instant::now());
+            assert_eq!(
+                after - before,
+                0,
+                "trusting {from}: allocations on the core thread"
+            );
+        }
+    }
+
     /// The cost of resolving the client of one request, for `cargo test --release`. Run with
     /// `cargo test --release --lib trust::tests::cost -- --ignored --nocapture`.
     #[test]
