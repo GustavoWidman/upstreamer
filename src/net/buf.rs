@@ -35,14 +35,22 @@ impl BufPool {
     /// otherwise. Caps each free list so a burst does not pin memory.
     pub fn put(&self, mut buf: BytesMut) {
         buf.clear();
-        // `try_reclaim` succeeds only for a uniquely owned allocation of at least that size,
-        // and moves the cursor back to its start, so a kept buffer has its full capacity.
-        let (list, keep) = if buf.try_reclaim(LARGE) && buf.capacity() <= 2 * LARGE {
-            (&self.large, KEEP_LARGE)
-        } else if buf.try_reclaim(SMALL) && buf.capacity() < LARGE {
-            (&self.small, KEEP_SMALL)
-        } else {
+        // `try_reclaim(n)` returns at once when `n` bytes are spare past the cursor. Otherwise
+        // it calls into `bytes`, which moves the cursor back to the start of a uniquely owned
+        // allocation of at least `n` bytes and fails for a shared one. A request leaves its
+        // buffer's cursor past the bytes it consumed, so the small class is asked first: one
+        // call for a small buffer, and the large class is asked only of a buffer with more
+        // spare than a small one can have unless it grew.
+        if !buf.try_reclaim(SMALL) {
             return;
+        }
+        if buf.capacity() > SMALL {
+            let _ = buf.try_reclaim(LARGE);
+        }
+        let (list, keep) = match buf.capacity() {
+            c if c < LARGE => (&self.small, KEEP_SMALL),
+            c if c <= 2 * LARGE => (&self.large, KEEP_LARGE),
+            _ => return,
         };
         let mut list = list.borrow_mut();
         if list.len() < keep {
@@ -90,6 +98,23 @@ mod tests {
             buf.capacity() >= SMALL,
             "an advanced buffer is reclaimed to full size"
         );
+    }
+
+    #[test]
+    fn advanced_large_buffer_comes_back_large() {
+        let pool = BufPool::default();
+        for consumed in [1000, LARGE - 1000] {
+            let mut buf = pool.take_large();
+            buf.extend_from_slice(&vec![b'x'; consumed]);
+            let front = buf.split_to(consumed).freeze();
+            drop(front);
+            pool.put(buf);
+            assert!(pool.small.borrow().is_empty(), "consumed {consumed}");
+            assert!(
+                pool.take_large().capacity() >= LARGE,
+                "consumed {consumed}: a large buffer is reclaimed to full size"
+            );
+        }
     }
 
     #[test]
