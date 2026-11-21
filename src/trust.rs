@@ -14,7 +14,6 @@ mod cloudflare;
 
 use crate::exchange::{ConnInfo, Exchange};
 use crate::msg::{HeaderName, Known, RequestHead};
-use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Whose header is believed, and which header. Built by `plan::compile::trust`.
@@ -349,7 +348,7 @@ pub(crate) fn forwarded_for(
             }
         }
     }
-    let _ = write!(out, "{peer}");
+    crate::plan::template::write_ip(out, peer);
 }
 
 #[cfg(test)]

@@ -201,13 +201,9 @@ impl Template {
                 };
                 match ph {
                     Placeholder::Host => out.extend_from_slice(req.host()),
-                    Placeholder::RemoteHost => {
-                        let _ = write!(out, "{client}");
-                    }
+                    Placeholder::RemoteHost => write_ip(out, *client),
                     Placeholder::RemoteNet => write_net(out, *client),
-                    Placeholder::PeerHost => {
-                        let _ = write!(out, "{}", conn.remote.ip());
-                    }
+                    Placeholder::PeerHost => write_ip(out, conn.remote.ip()),
                     Placeholder::ForwardedFor => {
                         crate::trust::forwarded_for(req, conn, *trusted_peer, out)
                     }
@@ -366,14 +362,46 @@ fn placeholder(name: &str, scope: &mut Scope<'_>) -> Result<Placeholder, String>
 /// `/64` appended. An IPv4-mapped IPv6 address is its IPv4 address.
 fn write_net(out: &mut Vec<u8>, ip: std::net::IpAddr) {
     match ip.to_canonical() {
-        std::net::IpAddr::V4(v4) => {
-            let _ = write!(out, "{v4}");
-        }
+        std::net::IpAddr::V4(v4) => write_v4(out, v4),
         std::net::IpAddr::V6(v6) => {
             let net = std::net::Ipv6Addr::from_bits(v6.to_bits() & !u128::from(u64::MAX));
             let _ = write!(out, "{net}/64");
         }
     }
+}
+
+/// An address as its `Display` writes it. Most requests come over IPv4 and every proxied one
+/// writes its client's address upstream, so IPv4 is written digit by digit: the formatter
+/// spends several times the work on its padding and width handling.
+pub(crate) fn write_ip(out: &mut Vec<u8>, ip: std::net::IpAddr) {
+    match ip {
+        std::net::IpAddr::V4(v4) => write_v4(out, v4),
+        std::net::IpAddr::V6(v6) => {
+            let _ = write!(out, "{v6}");
+        }
+    }
+}
+
+fn write_v4(out: &mut Vec<u8>, ip: std::net::Ipv4Addr) {
+    let mut text = [0u8; 15];
+    let mut len = 0;
+    for (i, octet) in ip.octets().into_iter().enumerate() {
+        if i > 0 {
+            text[len] = b'.';
+            len += 1;
+        }
+        if octet >= 100 {
+            text[len] = b'0' + octet / 100;
+            len += 1;
+        }
+        if octet >= 10 {
+            text[len] = b'0' + octet / 10 % 10;
+            len += 1;
+        }
+        text[len] = b'0' + octet % 10;
+        len += 1;
+    }
+    out.extend_from_slice(&text[..len]);
 }
 
 pub(crate) fn intern(vars: &mut Vec<Box<str>>, name: &str) -> VarId {
@@ -482,6 +510,30 @@ mod tests {
         let mut vars = Vec::new();
         Template::parse(src, &mut scope(&mut vars, Captures::Groups(2), false))
             .map_err(|e| e.message)
+    }
+
+    #[test]
+    fn addresses_are_written_in_their_standard_text_form() {
+        let text = |ip: &str| {
+            let mut out = Vec::new();
+            write_ip(&mut out, ip.parse().unwrap());
+            String::from_utf8(out).unwrap()
+        };
+        for (ip, want) in [
+            ("0.0.0.0", "0.0.0.0"),
+            ("255.255.255.255", "255.255.255.255"),
+            ("10.0.9.99", "10.0.9.99"),
+            ("100.101.110.200", "100.101.110.200"),
+            ("192.168.1.10", "192.168.1.10"),
+            ("2001:db8::1", "2001:db8::1"),
+            ("::ffff:192.0.2.1", "::ffff:192.0.2.1"),
+        ] {
+            assert_eq!(text(ip), want);
+        }
+        for octet in 0..=255u8 {
+            let ip = std::net::Ipv4Addr::new(octet, 7, octet, octet);
+            assert_eq!(text(&ip.to_string()), format!("{octet}.7.{octet}.{octet}"));
+        }
     }
 
     #[test]
