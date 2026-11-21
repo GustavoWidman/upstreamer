@@ -867,10 +867,13 @@
         systemd.services.upstreamer = {
           description = "upstreamer reverse proxy";
           wantedBy = [ "multi-user.target" ];
-          after = [ "network.target" ];
-          # Pull certificate issuance in at boot, but do not wait for it: a host whose certificate
-          # does not exist yet is served once ACME reloads us; the others serve immediately.
+          # Start once each certificate's directory holds a certificate the proxy's groups can
+          # read (acme-<name> puts a self-signed one in place and sets the directory's group),
+          # and before the renewal that orders the real one: a host whose certificate is not
+          # issued yet is served once ACME reloads us, the others with theirs from the start.
           wants = map (c: "acme-${c}.service") certNames;
+          after = [ "network.target" ] ++ map (c: "acme-${c}.service") certNames;
+          before = map (c: "acme-order-renew-${c}.service") certNames;
           # A switch that changes only the config reloads (no dropped connections); a new package
           # changes ExecStart and restarts.
           reloadTriggers = [ cfg.configFile ];
