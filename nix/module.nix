@@ -553,7 +553,11 @@
             else
               self.packages.${pkgs.stdenv.hostPlatform.system}.default;
           defaultText = lib.literalExpression "upstreamer.packages.\${system}.default, or .kubernetes when `kubernetes.enable` is set";
-          description = "The upstreamer package (also runs `upstreamer check` at build time).";
+          description = ''
+            The upstreamer package (also runs `upstreamer check` at build time). A switch to a
+            configuration with another package does not restart the proxy: the new program takes
+            the listening sockets over from the running one.
+          '';
         };
 
         workers = mkOption {
@@ -863,6 +867,9 @@
         };
 
         environment.etc."upstreamer/config.json".source = cfg.configFile;
+        # The path the unit starts the proxy from. It stays the same when the package changes,
+        # so the unit does not change with it, and the file it names does.
+        environment.etc."upstreamer/upstreamer".source = lib.getExe cfg.package;
 
         systemd.services.upstreamer = {
           description = "upstreamer reverse proxy";
@@ -874,13 +881,19 @@
           wants = map (c: "acme-${c}.service") certNames;
           after = [ "network.target" ] ++ map (c: "acme-${c}.service") certNames;
           before = map (c: "acme-order-renew-${c}.service") certNames;
-          # A switch that changes only the config reloads (no dropped connections); a new package
-          # changes ExecStart and restarts.
-          reloadTriggers = [ cfg.configFile ];
+          # A switch that changes the config or the package reloads. On a reload the proxy reads
+          # the config again, unless the program file at the path it was started from is another
+          # one: then a process of that file takes the listening sockets over, and no connection
+          # is refused or cut either way. A switch that changes anything else in the unit
+          # restarts it.
+          reloadTriggers = [
+            cfg.configFile
+            cfg.package
+          ];
           unitConfig.StartLimitIntervalSec = 0;
           serviceConfig = {
             Type = "notify-reload";
-            ExecStart = "${lib.getExe cfg.package} run --config /etc/upstreamer/config.json";
+            ExecStart = "/etc/upstreamer/upstreamer run --config /etc/upstreamer/config.json";
             Restart = "on-failure";
             RestartSec = "1s";
             # The drain, then a margin for the process to exit.

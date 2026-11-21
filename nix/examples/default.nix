@@ -72,6 +72,10 @@ let
       }) c.security.acme.certs;
       unit = {
         inherit (u.serviceConfig) Type ExecStart TimeoutStopSec;
+        # The program the start path links to, and what a switch to another package or
+        # another config does to the unit.
+        program = "${c.environment.etc."upstreamer/upstreamer".source}";
+        reloadTriggers = sorted (map toString u.reloadTriggers);
         SupplementaryGroups = sorted u.serviceConfig.SupplementaryGroups;
         wants = sorted u.wants;
       };
@@ -125,9 +129,17 @@ let
       ;
   };
   own = domain: cert domain [ ] "upstreamer-certs" [ "upstreamer.service" ];
-  unit' = timeoutStopSec: groups: certs: {
+  # Every host runs the same package, so the unit differs between hosts only where a field
+  # below is derived from the host: `reloadTriggers` holds the host's own config file.
+  unit' = timeoutStopSec: groups: certs: host: {
     Type = "notify-reload";
-    ExecStart = "${lib.getExe systems.edge.services.upstreamer.package} run --config /etc/upstreamer/config.json";
+    # A path that stays when the package changes, linked to the package's program.
+    ExecStart = "/etc/upstreamer/upstreamer run --config /etc/upstreamer/config.json";
+    program = lib.getExe host.services.upstreamer.package;
+    reloadTriggers = sorted [
+      "${host.services.upstreamer.configFile}"
+      "${host.services.upstreamer.package}"
+    ];
     # The default 10s drain, plus 5s to exit.
     TimeoutStopSec = timeoutStopSec;
     SupplementaryGroups = groups;
@@ -139,7 +151,11 @@ let
     edge = {
       failedAssertions = [ ];
       certs = lib.genAttrs [ "app.example.com" "cache.example.com" "s3.cache.example.com" ] own;
-      unit = unit [ "upstreamer-certs" ] [ "app.example.com" "cache.example.com" "s3.cache.example.com" ];
+      unit = unit [ "upstreamer-certs" ] [
+        "app.example.com"
+        "cache.example.com"
+        "s3.cache.example.com"
+      ] systems.edge;
       tcp = [
         80
         443
@@ -187,7 +203,8 @@ let
             "mail.example.net"
             "play.example.net"
             "relay.example.net"
-          ];
+          ]
+          systems.apps;
       tcp = [
         80
         443
@@ -203,7 +220,7 @@ let
     desktop = {
       failedAssertions = [ ];
       certs = { };
-      unit = unit [ ] [ ];
+      unit = unit [ ] [ ] systems.desktop;
       tcp = [ ];
       # The host is served on port 80; it keeps the firewall closed.
       expectTcp = [ 80 ];
@@ -220,7 +237,10 @@ let
         ];
       };
       # A 30s drain.
-      unit = unit' 35 [ "upstreamer-certs" ] [ "admin.example.com" "preview.example.com" ];
+      unit = unit' 35 [ "upstreamer-certs" ] [
+        "admin.example.com"
+        "preview.example.com"
+      ] systems.custom;
       tcp = [
         80
         443
@@ -245,7 +265,7 @@ let
       certs = {
         "blog.example.com" = own "blog.example.com";
       };
-      unit = unit [ "upstreamer-certs" ] [ "blog.example.com" ];
+      unit = unit [ "upstreamer-certs" ] [ "blog.example.com" ] systems.observed;
       # The firewall opens the blog; `check` is told about the metrics listener too.
       tcp = [
         80
