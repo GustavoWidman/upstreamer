@@ -32,9 +32,21 @@ for _ in $(seq 1 90); do
   kubectl get --raw /readyz >/dev/null 2>&1 && break
   sleep 2
 done
+# The proxy reaches the API server through the `kubernetes` Service, which routes again only
+# once kube-proxy has the API server's endpoint back, a while after the server itself answers.
+# Any HTTP status means the connection got through.
+back=$SECONDS
+for _ in $(seq 1 90); do
+  code=$(kubectl -n shop exec loadgen -- sh -c \
+    'curl -sk -o /dev/null -m 5 -w "%{http_code}" "https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT/readyz"' \
+    2>/dev/null || true)
+  [[ $code =~ ^[1-5][0-9][0-9]$ ]] && break
+  sleep 2
+done
+echo "the API server answers through its Service $((SECONDS - back)) s after the host saw it ready"
 
 # A resync logged after the outage was. The proxy retries with a backoff of up to 30 s, so it
-# can come that long after the API server is back.
+# can come that long after the Service routes to the API server again.
 resynced() {
   kubectl -n shop logs deploy/upstreamer |
     awk '/retrying, last endpoints stay in use/ { out = 1 } out && /: synced, / { found = 1 } END { exit !found }'
