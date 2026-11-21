@@ -324,13 +324,19 @@ impl TicketKey {
         TicketKey::new(id, secret)
     }
 
-    fn new(id: [u8; TICKET_KEY_ID_LEN], secret: [u8; 32]) -> TicketKey {
+    /// The key with this id and secret: one a process handing over to this one exported.
+    pub fn new(id: [u8; TICKET_KEY_ID_LEN], secret: [u8; 32]) -> TicketKey {
         let key = UnboundKey::new(&AES_256_GCM, &secret).expect("32-byte AES-256-GCM key");
         TicketKey {
             id,
             secret,
             aead: LessSafeKey::new(key),
         }
+    }
+
+    /// The secret, for the process this one hands over to.
+    pub fn secret(&self) -> &[u8; 32] {
+        &self.secret
     }
 }
 
