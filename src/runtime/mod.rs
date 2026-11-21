@@ -191,17 +191,26 @@ impl RegexCaches {
 /// start, so every core counts the same seconds.
 pub(crate) static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
-/// Nanoseconds on `CLOCK_MONOTONIC`, the clock `Instant` reads on Linux, as one integer: a
-/// duration between two readings is one subtraction, where `Instant`'s is a checked
-/// subtraction of seconds and nanoseconds. For what a request measures per request: its
-/// duration, its upstream's, a rate limit's arrival time.
+/// Nanoseconds on the clock `Instant` reads, as one integer: a duration between two readings
+/// is one subtraction, where `Instant`'s is a checked subtraction of seconds and nanoseconds.
+/// For what a request measures per request: its duration, its upstream's, a rate limit's
+/// arrival time.
+///
+/// The same clock as `Instant` on every platform, so a span read with one agrees with the
+/// other: `CLOCK_MONOTONIC` on Linux, `CLOCK_UPTIME_RAW` on macOS, where `CLOCK_MONOTONIC` is
+/// frequency-adjusted to network time and drifts from `Instant` while the system clock is
+/// being corrected.
 pub(crate) fn monotonic_nanos() -> u64 {
+    #[cfg(target_vendor = "apple")]
+    const CLOCK: libc::clockid_t = libc::CLOCK_UPTIME_RAW;
+    #[cfg(not(target_vendor = "apple"))]
+    const CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    // SAFETY: `ts` is a valid, writable timespec; CLOCK_MONOTONIC is always available.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    // SAFETY: `ts` is a valid, writable timespec; CLOCK is always available.
+    unsafe { libc::clock_gettime(CLOCK, &mut ts) };
     (ts.tv_sec as u64)
         .wrapping_mul(1_000_000_000)
         .wrapping_add(ts.tv_nsec as u64)
