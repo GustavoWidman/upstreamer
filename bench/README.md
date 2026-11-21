@@ -28,7 +28,8 @@ Results go to `--out` (default `$BENCH_OUT`, else `./bench-results`).
 | `nix run .#bench -- tuning` | Every server's version, settings applied, sources and n/a reasons. |
 
 `--scenarios` takes `all`, `core` (the scenarios without proxy features),
-`features`, or a comma list.
+`features` (the feature scenarios and `h1-hdr`, their keyed reference), or a
+comma list.
 
 Useful options: `--reps`, `--warmup` (s, default 3), `--duration` (s, default
 10), `--label`, `--quiet-wait` (s to wait for a quiet host before each run,
@@ -94,10 +95,14 @@ numbers changes; the report never mixes versions.
 
 The same load as `h1` (or `h2-tls`) with proxy features on, so a feature's
 cost is the ratio of its cell to the plain one, and the comparison covers only
-the servers that ship the feature.
+the servers that ship the feature. A scenario that sends a client key reads
+its cost against `h1-hdr`, which sends the same key header with no feature
+on: the proxy parses and forwards that header whether a feature reads it or
+not, so against plain `h1` the ratio would also charge the feature for it.
 
 | Scenario | Features |
 |---|---|
+| `h1-hdr` | none; every request carries `X-Client` as in `h1-limit` (the reference of `h1-lb2-hash` and `h1-limit`) |
 | `h1-lb2` | round robin over the origin's two addresses |
 | `h1-lb2-least` | fewest requests in flight over the two addresses |
 | `h1-lb2-hash` | consistent hash of the `X-Client` header over the two addresses |

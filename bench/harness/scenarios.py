@@ -256,6 +256,15 @@ def _h1_feature(name: str, description: str, features: set[Feature], key_header:
 ALL_FEATURES = {Feature.LB_ROUND_ROBIN, Feature.HEALTH, Feature.LIMIT_CLIENT, Feature.METRICS, Feature.TRUSTED}
 
 FEATURE_SCENARIOS = (
+    # The reference for the scenarios that send a client key: plain h1 with the same header, so
+    # a keyed feature's ratio to it measures the feature, not the extra header every request
+    # carries. No feature, so every server runs it with its usual config.
+    _h1_feature(
+        "h1-hdr",
+        f"h1 with the {CLIENT_HEADER} header ({CLIENT_KEYS} values), no feature",
+        set(),
+        CLIENT_HEADER,
+    ),
     _h1_feature("h1-lb2", "h1, round robin over two origin addresses", {Feature.LB_ROUND_ROBIN}),
     _h1_feature("h1-lb2-least", "h1, fewest requests in flight over two origin addresses", {Feature.LB_LEAST}),
     _h1_feature(

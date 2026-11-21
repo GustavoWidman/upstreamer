@@ -50,7 +50,7 @@ def pick_scenarios(names: str) -> list:
     """`all`, `core` (the scenarios without features), `features`, or a comma list."""
     groups = {
         "all": list(SCENARIOS.values()),
-        "core": [s for s in SCENARIOS.values() if not s.features],
+        "core": [s for s in SCENARIOS.values() if s not in FEATURE_SCENARIOS],
         "features": list(FEATURE_SCENARIOS),
     }
     return groups.get(names) or [lookup(n) for n in split(names)]
