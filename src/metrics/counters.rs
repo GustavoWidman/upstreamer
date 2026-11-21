@@ -233,10 +233,25 @@ fn add(cell: &Cell<u64>, n: u64) {
     cell.set(cell.get().wrapping_add(n));
 }
 
-/// The bucket of a duration in microseconds: the first whose bound holds it.
+/// The bucket of a duration in microseconds: the first whose bound holds it, which is the
+/// number of bounds below it. Found by a binary search of four steps over the bounds padded to
+/// 16 with bounds no duration exceeds, each step a compare and a conditional add.
 #[inline]
 fn bucket(us: u64) -> usize {
-    BUCKETS_US.iter().map(|&b| usize::from(us > b)).sum()
+    const PADDED: [u64; 16] = {
+        let mut padded = [u64::MAX; 16];
+        let mut i = 0;
+        while i < BUCKETS_US.len() {
+            padded[i] = BUCKETS_US[i];
+            i += 1;
+        }
+        padded
+    };
+    let mut at = 0;
+    for step in [8, 4, 2, 1] {
+        at += step * usize::from(us > PADDED[at + step - 1]);
+    }
+    at
 }
 
 #[inline]
@@ -672,6 +687,12 @@ mod tests {
         assert_eq!(bucket(1_001), 1);
         assert_eq!(bucket(10_000_000), 12);
         assert_eq!(bucket(10_000_001), 13, "+Inf");
+        assert_eq!(bucket(u64::MAX), 13, "+Inf");
+        for (i, &bound) in BUCKETS_US.iter().enumerate() {
+            assert_eq!(bucket(bound), i, "{bound} is in the bucket it bounds");
+            assert_eq!(bucket(bound + 1), i + 1, "{bound} + 1 is in the next one");
+            assert_eq!(bucket(bound - 1), i, "{bound} - 1");
+        }
         assert_eq!(class(Status::OK), 1);
         assert_eq!(class(Status::NOT_FOUND), 3);
         assert_eq!(class(Status::CONTINUE), 0);
