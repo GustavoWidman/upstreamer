@@ -46,6 +46,11 @@ impl Proxy {
     /// Like [`Proxy::start`], with more top-level config keys (`timeouts`, `limits`,
     /// `workers`).
     pub fn start_with(sites: Value, top: Value) -> Proxy {
+        Proxy::start_program(env!("CARGO_BIN_EXE_upstreamer").as_ref(), sites, top)
+    }
+
+    /// Like [`Proxy::start_with`], running the program file at `binary`.
+    pub fn start_program(binary: &std::path::Path, sites: Value, top: Value) -> Proxy {
         let dir = tempfile::tempdir().unwrap();
         let port = Reserved::new();
         let addr = port.addr;
@@ -57,11 +62,13 @@ impl Proxy {
             .set_read_timeout(Some(Duration::from_millis(50)))
             .unwrap();
 
-        let binary = env!("CARGO_BIN_EXE_upstreamer");
         // `UPSTREAMER_WRAP="strace -f -c -o counts"` runs the proxy under another program.
         // The proxy gets a process group of its own, so signals reach it through a wrapper.
         let wrap = std::env::var("UPSTREAMER_WRAP").unwrap_or_default();
-        let mut words = wrap.split_whitespace().chain([binary]);
+        let mut words = wrap
+            .split_whitespace()
+            .map(std::ffi::OsStr::new)
+            .chain([binary.as_os_str()]);
         let mut command = Command::new(words.next().unwrap());
         let mut child = command
             .args(words)
@@ -142,6 +149,11 @@ impl Proxy {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// The process id of the proxy as it was started.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
     }
 
     pub fn signal(&self, signal: libc::c_int) {
