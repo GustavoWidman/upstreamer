@@ -134,7 +134,16 @@
 
       checks = {
         inherit upstreamer kubernetes;
-        upstreamer-test = craneLib.cargoTest (args // { inherit cargoArtifacts; });
+        # h2spec runs inside the sandbox over loopback; the other external tools the tests
+        # drive run in CI's cargo test job.
+        upstreamer-test = craneLib.cargoTest (
+          args
+          // {
+            inherit cargoArtifacts;
+            nativeBuildInputs = [ pkgs.h2spec ];
+            UPSTREAMER_REQUIRE_H2SPEC = "1";
+          }
+        );
         upstreamer-clippy = craneLib.cargoClippy (
           args
           // {
