@@ -27,6 +27,8 @@ mod der;
 pub(crate) mod http;
 mod jws;
 mod order;
+#[cfg(feature = "internals")]
+pub use order::harness;
 mod store;
 
 use crate::body::Body;

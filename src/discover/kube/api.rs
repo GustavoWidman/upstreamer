@@ -71,6 +71,11 @@ pub(super) async fn get(
         Ok(Err(e)) => return Err(Failure::Other(format!("GET {what}: {e}"))),
         Err(_) => return Err(Failure::Other(format!("GET {what}: timed out"))),
     };
+    answer(status, body, &what).await
+}
+
+/// What an answer with a parsed head means: a `200` body to read, or a failure.
+async fn answer(status: u16, body: Body, what: &str) -> Result<Response, Failure> {
     if status == 200 {
         return Ok(Response { body });
     }
@@ -101,6 +106,17 @@ impl Response {
     pub async fn next_line(&mut self) -> io::Result<Option<Vec<u8>>> {
         self.body.next_line().await
     }
+}
+
+/// A response read from `io`, as [`get`] reads one from the API server.
+#[cfg(feature = "internals")]
+pub(super) async fn read_response(
+    io: impl AsyncRead + AsyncWrite + Send + Unpin + 'static,
+) -> Result<Response, Failure> {
+    let (status, body) = read_head(Box::new(io))
+        .await
+        .map_err(|e| Failure::Other(e.to_string()))?;
+    answer(status, body, "fuzz").await
 }
 
 /// The `message` of a `Status` object, else the first line of whatever came back.
@@ -167,7 +183,11 @@ async fn request(
     head.push_str("\r\n");
     io.write_all(head.as_bytes()).await?;
     io.flush().await?;
+    read_head(io).await
+}
 
+/// Reads a response head; the body is left to read from `io`.
+async fn read_head(mut io: Box<dyn Io>) -> io::Result<(u16, Body)> {
     let mut raw = Vec::with_capacity(8 * 1024);
     loop {
         let mut headers = [httparse::EMPTY_HEADER; 64];

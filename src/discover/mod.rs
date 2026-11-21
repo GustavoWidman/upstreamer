@@ -7,6 +7,8 @@
 
 #[cfg(feature = "kubernetes")]
 mod kube;
+#[cfg(all(feature = "kubernetes", feature = "internals"))]
+pub use kube::harness as kube_harness;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

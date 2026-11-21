@@ -557,3 +557,171 @@ impl Slice {
         out
     }
 }
+
+/// Fuzz entry points; not part of the API.
+#[cfg(feature = "internals")]
+pub mod harness {
+    use super::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+    /// A server's bytes, handed out `size` at a time; what the client writes is dropped.
+    struct Pieces {
+        bytes: Vec<u8>,
+        at: usize,
+        size: usize,
+    }
+
+    impl AsyncRead for Pieces {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let n = self
+                .size
+                .min(self.bytes.len() - self.at)
+                .min(buf.remaining());
+            buf.put_slice(&self.bytes[self.at..self.at + n]);
+            self.at += n;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for Pieces {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// What a client made of one response: the lines of a watch or the body of a list, then
+    /// the endpoints, or where it failed.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Outcome {
+        lines: Vec<Vec<u8>>,
+        endpoints: Vec<SocketAddr>,
+        failed: Option<String>,
+    }
+
+    fn run(port: KubePort) -> Run {
+        let source = Arc::new(KubeWatch {
+            namespace: "default".into(),
+            select: KubeSelect::Service("web".into()),
+            port,
+        });
+        let (out, _) = unbounded_channel();
+        Run {
+            key: SourceKey::Kubernetes(source.clone()),
+            source,
+            timing: Timing::default(),
+            out,
+            known: HashMap::new(),
+            version: String::new(),
+            reported: None,
+            unreachable_since: None,
+            unreachable_error: String::new(),
+            dirty_since: None,
+            events: 0,
+            backoff: Backoff::new(Timing::default()),
+        }
+    }
+
+    async fn read(bytes: &[u8], size: usize, list: bool, port: KubePort) -> Outcome {
+        let mut run = run(port);
+        let mut outcome = Outcome {
+            lines: Vec::new(),
+            endpoints: Vec::new(),
+            failed: None,
+        };
+        let io = Pieces {
+            bytes: bytes.to_vec(),
+            at: 0,
+            size,
+        };
+        let failed = match api::read_response(io).await {
+            Err(e) => Some(e.to_string()),
+            Ok(response) if list => match response.read_to_end().await {
+                Err(e) => Some(e.kind().to_string()),
+                Ok(body) => {
+                    let parsed = serde_json::from_slice::<List>(&body);
+                    if let Ok(list) = &parsed {
+                        for slice in &list.items {
+                            let at = slice.endpoints_at(&run.source.port);
+                            run.known.insert(slice.metadata.name.clone(), at);
+                        }
+                    }
+                    outcome.lines.push(body);
+                    parsed.err().map(|e| e.to_string())
+                }
+            },
+            Ok(mut response) => loop {
+                match response.next_line().await {
+                    Err(e) => break Some(e.kind().to_string()),
+                    Ok(None) => break None,
+                    Ok(Some(line)) => {
+                        let applied = if line.is_empty() {
+                            Ok(())
+                        } else {
+                            run.apply(&line)
+                        };
+                        outcome.lines.push(line);
+                        if let Err(e) = applied {
+                            break Some(e.to_string());
+                        }
+                    }
+                }
+            },
+        };
+        outcome.failed = failed;
+        outcome.endpoints = run.endpoints().to_vec();
+        outcome
+    }
+
+    thread_local! {
+        static RUNTIME: tokio::runtime::Runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+    }
+
+    /// The API server's answer to a list (bit 0 of the first byte set) or a watch: a
+    /// response head and its body, the source's port by name (bit 1) or number. The rest
+    /// of the first byte picks how many bytes each read takes.
+    ///
+    /// The response reads the same whatever the reads are: one byte at a time, the chosen
+    /// size, or all at once give the same lines, endpoints and failure. Endpoints are
+    /// sorted, distinct, and at the source's port when it names a number.
+    pub fn watch_input(data: &[u8]) {
+        let Some((&options, bytes)) = data.split_first() else {
+            return;
+        };
+        let list = options & 1 != 0;
+        let port = || match options & 2 {
+            0 => KubePort::Number(8080),
+            _ => KubePort::Name("http".into()),
+        };
+        let size = 1 + usize::from(options >> 2) * 61;
+        RUNTIME.with(|rt| {
+            let chosen = rt.block_on(read(bytes, size, list, port()));
+            for size in [1, usize::MAX] {
+                let again = rt.block_on(read(bytes, size, list, port()));
+                assert_eq!(chosen, again, "reads of {size} bytes");
+            }
+            assert!(chosen.endpoints.windows(2).all(|w| w[0] < w[1]));
+            if let KubePort::Number(n) = port() {
+                assert!(chosen.endpoints.iter().all(|e| e.port() == n));
+            }
+        });
+    }
+}

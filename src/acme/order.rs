@@ -418,6 +418,93 @@ impl<'a> Session<'a> {
     }
 }
 
+/// Fuzz entry points; not part of the API.
+#[cfg(feature = "internals")]
+pub mod harness {
+    use super::super::http::{check_url, parse_response};
+    use super::*;
+
+    /// A response from an ACME server, read to the end of the connection. The first byte
+    /// says whether it answers a HEAD (bit 0), which document its body should be (bits 4
+    /// and 5), and the chunk size its body is framed again with (bits 1 to 3).
+    ///
+    /// A body is never more than the bytes it came in, and framed again by length or by
+    /// chunks it reads back the same. Every URL the client would follow, from the documents
+    /// or the `Location`, is checked as [`check_url`] says, and a nonce it would send is
+    /// base64url.
+    pub fn response_input(data: &[u8]) {
+        let Some((&options, bytes)) = data.split_first() else {
+            return;
+        };
+        let head_only = options & 1 != 0;
+        let Ok(response) = parse_response(bytes, head_only) else {
+            return;
+        };
+        assert!(response.body.len() <= bytes.len());
+        let bodiless = head_only || matches!(response.status, 204 | 304);
+        assert!(!bodiless || response.body.is_empty());
+        if !bodiless {
+            let status = format!("HTTP/1.1 {:03} X\r\n", response.status);
+            let mut length =
+                format!("{status}content-length: {}\r\n\r\n", response.body.len()).into_bytes();
+            length.extend_from_slice(&response.body);
+            let mut chunked = format!("{status}transfer-encoding: chunked\r\n\r\n").into_bytes();
+            for chunk in response.body.chunks(1 + usize::from(options >> 1 & 7) * 9) {
+                chunked.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+                chunked.extend_from_slice(chunk);
+                chunked.extend_from_slice(b"\r\n");
+            }
+            chunked.extend_from_slice(b"0\r\n\r\n");
+            for framed in [length, chunked] {
+                let again = parse_response(&framed, false).expect("a framed body parses");
+                assert_eq!(again.status, response.status);
+                assert_eq!(again.body, response.body);
+            }
+        }
+        if let Some(nonce) = valid_nonce(response.nonce.clone()) {
+            assert!(
+                nonce
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            );
+        }
+        let urls: Vec<String> = match options >> 4 & 3 {
+            0 => serde_json::from_slice::<DirectoryDoc>(&response.body)
+                .map(|d| vec![d.new_nonce, d.new_account, d.new_order])
+                .unwrap_or_default(),
+            1 => serde_json::from_slice::<Order>(&response.body)
+                .map(|o| {
+                    let _ = o.expect(Status::Ready, "ready");
+                    let mut urls = o.authorizations;
+                    urls.push(o.finalize);
+                    urls.extend(o.certificate);
+                    urls
+                })
+                .unwrap_or_default(),
+            2 => serde_json::from_slice::<Authorization>(&response.body)
+                .map(|a| {
+                    let _ = a.identifier.value.to_ascii_lowercase();
+                    for c in &a.challenges {
+                        let _ = c.token.as_deref().filter(|t| is_token(t));
+                        let _ = c.error.as_ref().map(ToString::to_string);
+                    }
+                    a.challenges.into_iter().map(|c| c.url).collect()
+                })
+                .unwrap_or_default(),
+            _ => {
+                let problem: Problem = serde_json::from_slice(&response.body).unwrap_or_default();
+                let _ = problem.to_string();
+                Vec::new()
+            }
+        };
+        for url in urls.iter().chain(&response.location) {
+            if let Ok(url) = parse_url(url) {
+                check_url(&url);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
