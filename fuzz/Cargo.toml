@@ -74,5 +74,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "route"
+path = "fuzz_targets/route.rs"
+test = false
+doc = false
+bench = false
+
 # Not a member of the proxy's build; built by `cargo fuzz` on its own.
 [workspace]

@@ -87,6 +87,7 @@ pub mod fuzz {
     #[cfg(feature = "kubernetes")]
     pub use crate::discover::kube_harness as kube;
     pub use crate::files::harness as files;
+    pub use crate::route::harness as route;
     pub use crate::trust::harness as trust;
 }
 

@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "listen": { "http": ["0.0.0.0:80"], "https": [] },
+  "trustedProxies": { "from": ["10.0.0.0/8", "2001:db8::/32"], "header": "X-Forwarded-For" },
+  "sites": [
+    {
+      "name": "exact",
+      "hosts": ["a.test", "*.wild.test", "[::1]", "127.0.0.1"],
+      "headers": { "Server": false, "X-Site-Host": "{host}" },
+      "routes": [
+        { "set": { "lang": "{query.lang}", "sid": "{cookie.sid}", "thing": "{header.X-Thing}" } },
+        {
+          "requestHeaders": {
+            "X-Client": "{remote_host}", "X-Net": "{remote_net}", "X-Uri": "{uri}",
+            "X-Lang": "{vars.lang}", "X-Peer": "{peer_host}", "X-Port": "{remote_port}",
+            "X-Method": "{method}", "X-Path": "{path}", "Cookie": false
+          }
+        },
+        { "headers": { "X-Path": "{path}", "X-Query": "{query}", "X-Q": "{?query}", "X-Sid": "{vars.sid}" } },
+        { "when": { "pathRegex": "^/re/([^/]*)/(.*)$" }, "rewrite": "/rw/{re.2}/{re.1}{?query}" },
+        { "when": { "path": "/strip/*" }, "stripPrefix": "/strip" },
+        { "when": { "headerRegex": { "X-Mode": "^(fast|slow)$" } }, "headers": { "X-Mode-Seen": "{header.X-Mode}" } },
+        { "when": { "value": "{vars.lang}", "in": ["en", "pt"] }, "set": { "known": "yes" } },
+        { "when": { "value": "{header.X-Thing}", "regex": "^t(.*)$" }, "set": { "rest": "{re.1}" } },
+        { "when": { "query": { "limit": "1" } }, "limit": { "rate": "50/s", "burst": 20, "key": "{remote_host}|{header.X-Key}" } },
+        { "when": { "query": { "limit": "2" } }, "limit": { "rate": "50/s", "key": "{header.X-Key}" } },
+        { "when": { "path": "/redir/*" }, "redirect": { "to": "{scheme}://{host}{path}?from={query.x}", "status": 302 } },
+        { "when": { "path": "/rd2/*" }, "redirect": { "to": "{header.X-To}", "status": 307 } },
+        {
+          "when": { "any": [{ "method": "POST" }, { "header": { "Content-Type": "application/*" } }, { "path": "/up/*" }] },
+          "proxy": {
+            "to": ["http://127.0.0.1:9", "http://127.0.0.2:9"],
+            "balance": { "hash": "{cookie.sid}{header.X-Key}" },
+            "headers": { "X-Up-Path": "{path}", "X-Up-Arg": "{query.a}", "X-Up-Thing": "{vars.thing}", "X-Real-IP": "{remote_host}" }
+          }
+        },
+        {
+          "when": { "path": "/hdr/*" },
+          "proxy": { "to": ["http://127.0.0.1:9", "http://127.0.0.2:9"], "balance": { "hash": "{header.X-Key}" } }
+        },
+        { "when": { "path": "/tunnel/*" }, "proxy": "http://127.0.0.1:9" },
+        { "when": { "path": ["/files/*", "*.css"] }, "files": { "root": "/nonexistent/{host}", "precompressed": ["gzip"] } },
+        { "when": { "none": [{ "path": "/x*" }], "after": "2020-01-01T00:00:00Z" }, "respond": { "body": "{path} {vars.lang} {vars.sid} {vars.rest}" } },
+        { "error": 404 }
+      ],
+      "errors": [
+        { "status": [429], "routes": [{ "respond": { "body": "{err.retry_after}" } }] },
+        { "routes": [{ "headers": { "X-Err": "{err.status_code} {err.status_text}" } }, { "respond": { "body": "{path}" } }] }
+      ]
+    },
+    {
+      "name": "any",
+      "hosts": ["*"],
+      "routes": [
+        { "firstOf": [
+          { "when": { "path": "/a/*" }, "rewrite": "/b{path}" },
+          { "when": { "pathRegex": "(?i)^/(.+)\\.html$" }, "rewrite": "/{re.1}/" }
+        ] },
+        { "redirect": { "to": "https://{host}{uri}", "status": 308 } }
+      ]
+    }
+  ]
+}

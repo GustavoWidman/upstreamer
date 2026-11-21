@@ -327,7 +327,7 @@ pub mod harness {
     }
 
     /// A clean path: starts with `/`, no empty, `.` or `..` segment but a trailing `/`.
-    fn assert_clean(path: &[u8]) {
+    pub(crate) fn assert_clean(path: &[u8]) {
         assert_eq!(path.first(), Some(&b'/'), "{path:?}");
         let segments: Vec<&[u8]> = path[1..].split(|&b| b == b'/').collect();
         for (i, segment) in segments.iter().enumerate() {
