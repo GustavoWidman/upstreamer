@@ -257,6 +257,24 @@ fn apply<'p>(
     fx: &mut Effects<'_>,
 ) -> Flow<'p> {
     match action {
+        Action::Answer(terminal, slot) => {
+            if let Some(slot) = slot {
+                ex.route = *slot;
+            }
+            Flow::Answer(answer(terminal, ex))
+        }
+        Action::Block(block) => run_block(plan, block, ex, fx),
+        _ => transform(action, ex, fx),
+    }
+}
+
+/// The actions that do not end routing by themselves. Out of line: inlined into the step
+/// loop, their accesses to the exchange made the loop keep that many addresses live across
+/// iterations, computed and spilled in [`run_block`]'s prologue on every request, also for a
+/// route that is one terminal step.
+#[inline(never)]
+fn transform<'p>(action: &'p Action, ex: &mut Exchange, fx: &mut Effects<'_>) -> Flow<'p> {
+    match action {
         Action::Set(assigns) => {
             let mut spans: SmallVec<[ASpan; 8]> = SmallVec::new();
             for (_, template) in assigns.iter() {
@@ -295,7 +313,6 @@ fn apply<'p>(
         }
         Action::RequestHeaders(ops) => request_headers(ops, ex),
         Action::Encode(set) => ex.pending.encode = *set,
-        Action::Block(block) => return run_block(plan, block, ex, fx),
         Action::Limit(limit) => {
             if let Admit::Wait(retry_after) = fx.limits.admit(limit, ex) {
                 ex.refused = Some(Refused {
@@ -306,12 +323,7 @@ fn apply<'p>(
                 return Flow::Answer(Outcome::Error(Status::TOO_MANY_REQUESTS));
             }
         }
-        Action::Answer(terminal, slot) => {
-            if let Some(slot) = slot {
-                ex.route = *slot;
-            }
-            return Flow::Answer(answer(terminal, ex));
-        }
+        Action::Answer(..) | Action::Block(_) => unreachable!("apply runs these"),
     }
     Flow::Next
 }
