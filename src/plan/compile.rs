@@ -2137,6 +2137,12 @@ mod tests {
             key(&mut c, "all", Captures::None),
             Some(KeyPlan::Const(crate::key::constant(b"all")))
         );
+        assert_eq!(
+            key(&mut c, "{header.X-Api-Key}", Captures::None),
+            Some(KeyPlan::Header(
+                crate::msg::HeaderName::new("x-api-key").unwrap()
+            ))
+        );
         assert!(matches!(
             key(&mut c, "{header.x-api-key}:{remote_net}", Captures::None),
             Some(KeyPlan::Template(_))

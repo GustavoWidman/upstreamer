@@ -297,6 +297,8 @@ pub(crate) enum KeyPlan {
     RemoteHost,
     /// `{remote_net}`: an IPv4 address, or an IPv6 address's /64.
     RemoteNet,
+    /// `{header.Name}`: the field's value is hashed where it lies in the header block.
+    Header(HeaderName),
     /// A constant: one bucket, one hash value.
     Const(u64),
     /// Anything else, expanded into the arena and hashed. An empty expansion is "no key".

@@ -6,7 +6,8 @@ use crate::plan::template::{Captures, Placeholder, Scope};
 
 impl Compiler<'_> {
     /// Parses a key template and specialises it: exactly `{remote_host}` -> `RemoteHost`,
-    /// exactly `{remote_net}` -> `RemoteNet`, a constant -> `Const(hash)`, else `Template`.
+    /// exactly `{remote_net}` -> `RemoteNet`, exactly `{header.Name}` -> `Header`, a constant
+    /// -> `Const(hash)`, else `Template`.
     /// A key reads the request alone: `{re.N}` and `{err.*}` are errors, and so is a constant
     /// that is empty (a key that never exists).
     pub(super) fn key(&mut self, src: &str, at: &Where, scope: &mut Scope<'_>) -> Option<KeyPlan> {
@@ -34,6 +35,7 @@ impl Compiler<'_> {
         Some(match template.as_placeholder() {
             Some(Placeholder::RemoteHost) => KeyPlan::RemoteHost,
             Some(Placeholder::RemoteNet) => KeyPlan::RemoteNet,
+            Some(Placeholder::Header(name)) => KeyPlan::Header(name.clone()),
             _ => KeyPlan::Template(template),
         })
     }
