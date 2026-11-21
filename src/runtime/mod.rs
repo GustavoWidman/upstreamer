@@ -30,7 +30,7 @@ use crate::limit::Limiters;
 use crate::log::{debug, warning};
 use crate::metrics;
 use crate::net::buf::BufPool;
-use crate::net::listen::{self, Listener};
+use crate::net::listen::{self, Inherited, Listener, SocketKind};
 use crate::net::{Socket, Transport};
 use crate::plan::{ListenerKey, ListenerKind, Plan, RegexId, ServerParams};
 use crate::proxy::pool::Pools;
@@ -39,8 +39,9 @@ use crate::upstream::{Registry, Upstreams};
 use std::cell::{Cell, RefCell};
 use std::io;
 use std::net::SocketAddr;
+use std::os::fd::OwnedFd;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -314,8 +315,62 @@ fn imf_fixdate(t: i64) -> [u8; 29] {
 struct Bound {
     key: ListenerKey,
     task: JoinHandle<()>,
-    /// The endpoint of a QUIC listener, kept to swap its TLS config at reload.
-    quic: Option<quinn::Endpoint>,
+    /// A second descriptor of the socket, for the process this one hands over to.
+    socket: OwnedFd,
+    quic: Option<Quic>,
+}
+
+/// The QUIC side of a listener.
+#[derive(Clone)]
+struct Quic {
+    /// Kept to swap its TLS config at reload.
+    endpoint: quinn::Endpoint,
+    /// quinn's hold on the UDP socket: gone once nothing in this process reads it.
+    io: Weak<dyn quinn::AsyncUdpSocket>,
+}
+
+/// The listeners a core does not serve yet. A process that takes over from another starts
+/// with every listener held, so it touches no connection before the other process lets go,
+/// and keeps the QUIC ones held while the other still reads their sockets: a datagram is
+/// read by one process only, and the other's connections need theirs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Hold {
+    All,
+    Quic,
+    Nothing,
+}
+
+impl Hold {
+    fn covers(self, transport: SocketKind) -> bool {
+        match self {
+            Hold::All => true,
+            Hold::Quic => transport == SocketKind::Udp,
+            Hold::Nothing => false,
+        }
+    }
+}
+
+/// How a core stops.
+#[derive(Clone)]
+pub(crate) struct Drain {
+    /// Whatever is still open then is cut.
+    pub deadline: Instant,
+    /// When idle keep-alive connections close. Until then a request that arrives on one is
+    /// answered, with `Connection: close`.
+    pub idle_close: Instant,
+    /// Dropped once this core reads none of its UDP sockets any more.
+    pub released: Option<Arc<OwnedFd>>,
+}
+
+impl Drain {
+    /// The process stops: idle connections close at once.
+    pub fn stop(deadline: Instant) -> Drain {
+        Drain {
+            deadline,
+            idle_close: Instant::now(),
+            released: None,
+        }
+    }
 }
 
 /// A listener that could not be bound on a core.
@@ -346,11 +401,19 @@ pub(crate) struct Core {
     pub draining: Cell<bool>,
     /// Woken once, when draining starts.
     drain_started: Notify,
+    /// Set when idle keep-alive connections are to close: when a stop starts, later when
+    /// another process took the listeners over and nothing waits for this one.
+    pub closing_idle: Cell<bool>,
+    /// Woken once, when `closing_idle` is set.
+    idle_close_started: Notify,
     /// Open downstream connections.
     conns: Cell<usize>,
     /// Woken when the last connection of a draining core ends.
     conns_closed: Notify,
     listeners: RefCell<Vec<Bound>>,
+    hold: Cell<Hold>,
+    /// Sockets handed to this core that no listener has taken.
+    inherited: RefCell<Vec<Inherited>>,
 }
 
 impl Core {
@@ -372,9 +435,13 @@ impl Core {
             connections: metrics::ConnCounters::default(),
             draining: Cell::new(false),
             drain_started: Notify::new(),
+            closing_idle: Cell::new(false),
+            idle_close_started: Notify::new(),
             conns: Cell::new(0),
             conns_closed: Notify::new(),
             listeners: RefCell::default(),
+            hold: Cell::new(Hold::Nothing),
+            inherited: RefCell::default(),
         }
     }
     /// The current snapshot. Held by a request for its duration; never across requests.
@@ -406,8 +473,10 @@ impl Core {
         *self.snapshot.borrow_mut() = new.clone();
         self.sync_listeners(&new).await
     }
-    /// Makes the bound listeners match the snapshot's plan, by key.
+    /// Makes the bound listeners match the snapshot's plan, by key, leaving out the held ones.
+    /// An inherited socket that no listener of the plan takes is closed, unless it is held.
     async fn sync_listeners(self: &Rc<Self>, snap: &CoreSnapshot) -> Vec<BindFailure> {
+        let hold = self.hold.get();
         let wanted = &snap.plan.listeners;
         let (kept, gone): (Vec<Bound>, Vec<Bound>) = self
             .listeners
@@ -417,12 +486,15 @@ impl Core {
         close(gone).await;
         let mut bound = kept;
         let mut failures = Vec::new();
-        for spec in wanted {
+        for spec in wanted
+            .iter()
+            .filter(|l| !hold.covers(SocketKind::of(l.key.kind)))
+        {
             match bound.iter().find(|b| b.key == spec.key) {
                 Some(b) => {
-                    if let (Some(endpoint), Some(config)) = (&b.quic, &snap.quic) {
+                    if let (Some(quic), Some(config)) = (&b.quic, &snap.quic) {
                         match quic_config(config.clone(), &snap.plan.server) {
-                            Ok(config) => endpoint.set_server_config(Some(config)),
+                            Ok(config) => quic.endpoint.set_server_config(Some(config)),
                             Err(error) => failures.push(BindFailure {
                                 addr: spec.key.addr,
                                 error,
@@ -440,10 +512,23 @@ impl Core {
             }
         }
         *self.listeners.borrow_mut() = bound;
+        self.inherited
+            .borrow_mut()
+            .retain(|socket| hold.covers(socket.transport));
         failures
     }
+    /// Serves `key` on the socket inherited for it, or binds one.
     fn listen(self: &Rc<Self>, key: ListenerKey, snap: &CoreSnapshot) -> io::Result<Bound> {
-        let fd = listen::bind(key.addr, key.kind)?;
+        let inherited = {
+            let mut sockets = self.inherited.borrow_mut();
+            let found = sockets.iter().position(|socket| socket.serves(key));
+            found.map(|at| sockets.swap_remove(at))
+        };
+        let fd = match inherited {
+            Some(socket) => socket.adopt()?,
+            None => listen::bind(key.addr, key.kind)?,
+        };
+        let socket = fd.try_clone()?;
         match key.kind {
             ListenerKind::Http | ListenerKind::Https => {
                 let listener = Listener::new(key, fd)?;
@@ -451,6 +536,7 @@ impl Core {
                 Ok(Bound {
                     key,
                     task,
+                    socket,
                     quic: None,
                 })
             }
@@ -459,22 +545,52 @@ impl Core {
                     .quic
                     .clone()
                     .ok_or_else(|| io::Error::other("QUIC listener without a TLS config"))?;
-                let endpoint = listen::quic_endpoint(fd, quic_config(config, &snap.plan.server)?)?;
+                let (endpoint, io) =
+                    listen::quic_endpoint(fd, quic_config(config, &snap.plan.server)?)?;
                 let task =
                     tokio::task::spawn_local(quic_accept_loop(self.clone(), key, endpoint.clone()));
                 Ok(Bound {
                     key,
                     task,
-                    quic: Some(endpoint),
+                    socket,
+                    quic: Some(Quic { endpoint, io }),
                 })
             }
         }
     }
-    /// Resolves once draining has started. Connections wait on it while idle.
+    /// Narrows the hold and serves the listeners it no longer covers.
+    async fn release(self: &Rc<Self>, hold: Hold) -> Vec<BindFailure> {
+        self.hold.set(hold);
+        self.sync_listeners(&self.snapshot()).await
+    }
+    /// A descriptor of every listening socket of this core, for the process that takes over.
+    fn sockets(&self) -> Vec<Inherited> {
+        let listeners = self.listeners.borrow();
+        let sockets = listeners.iter().filter_map(|bound| {
+            Some(Inherited {
+                transport: SocketKind::of(bound.key.kind),
+                addr: bound.key.addr,
+                fd: bound.socket.try_clone().ok()?,
+            })
+        });
+        sockets.collect()
+    }
+    /// Resolves once draining has started: connections stop taking new work and finish
+    /// what they have.
     pub async fn until_drain(&self) {
         if !self.draining.get() {
             self.drain_started.notified().await;
         }
+    }
+    /// Resolves once idle keep-alive connections are to close. They wait on it while idle.
+    pub async fn until_idle_close(&self) {
+        if !self.closing_idle.get() {
+            self.idle_close_started.notified().await;
+        }
+    }
+    fn close_idle(&self) {
+        self.closing_idle.set(true);
+        self.idle_close_started.notify_waiters();
     }
     /// Counts a connection accepted on `key` until the guard drops, so draining knows when
     /// the core is empty and the listener's metrics count it as closed.
@@ -486,41 +602,67 @@ impl Core {
             key,
         }
     }
-    /// Stops accepting, wakes idle connections so they close, and waits for the others to
-    /// finish until `deadline`. Whatever is still open then is cut when the runtime drops.
-    async fn drain(&self, deadline: Instant) {
+    /// Stops accepting and waits for the connections to finish until the deadline. Whatever is
+    /// still open then is cut when the runtime drops. Idle keep-alive connections close at
+    /// `idle_close`; QUIC endpoints end on their own once their connections have.
+    async fn drain(&self, drain: Drain) {
         self.draining.set(true);
         self.drain_started.notify_waiters();
-        let listeners = self.listeners.take();
-        let endpoints: Vec<quinn::Endpoint> =
-            listeners.iter().filter_map(|b| b.quic.clone()).collect();
-        close(listeners).await;
-        let deadline = tokio::time::Instant::from_std(deadline);
-        while self.conns.get() > 0 {
-            if tokio::time::timeout_at(deadline, self.conns_closed.notified())
-                .await
-                .is_err()
-            {
-                warning!(
-                    "core {}: {} connections cut at the shutdown deadline",
-                    self.index,
-                    self.conns.get()
-                );
-                break;
-            }
+        if drain.idle_close <= Instant::now() {
+            self.close_idle();
         }
+        let listeners = self.listeners.take();
+        let endpoints: Vec<Quic> = listeners.iter().filter_map(|b| b.quic.clone()).collect();
+        close(listeners).await;
+        let deadline = tokio::time::Instant::from_std(drain.deadline);
+        let idle_close = tokio::time::Instant::from_std(drain.idle_close);
+        let connections = async {
+            while self.conns.get() > 0 {
+                tokio::select! {
+                    closed = tokio::time::timeout_at(deadline, self.conns_closed.notified()) => {
+                        if closed.is_err() {
+                            warning!(
+                                "core {}: {} connections cut at the shutdown deadline",
+                                self.index,
+                                self.conns.get()
+                            );
+                            break;
+                        }
+                    }
+                    () = tokio::time::sleep_until(idle_close), if !self.closing_idle.get() => {
+                        self.close_idle();
+                    }
+                }
+            }
+        };
         // The connections' closing packets go out while their endpoints still run. At the
         // deadline the connections still open are closed rather than dropped, so their clients
         // learn at once instead of after their idle timeout.
-        for endpoint in endpoints {
-            if tokio::time::timeout_at(deadline, endpoint.wait_idle())
-                .await
-                .is_err()
-            {
-                endpoint.close(H3_NO_ERROR, b"");
-                let _ = tokio::time::timeout(CLOSE_GRACE, endpoint.wait_idle()).await;
+        let datagrams = async {
+            let mut sockets = Vec::with_capacity(endpoints.len());
+            for Quic { endpoint, io } in endpoints {
+                if tokio::time::timeout_at(deadline, endpoint.wait_idle())
+                    .await
+                    .is_err()
+                {
+                    endpoint.close(H3_NO_ERROR, b"");
+                    let _ = tokio::time::timeout(CLOSE_GRACE, endpoint.wait_idle()).await;
+                }
+                sockets.push(io);
             }
-        }
+            if let Some(released) = drain.released {
+                // An endpoint's driver stops reading once the last handle on the endpoint is
+                // gone, the next time it runs.
+                let stopped = async {
+                    while sockets.iter().any(|io| io.strong_count() > 0) {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                };
+                let _ = tokio::time::timeout_at(deadline + CLOSE_GRACE, stopped).await;
+                drop(released);
+            }
+        };
+        tokio::join!(connections, datagrams);
     }
 }
 
@@ -548,8 +690,8 @@ fn quic_config(
 /// their packets arrive on it.
 async fn close(listeners: Vec<Bound>) {
     for b in listeners {
-        if let Some(endpoint) = &b.quic {
-            endpoint.set_server_config(None);
+        if let Some(quic) = &b.quic {
+            quic.endpoint.set_server_config(None);
         }
         b.task.abort();
         let _ = b.task.await;
@@ -588,8 +730,13 @@ impl Drop for ConnGuard {
 pub(crate) enum ToCore {
     /// Install the generation, then report the listeners that could not be bound.
     Install(Arc<Generation>, oneshot::Sender<Vec<BindFailure>>),
-    /// Stop accepting, GOAWAY/close idle, finish in-flight within `deadline`.
-    Drain { deadline: Instant },
+    /// Narrow the hold, serve the listeners it no longer covers, then report those that could
+    /// not be bound.
+    Release(Hold, oneshot::Sender<Vec<BindFailure>>),
+    /// Report a descriptor of every listening socket of the core.
+    Sockets(oneshot::Sender<Vec<Inherited>>),
+    /// Stop accepting, GOAWAY, finish in-flight within the deadline.
+    Drain(Drain),
 }
 
 /// Handle the control thread keeps per core.
@@ -605,6 +752,19 @@ pub(crate) fn spawn_workers(
     cpus: &[usize],
     initial: Arc<Generation>,
 ) -> Result<Vec<Worker>, StartError> {
+    spawn_workers_with(cpus, initial, Vec::new(), Hold::Nothing)
+}
+
+/// [`spawn_workers`] for a process that was handed sockets: each core serves a listener on a
+/// socket inherited for it when there is one, and leaves the held listeners for a later
+/// [`ToCore::Release`].
+pub(crate) fn spawn_workers_with(
+    cpus: &[usize],
+    initial: Arc<Generation>,
+    inherited: Vec<Inherited>,
+    hold: Hold,
+) -> Result<Vec<Worker>, StartError> {
+    let mut shares = deal(inherited, cpus.len()).into_iter();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let mut workers = Vec::with_capacity(cpus.len());
     let mut failure = None;
@@ -612,9 +772,10 @@ pub(crate) fn spawn_workers(
         let (tx, rx) = mpsc::unbounded_channel();
         let initial = initial.clone();
         let ready = ready_tx.clone();
+        let inherited = shares.next().unwrap_or_default();
         let spawned = std::thread::Builder::new()
             .name(format!("upstreamer-core-{index}"))
-            .spawn(move || worker_main(index, cpu, rx, initial, ready));
+            .spawn(move || worker_main(index, cpu, rx, initial, inherited, hold, ready));
         match spawned {
             Ok(thread) => workers.push(Worker { thread, tx, cpu }),
             Err(e) => {
@@ -643,11 +804,41 @@ pub(crate) fn spawn_workers(
     }
 }
 
+/// One share of `sockets` per core: the sockets of one address go to different cores, in
+/// order, and those beyond the core count are closed (what is queued on them moves to the
+/// address's other sockets where `net.ipv4.tcp_migrate_req` is on).
+fn deal(sockets: Vec<Inherited>, cores: usize) -> Vec<Vec<Inherited>> {
+    let mut shares: Vec<Vec<Inherited>> = (0..cores).map(|_| Vec::new()).collect();
+    let mut dealt: Vec<(SocketKind, SocketAddr, usize)> = Vec::new();
+    for socket in sockets {
+        let key = (socket.transport, socket.addr);
+        let at = match dealt.iter().position(|(t, a, _)| (*t, *a) == key) {
+            Some(at) => at,
+            None => {
+                dealt.push((key.0, key.1, 0));
+                dealt.len() - 1
+            }
+        };
+        let next = dealt[at].2;
+        dealt[at].2 += 1;
+        if let Some(share) = shares.get_mut(next) {
+            share.push(socket);
+        }
+    }
+    shares
+}
+
 /// Drains every core with `deadline` and joins the threads.
 pub(crate) fn stop(workers: Vec<Worker>, deadline: Instant) {
+    retire(workers, Drain::stop(deadline));
+}
+
+/// Drains every core as `drain` says and joins the threads.
+pub(crate) fn retire(workers: Vec<Worker>, drain: Drain) {
     for w in &workers {
-        let _ = w.tx.send(ToCore::Drain { deadline });
+        let _ = w.tx.send(ToCore::Drain(drain.clone()));
     }
+    drop(drain);
     for w in workers {
         let _ = w.thread.join();
     }
@@ -660,6 +851,8 @@ fn worker_main(
     cpu: usize,
     mut rx: mpsc::UnboundedReceiver<ToCore>,
     initial: Arc<Generation>,
+    inherited: Vec<Inherited>,
+    hold: Hold,
     ready: std::sync::mpsc::Sender<Result<(), StartError>>,
 ) {
     if let Err(e) = pin(cpu) {
@@ -678,6 +871,8 @@ fn worker_main(
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
         let core = Rc::new(Core::new(index, &initial));
+        core.hold.set(hold);
+        core.inherited.replace(inherited);
         if let Some(f) = core
             .sync_listeners(&core.snapshot())
             .await
@@ -700,8 +895,14 @@ fn worker_main(
                 ToCore::Install(generation, done) => {
                     let _ = done.send(core.install(&generation).await);
                 }
-                ToCore::Drain { deadline } => {
-                    core.drain(deadline).await;
+                ToCore::Release(hold, done) => {
+                    let _ = done.send(core.release(hold).await);
+                }
+                ToCore::Sockets(done) => {
+                    let _ = done.send(core.sockets());
+                }
+                ToCore::Drain(drain) => {
+                    core.drain(drain).await;
                     break;
                 }
             }
@@ -1511,7 +1712,7 @@ mod tests {
                 !core.catalog.borrow_mut().probe(&root, b"page.html"),
                 "and drops mutable catalog entries"
             );
-            core.drain(Instant::now()).await;
+            core.drain(Drain::stop(Instant::now())).await;
         });
     }
 }
