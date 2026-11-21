@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
-upstreamer = { path = "..", features = ["internals"] }
+upstreamer = { path = "..", features = ["internals", "kubernetes"] }
 
 [[bin]]
 name = "request"
@@ -42,6 +42,34 @@ bench = false
 [[bin]]
 name = "h2_hpack"
 path = "fuzz_targets/h2_hpack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trust"
+path = "fuzz_targets/trust.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "files"
+path = "fuzz_targets/files.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "acme"
+path = "fuzz_targets/acme.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kube"
+path = "fuzz_targets/kube.rs"
 test = false
 doc = false
 bench = false

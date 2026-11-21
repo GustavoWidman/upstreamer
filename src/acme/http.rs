@@ -292,6 +292,31 @@ fn dechunk(mut rest: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
+/// Checks what [`Url::parse`] made of a URL a CA named: the text is kept, the target is a
+/// path without spaces or a fragment, the host is a lowercase name or address, the URL its
+/// parts make parses back to the same parts, and the file name holds only safe bytes.
+#[cfg(feature = "internals")]
+pub(super) fn check_url(url: &Url) {
+    assert!(url.target.starts_with('/'), "{url:?}");
+    assert!(
+        !url.target.bytes().any(|b| b <= b' ' || b == b'#'),
+        "{url:?}"
+    );
+    assert!(!url.host.is_empty() && url.host.bytes().all(|b| !b.is_ascii_uppercase()));
+    let again = Url::parse(&format!("https://{}{}", url.authority(), url.target))
+        .unwrap_or_else(|e| panic!("{url:?} does not parse back: {e}"));
+    assert_eq!(
+        (&again.host, again.port, &again.target),
+        (&url.host, url.port, &url.target)
+    );
+    let name = url.file_name();
+    assert!(
+        name.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_'),
+        "{name:?}"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

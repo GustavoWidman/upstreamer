@@ -79,6 +79,17 @@ pub use proto::h1::codec::harness as codec;
 #[doc(hidden)]
 pub use proto::h2::harness as h2;
 
+/// Entry points for the fuzz targets beyond the codecs; not part of the API.
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod fuzz {
+    pub use crate::acme::harness as acme;
+    #[cfg(feature = "kubernetes")]
+    pub use crate::discover::kube_harness as kube;
+    pub use crate::files::harness as files;
+    pub use crate::trust::harness as trust;
+}
+
 /// Balancing, rate-limit and metrics entry points for the benchmarks; not part of the API.
 #[cfg(feature = "internals")]
 #[doc(hidden)]

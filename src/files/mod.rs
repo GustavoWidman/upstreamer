@@ -247,6 +247,244 @@ fn fmt<'b>(buf: &'b mut [u8], args: std::fmt::Arguments<'_>) -> &'b [u8] {
     &buf[..written]
 }
 
+/// Fuzz entry points; not part of the API.
+#[cfg(feature = "internals")]
+pub mod harness {
+    use super::*;
+    use crate::exchange::{ConnInfo, ErrorInfo, Proto, Scheme};
+    use crate::msg::{RequestHead, Version};
+    use crate::plan::{ListenerKey, ListenerKind};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::LazyLock;
+
+    /// A served tree and its neighbours: `<base>/site` is the root, `<base>/secret` and
+    /// `<base>/site-evil/x` lie outside it. Every file has a length of its own, so a body
+    /// says which file it came from.
+    struct Tree {
+        root: Vec<u8>,
+        /// By length: the bytes of each file under the root, sidecars included.
+        inside: HashMap<u64, Vec<u8>>,
+    }
+
+    static TREE: LazyLock<Tree> = LazyLock::new(|| {
+        let base =
+            std::env::temp_dir().join(format!("upstreamer-fuzz-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mut inside = HashMap::new();
+        let mut write = |rel: &str, len: usize, within: bool| {
+            let path: PathBuf = base.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut bytes = format!("{rel}:").into_bytes();
+            bytes.extend(
+                (0..)
+                    .map(|i: u32| b'a' + (i % 26) as u8)
+                    .take(len - bytes.len()),
+            );
+            std::fs::write(&path, &bytes).unwrap();
+            if within {
+                assert!(
+                    inside.insert(len as u64, bytes).is_none(),
+                    "{rel}: lengths repeat"
+                );
+            }
+        };
+        write("secret", 4000, false);
+        write("site-evil/x", 4001, false);
+        write("site/../secret.copy", 4002, false);
+        for (i, rel) in [
+            "site/index.html",
+            "site/a.txt",
+            "site/a.txt.gz",
+            "site/dir/index.html",
+            "site/dir/b.css",
+            "site/dir/sub/c.js",
+            "site/%2e%2e",
+            "site/..a",
+            "site/\u{fc}.txt",
+            "site/with space",
+            "site/q?x",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            write(rel, 100 + 37 * i, true);
+        }
+        // Larger than a file kept in memory: answered from its descriptor.
+        write("site/big.bin", SMALL + 5, true);
+        std::fs::write(base.join("site/a.txt.etag"), "\"tag-a\"").unwrap();
+        Tree {
+            root: base.join("site").into_os_string().into_encoded_bytes(),
+            inside,
+        }
+    });
+
+    const SMALL: usize = catalog::SMALL_FILE as usize;
+    static INDEX: LazyLock<Vec<Box<[u8]>>> = LazyLock::new(|| vec![Box::from(&b"index.html"[..])]);
+
+    thread_local! {
+        static CATALOG: std::cell::RefCell<Catalog> = std::cell::RefCell::default();
+    }
+
+    /// A clean path: starts with `/`, no empty, `.` or `..` segment but a trailing `/`.
+    fn assert_clean(path: &[u8]) {
+        assert_eq!(path.first(), Some(&b'/'), "{path:?}");
+        let segments: Vec<&[u8]> = path[1..].split(|&b| b == b'/').collect();
+        for (i, segment) in segments.iter().enumerate() {
+            let last = i + 1 == segments.len();
+            assert!(!segment.is_empty() || last, "an empty segment in {path:?}");
+            assert!(
+                *segment != b"." && *segment != b"..",
+                "a dot segment in {path:?}"
+            );
+        }
+    }
+
+    /// A request for the file server, with header fields a client controls. The first byte
+    /// picks the method (low two bits), an error route (bit 2) and a `stripPrefix /dir`
+    /// before serving (bit 3); then the request-target, then `name: value` lines.
+    ///
+    /// The path the target cleans to is clean, cleans again to itself, and once joined to
+    /// the root names nothing outside it. A stripped prefix leaves a target whose bytes clean
+    /// to the path the routes saw. A response's body is bytes of a file under the root,
+    /// ranges and validators included, and a range lies within its file.
+    pub fn input(data: &[u8]) {
+        let Some((&options, rest)) = data.split_first() else {
+            return;
+        };
+        let mut lines = rest.split(|&b| b == b'\n');
+        let target = lines.next().unwrap_or_default();
+        let method: &[u8] = [&b"GET"[..], b"HEAD", b"POST", b"GET"][usize::from(options & 3)];
+        let conn = ConnInfo {
+            remote: "192.0.2.1:1000".parse().unwrap(),
+            local_port: 443,
+            scheme: Scheme::Https,
+            proto: Proto::H1,
+            listener: ListenerKey {
+                addr: "0.0.0.0:443".parse().unwrap(),
+                kind: ListenerKind::Https,
+            },
+        };
+        let mut ex = Exchange::new(conn, 0);
+        if ex.req.set_line(method, target, Version::Http11).is_err() {
+            return;
+        }
+        for line in lines {
+            if let Some(at) = line.iter().position(|&b| b == b':')
+                && line[..at].iter().all(|&b| crate::msg::is_tchar(b))
+                && line[at + 1..]
+                    .iter()
+                    .all(|&b| b == b'\t' || (b >= 0x20 && b != 0x7f))
+            {
+                ex.req.push_field(&line[..at], &line[at + 1..]);
+            }
+        }
+        check_path(&ex.req);
+        if options & 8 != 0 && ex.req.strip_prefix(b"/dir") {
+            check_path(&ex.req);
+            if ex.req.target() == crate::msg::Target::Original {
+                let raw = ex.req.raw_target();
+                let raw = raw.split(|&b| b == b'?').next().unwrap_or_default();
+                let mut again = Vec::new();
+                let span = crate::msg::clean_path(raw, &mut again);
+                assert_eq!(
+                    span.map(|s| s.get(&again)),
+                    Some(ex.req.path().as_bytes()),
+                    "the target sent upstream names another path than the routes saw"
+                );
+            }
+        }
+        if options & 4 != 0 {
+            ex.error = Some(ErrorInfo {
+                status: Status::NOT_FOUND,
+            });
+        }
+
+        let tree = &*TREE;
+        let root = ex.arena.push(&tree.root);
+        let options = Options {
+            precompressed: &[Encoding::Gzip],
+            etag_sidecar: Some(b".etag"),
+            index: &INDEX,
+        };
+        let served =
+            CATALOG.with_borrow_mut(|catalog| serve_with(&options, root, &mut ex, catalog));
+        let Ok(response) = served else {
+            return;
+        };
+        let head = &response.head;
+        let field = |name: &[u8]| {
+            head.fields
+                .live()
+                .find(|(n, _, _)| *n == name)
+                .map(|(_, v, _)| v.to_vec())
+        };
+        let body = match response.body {
+            Body::Empty => Vec::new(),
+            Body::Bytes(bytes) => bytes.to_vec(),
+            Body::File(file) => {
+                use std::os::unix::fs::FileExt;
+                let mut bytes = vec![0; (file.range.end - file.range.start) as usize];
+                file.file
+                    .read_exact_at(&mut bytes, file.range.start)
+                    .unwrap();
+                bytes
+            }
+            _ => unreachable!("the file server answers from files"),
+        };
+        match head.status.code() {
+            206 => {
+                let range = field(b"content-range").expect("a 206 has a Content-Range");
+                let range = std::str::from_utf8(&range).unwrap();
+                let (span, len) = range
+                    .strip_prefix("bytes ")
+                    .unwrap()
+                    .split_once('/')
+                    .unwrap();
+                let (first, last) = span.split_once('-').unwrap();
+                let (first, last, len): (u64, u64, u64) = (
+                    first.parse().unwrap(),
+                    last.parse().unwrap(),
+                    len.parse().unwrap(),
+                );
+                assert!(first <= last && last < len, "{range}");
+                let file = tree
+                    .inside
+                    .get(&len)
+                    .expect("a range of a file under the root");
+                assert_eq!(body, file[first as usize..=last as usize]);
+            }
+            304 => assert!(body.is_empty()),
+            416 => assert!(body.is_empty()),
+            _ => {
+                let file = tree.inside.get(&(body.len() as u64));
+                assert_eq!(Some(&body), file, "a body that is no file under the root");
+            }
+        }
+    }
+
+    fn check_path(req: &RequestHead) {
+        let path = req.path().as_bytes();
+        assert_clean(path);
+        // Cleaning is idempotent, from the wire (encoded) and from a rewrite (decoded).
+        let mut encoded = Vec::new();
+        for &b in path {
+            if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) {
+                encoded.push(b);
+            } else {
+                encoded.extend_from_slice(format!("%{b:02X}").as_bytes());
+            }
+        }
+        let mut again = RequestHead::new();
+        again
+            .set_line(b"GET", &encoded, Version::Http11)
+            .expect("a clean path parses");
+        assert_eq!(again.path().as_bytes(), path);
+        again.rewrite(path).expect("a clean path is a rewrite");
+        assert_eq!(again.path().as_bytes(), path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

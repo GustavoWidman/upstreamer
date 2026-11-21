@@ -1120,3 +1120,141 @@ mod tests {
         )
     }
 }
+
+/// Fuzz entry points; not part of the API.
+#[cfg(feature = "internals")]
+pub mod harness {
+    use super::*;
+    use crate::exchange::{Proto, Scheme};
+    use crate::msg::Version;
+    use crate::plan::{ListenerKey, ListenerKind};
+    use std::sync::LazyLock;
+
+    /// Cloudflare's ranges, a private IPv4 network, a documentation IPv6 network.
+    static PEERS: LazyLock<[TrustPlan; 3]> = LazyLock::new(|| {
+        let nets = || {
+            Nets::new(
+                cloudflare()
+                    .chain(["10.0.0.0/8", "2001:db8::/32"].map(|c| Cidr::parse(c).unwrap())),
+            )
+        };
+        ["CF-Connecting-IP", "X-Real-IP", "X-Forwarded-For"]
+            .map(|name| TrustPlan::new(nets(), Header::parse(name).unwrap()))
+    });
+
+    const PEER_ADDRS: [&str; 4] = [
+        "10.1.2.3:1000",
+        "[2001:db8::7]:1000",
+        "192.0.2.1:1000",
+        "[::ffff:10.0.0.1]:1000",
+    ];
+
+    /// A request from a peer, with header fields a client controls. The first byte picks
+    /// the header the plan believes (low two bits) and the peer (next two); the rest is
+    /// header lines, `name: value` or a bare value for the believed header, one per `\n`.
+    ///
+    /// A client address is either the peer's or one the header names, and only a trusted
+    /// peer's header counts. From an `X-Forwarded-For` chain the client is its rightmost
+    /// untrusted address, with every address right of it trusted, or its leftmost address
+    /// when all of them are trusted. The chain sent upstream ends with the peer and holds no
+    /// byte a header value may not. Each address written parses back to itself.
+    pub fn input(data: &[u8]) {
+        let Some((&options, lines)) = data.split_first() else {
+            return;
+        };
+        let plan = &PEERS[usize::from(options & 3) % 3];
+        let peer: std::net::SocketAddr = PEER_ADDRS[usize::from(options >> 2 & 3)].parse().unwrap();
+        let conn = ConnInfo {
+            remote: peer,
+            local_port: 443,
+            scheme: Scheme::Https,
+            proto: Proto::H1,
+            listener: ListenerKey {
+                addr: "0.0.0.0:443".parse().unwrap(),
+                kind: ListenerKind::Https,
+            },
+        };
+        let mut ex = Exchange::new(conn, 0);
+        ex.req.set_line(b"GET", b"/", Version::Http11).unwrap();
+        let header: &[u8] = match &plan.header {
+            Header::Single(name) => &name.name,
+            Header::ForwardedFor => b"x-forwarded-for",
+        };
+        // Bytes no HTTP/1.1, HTTP/2 or HTTP/3 field value carries.
+        let field_byte = |b: &u8| *b == b'\t' || (*b >= 0x20 && *b != 0x7f);
+        for line in lines.split(|&b| b == b'\n') {
+            let (name, value) = match line.iter().position(|&b| b == b':') {
+                Some(at) if at > 0 && line[..at].iter().all(|&b| crate::msg::is_tchar(b)) => {
+                    (&line[..at], &line[at + 1..])
+                }
+                _ => (header, line),
+            };
+            if value.iter().all(field_byte) {
+                ex.req.push_field(name, value);
+            }
+        }
+
+        resolve(plan, &mut ex);
+        let trusted = plan.peers.contains(peer.ip());
+        assert_eq!(ex.trusted_peer, trusted);
+        if !trusted {
+            assert_eq!(ex.client, peer.ip(), "an untrusted peer named the client");
+        } else if ex.client != peer.ip() {
+            match &plan.header {
+                Header::Single(name) => {
+                    let mut values = ex.req.fields.values(name);
+                    assert_eq!(values.next().and_then(parse_client), Some(ex.client));
+                    assert!(
+                        values.next().is_none(),
+                        "a repeated header named the client"
+                    );
+                }
+                Header::ForwardedFor => {
+                    let chain = chain(&ex.req);
+                    let at = chain.iter().rposition(|&e| e == Some(ex.client));
+                    let at = at.expect("the client is in the chain");
+                    let trusted = |e: &Option<IpAddr>| e.is_some_and(|ip| plan.peers.contains(ip));
+                    if plan.peers.contains(ex.client) {
+                        assert!(
+                            chain.iter().all(trusted),
+                            "a trusted client in a mixed chain"
+                        );
+                        assert_eq!(
+                            chain[0],
+                            Some(ex.client),
+                            "an all-trusted chain gives its first"
+                        );
+                    } else {
+                        assert!(chain[at + 1..].iter().all(trusted), "{chain:?}");
+                    }
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        forwarded_for(&ex.req, &ex.conn, ex.trusted_peer, &mut out);
+        assert!(out.iter().all(field_byte), "{out:?}");
+        let mut written = Vec::new();
+        crate::plan::template::write_ip(&mut written, peer.ip().to_canonical());
+        assert!(out.ends_with(&written));
+        if !trusted {
+            assert_eq!(out, written, "an untrusted peer's chain is not forwarded");
+        }
+        for ip in [ex.client, peer.ip()] {
+            written.clear();
+            crate::plan::template::write_ip(&mut written, ip);
+            assert_eq!(parse_client(&written), Some(ip.to_canonical()));
+        }
+    }
+
+    /// The entries of every `X-Forwarded-For` line, in order, each parsed or `None`.
+    fn chain(req: &RequestHead) -> Vec<Option<IpAddr>> {
+        req.fields
+            .values_known(Known::XForwardedFor)
+            .flat_map(|line| line.split(|&b| b == b','))
+            .map(trim)
+            .filter(|e| !e.is_empty())
+            .map(parse_client)
+            .collect()
+    }
+}
