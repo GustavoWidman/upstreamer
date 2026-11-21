@@ -232,7 +232,7 @@ pub(crate) fn finalize(site: &SitePlan, ex: &mut Exchange, resp: &mut Response) 
             Some(template) => match template.as_const() {
                 Some(value) => fields.set(&op.name, value),
                 None => {
-                    let value = template.expand(ex);
+                    let value = template.expand_field(ex);
                     fields.set(&op.name, ex.arena.get(value));
                 }
             },

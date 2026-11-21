@@ -178,6 +178,24 @@ impl Template {
         self.expand_uri(ex).0
     }
 
+    /// Expands a header field value. A placeholder can carry decoded bytes no field value
+    /// may hold (`{path}`, `{query.k}`, `{re.N}` of a decoded path): each control byte but
+    /// HTAB becomes a space (RFC 9110, section 5.5), so request data can neither end the
+    /// field nor make the head invalid.
+    pub fn expand_field(&self, ex: &mut Exchange) -> ASpan {
+        let span = self.expand(ex);
+        let bad = |b: &u8| (*b < 0x20 && *b != b'\t') || *b == 0x7f;
+        if !ex.arena.get(span).iter().any(bad) {
+            return span;
+        }
+        ex.arena.build(|out| {
+            for i in span.start as usize..span.end as usize {
+                let b = out[i];
+                out.push(if bad(&b) { b' ' } else { b });
+            }
+        })
+    }
+
     /// Expands a rewrite target, and says where its query starts: at the first `?` the
     /// template writes itself, in a literal or with `{?query}` or `{uri}`, as an offset into
     /// the span. A `?` that request data brings (a decoded `%3F` in `{path}`, a capture, a

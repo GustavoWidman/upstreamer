@@ -308,7 +308,7 @@ fn transform<'p>(action: &'p Action, ex: &mut Exchange, fx: &mut Effects<'_>) ->
         Action::ResponseHeaders(ops) => {
             for op in ops.iter() {
                 let name = ex.arena.push(&op.name.name);
-                let value = op.value.as_ref().map(|t| field_value(t, ex));
+                let value = op.value.as_ref().map(|t| t.expand_field(ex));
                 ex.pending.ops.push(PendingOp {
                     name,
                     tag: op.name.tag,
@@ -338,28 +338,11 @@ fn request_headers(ops: &[HeaderOp], ex: &mut Exchange) {
         match &op.value {
             None => ex.req.fields.remove(&op.name),
             Some(t) => {
-                let span = field_value(t, ex);
+                let span = t.expand_field(ex);
                 ex.req.fields.set(&op.name, ex.arena.get(span));
             }
         }
     }
-}
-
-/// Expands a header value. A placeholder can carry a decoded CR, LF or NUL (`{query.k}`,
-/// `{re.N}` of a decoded path), which a field value cannot hold: each becomes a space
-/// (RFC 9110, section 5.5).
-fn field_value(t: &crate::plan::Template, ex: &mut Exchange) -> ASpan {
-    let span = t.expand(ex);
-    let bad = |b: &u8| matches!(b, b'\r' | b'\n' | 0);
-    if !ex.arena.get(span).iter().any(bad) {
-        return span;
-    }
-    ex.arena.build(|out| {
-        for i in span.start as usize..span.end as usize {
-            let b = out[i];
-            out.push(if bad(&b) { b' ' } else { b });
-        }
-    })
 }
 
 fn answer<'p>(terminal: &'p Terminal, ex: &mut Exchange) -> Outcome<'p> {
@@ -1188,6 +1171,73 @@ mod tests {
         assert_eq!(
             routed(routes, "/q%3Fx?k=v"),
             ("/q?x.html".to_owned(), Some("k=v".to_owned()))
+        );
+    }
+
+    #[test]
+    fn decoded_control_bytes_become_spaces_in_every_header_a_template_writes() {
+        let plan = crate::runtime::testing::plan_from(
+            1,
+            &serde_json::json!({
+                "version": 1,
+                "listen": { "http": ["0.0.0.0:80"], "https": [] },
+                "sites": [{
+                    "name": "t",
+                    "hosts": ["*"],
+                    "headers": { "X-Site": "{query.a}" },
+                    "routes": [
+                        { "headers": { "X-Resp": "{query.a}" } },
+                        { "requestHeaders": { "X-Req": "{query.a}" } },
+                        { "proxy": { "to": "http://127.0.0.1:9", "headers": { "X-Up": "{query.a}" } } },
+                    ],
+                }],
+            }),
+        );
+        let mut regex = RegexCaches::for_plan(&plan);
+        let mut catalog = Catalog::default();
+        let mut ex = Exchange::new(conn(Scheme::Http), plan.var_count);
+        begin(
+            &mut ex,
+            &plan,
+            "GET http://h/?a=%0D%0AX-Evil:%201%0F%7F",
+            &[],
+        );
+        let (_, site) = plan.site_for(&ex.conn.listener, ex.req.host()).unwrap();
+        let Outcome::Proxy(proxy) =
+            run(&plan, site, &mut ex, &mut effects(&mut regex, &mut catalog))
+        else {
+            panic!("the request is proxied");
+        };
+        crate::proto::h1::client::write_request_head(
+            &mut ex,
+            proxy,
+            crate::proto::h1::codec::OutFraming::None,
+            false,
+        );
+        let sent = String::from_utf8(ex.out.clone()).unwrap();
+        assert!(sent.contains("\r\nx-req:   X-Evil: 1  \r\n"), "{sent:?}");
+        assert!(sent.contains("\r\nx-up:   X-Evil: 1  \r\n"), "{sent:?}");
+        assert!(!sent.contains("\r\nX-Evil"), "{sent:?}");
+
+        let mut response = crate::pipeline::Response {
+            head: ex.response_head(Status::OK),
+            body: crate::body::Body::Empty,
+            upgrade: None,
+            local: true,
+        };
+        crate::pipeline::finalize(site, &mut ex, &mut response);
+        let fields: Vec<(&[u8], &[u8])> = response
+            .head
+            .fields
+            .live()
+            .map(|(n, v, _)| (n, v))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                (&b"x-site"[..], &b"  X-Evil: 1  "[..]),
+                (b"x-resp", b"X-Evil: 1")
+            ]
         );
     }
 }

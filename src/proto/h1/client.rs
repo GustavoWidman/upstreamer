@@ -23,7 +23,7 @@ pub(crate) fn write_request_head(
         match &op.value {
             None => ex.req.fields.remove(&op.name),
             Some(template) => {
-                let value = template.expand(ex);
+                let value = template.expand_field(ex);
                 ex.req.fields.set(&op.name, ex.arena.get(value));
             }
         }
