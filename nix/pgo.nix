@@ -2,8 +2,12 @@
 # shaped like a fleet host's traffic (HTTP/1.1 cleartext and over TLS, full handshakes, large
 # responses and uploads, HTTP/2, HTTP/3, static files) through a local origin, and the counters it
 # writes on exit are merged into one profile. It is made from the same source as the build that
-# uses it, so it always matches the code it optimises; the counts vary a little from build to
-# build, so the optimised binary is not bit-for-bit reproducible.
+# uses it, so it always matches the code it optimises.
+#
+# Each load is a fixed number of requests, never a duration: how many requests a duration holds
+# depends on how busy the build machine is, and so would the profile's weights and with them the
+# optimiser's choices. With fixed counts two builds of one source train on the same work, and
+# their counters differ only where scheduling does (how often a socket read would block).
 {
   pkgs,
   craneLib,
@@ -26,7 +30,6 @@ pkgs.runCommand "upstreamer.profdata"
       instrumented
       origin
       h2load
-      pkgs.wrk
       pkgs.curl
     ];
   }
@@ -58,8 +61,6 @@ pkgs.runCommand "upstreamer.profdata"
     origin=$!
     upstreamer run --config upstreamer.json &
     proxy=$!
-    # Clients send SNI localhost: wrk takes it from the URL (and falls back from ::1 to
-    # 127.0.0.1), h2load from --sni.
     ready=
     for _ in $(seq 100); do
       if curl -skf -o /dev/null --resolve localhost:18443:127.0.0.1 https://localhost:18443/bytes/2; then
@@ -70,30 +71,28 @@ pkgs.runCommand "upstreamer.profdata"
     done
     [ -n "$ready" ] || { echo "upstreamer did not answer" >&2; exit 1; }
 
-    load_wrk() {
-      log=$(wrk -t2 -d3s "$@")
+    # load N ARGS...: N requests from h2load, every one answered 2xx. The counts keep the mix
+    # of a few seconds of each load on a build machine: weights close to the hot paths' share
+    # of a busy host's work. Every client sends SNI localhost.
+    load() {
+      n=$1
+      shift
+      log=$(h2load -t2 -n"$n" "$@")
       echo "$log"
-      if grep -q 'Non-2xx\|Socket errors' <<< "$log"; then
-        echo "training load failed: wrk $*" >&2
+      if ! grep -Eq "^requests: $n total, .* $n succeeded, 0 failed, 0 errored, 0 timeout" <<< "$log" ||
+        ! grep -Eq "^status codes: $n 2xx, 0 3xx, 0 4xx, 0 5xx" <<< "$log"; then
+        echo "training load failed: h2load -n$n $*" >&2
         exit 1
       fi
     }
-    load_h2load() {
-      log=$(h2load -t2 -D3 "$@")
-      echo "$log"
-      if ! grep -Eq 'status codes: [1-9][0-9]* 2xx, 0 3xx, 0 4xx, 0 5xx' <<< "$log"; then
-        echo "training load failed: h2load $*" >&2
-        exit 1
-      fi
-    }
-    load_wrk -c64 http://127.0.0.1:18081/bytes/1024
-    load_wrk -c64 https://localhost:18443/bytes/1024
-    load_wrk -c16 -H 'Connection: close' https://localhost:18443/bytes/1024
-    load_wrk -c16 https://localhost:18443/bytes/1048576
-    load_h2load -c16 --h1 --sni=localhost -d upload https://127.0.0.1:18443/bytes/2
-    load_h2load -c16 -m8 --sni=localhost https://127.0.0.1:18443/bytes/1024
-    load_h2load -c16 -m8 --sni=localhost https://127.0.0.1:18444/small.html
-    load_h2load -c16 -m8 --sni=localhost --alpn-list=h3 https://127.0.0.1:18443/bytes/1024
+    load 200000 -c64 --h1 http://127.0.0.1:18081/bytes/1024
+    load 200000 -c64 --h1 --sni=localhost https://127.0.0.1:18443/bytes/1024
+    load 12000 -c16 --h1 --sni=localhost -H 'Connection: close' https://127.0.0.1:18443/bytes/1024
+    load 5000 -c16 --h1 --sni=localhost https://127.0.0.1:18443/bytes/1048576
+    load 4500 -c16 --h1 --sni=localhost -d upload https://127.0.0.1:18443/bytes/2
+    load 300000 -c16 -m8 --sni=localhost https://127.0.0.1:18443/bytes/1024
+    load 1300000 -c16 -m8 --sni=localhost https://127.0.0.1:18444/small.html
+    load 160000 -c16 -m8 --sni=localhost --alpn-list=h3 https://127.0.0.1:18443/bytes/1024
 
     kill -TERM $proxy
     wait $proxy
