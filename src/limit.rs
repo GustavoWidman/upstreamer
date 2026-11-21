@@ -51,6 +51,7 @@
 
 use crate::exchange::Exchange;
 use crate::plan::{LimitPlan, LimitSpec, Plan};
+use crate::runtime::monotonic_nanos;
 use std::hash::{BuildHasher, RandomState};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -240,21 +241,6 @@ impl Table {
     fn unit_shift(&self) -> u32 {
         91 - self.shift
     }
-}
-
-/// Nanoseconds on `CLOCK_MONOTONIC`, the clock `Instant` reads on Linux, as one integer: the
-/// time since a table's origin is one subtraction, where `Instant`'s is a checked subtraction
-/// of seconds and nanoseconds.
-fn monotonic_nanos() -> u64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: `ts` is a valid, writable timespec; CLOCK_MONOTONIC is always available.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-    (ts.tv_sec as u64)
-        .wrapping_mul(1_000_000_000)
-        .wrapping_add(ts.tv_nsec as u64)
 }
 
 /// Units from `now` to the TAT in `word`, negative when it is in the past: the 40-bit

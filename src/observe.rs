@@ -9,8 +9,8 @@ use crate::access;
 use crate::exchange::{ASpan, Exchange, RefusedBy};
 use crate::msg::Status;
 use crate::plan::{LogId, Observe};
-use crate::runtime::{Core, CoreSnapshot};
-use std::time::{Duration, Instant};
+use crate::runtime::{Core, CoreSnapshot, monotonic_nanos};
+use std::time::Duration;
 
 /// What the pipeline noted about a request, until the driver finishes it. `Copy` and as small
 /// as the access log's record was (32 bytes on Linux): the pipeline future holds it across the
@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 /// upstream attempt lives in the exchange instead ([`Upstream`]).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Started {
-    at: Instant,
+    /// [`monotonic_nanos`] when the request started.
+    at: u64,
     /// The request's fields, formatted into the arena while still as received; empty unless
     /// `log`.
     request: ASpan,
@@ -53,7 +54,7 @@ impl Answer {
 
 /// One clock read; for a logging site, the request's fields into the arena.
 pub(crate) fn start(observe: &Observe, ex: &mut Exchange) -> Started {
-    let at = Instant::now();
+    let at = monotonic_nanos();
     let request = match observe.log {
         Some(_) => access::request_fields(ex),
         None => ASpan::default(),
@@ -96,8 +97,8 @@ impl Started {
 }
 
 /// Microseconds since `at`, saturating at about 71 minutes.
-fn micros_since(at: Instant) -> u32 {
-    at.elapsed().as_micros().min(u128::from(u32::MAX)) as u32
+fn micros_since(at: u64) -> u32 {
+    (monotonic_nanos().saturating_sub(at) / 1_000).min(u64::from(u32::MAX)) as u32
 }
 
 /// Called by the driver once the response or tunnel is over, with what it sent and the
@@ -111,37 +112,32 @@ pub(crate) fn finish(
     status: Status,
     bytes: u64,
 ) {
-    let end = Instant::now();
+    let end = monotonic_nanos();
+    let took = Duration::from_nanos(end.saturating_sub(started.at));
     if let Some(log) = started.log {
         let line = access::Line {
             ts: core.clock.wall(end),
             request: ex.arena.get(started.request),
             status,
             bytes,
-            duration: end.saturating_duration_since(started.at),
+            duration: took,
             upstream: ex.origin.map(|id| &snap.upstreams.origin(id).spec),
         };
         core.access.append(&snap.access, log, |out| line.write(out));
     }
     if started.metrics {
-        record_metrics(snap, ex, &started, status, end);
+        record_metrics(snap, ex, status, took);
     }
 }
 
 /// The metrics half of [`finish`]: the request's series, its rejection by a `limit` step,
 /// and its upstream series when it was proxied (`ex.upstream`). Three to eight `Cell` adds.
 #[inline]
-fn record_metrics(
-    snap: &CoreSnapshot,
-    ex: &Exchange,
-    started: &Started,
-    status: Status,
-    end: Instant,
-) {
+fn record_metrics(snap: &CoreSnapshot, ex: &Exchange, status: Status, took: Duration) {
     let Some(counters) = &snap.metrics else {
         return;
     };
-    counters.request(ex.route, status, end.saturating_duration_since(started.at));
+    counters.request(ex.route, status, took);
     if matches!(ex.refused, Some(r) if r.by == RefusedBy::Limit) {
         counters.limited(ex.route);
     }
@@ -159,11 +155,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn started_is_no_larger_than_an_instant_and_two_words() {
+    fn started_is_no_larger_than_three_words() {
         let size = size_of::<Started>();
-        assert!(
-            size <= size_of::<Instant>() + 16,
-            "observe::Started is {size} bytes"
-        );
+        assert!(size <= 24, "observe::Started is {size} bytes");
     }
 }

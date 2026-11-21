@@ -191,6 +191,22 @@ impl RegexCaches {
 /// start, so every core counts the same seconds.
 pub(crate) static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
+/// Nanoseconds on `CLOCK_MONOTONIC`, the clock `Instant` reads on Linux, as one integer: a
+/// duration between two readings is one subtraction, where `Instant`'s is a checked
+/// subtraction of seconds and nanoseconds. For what a request measures per request: its
+/// duration, its upstream's, a rate limit's arrival time.
+pub(crate) fn monotonic_nanos() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid, writable timespec; CLOCK_MONOTONIC is always available.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    (ts.tv_sec as u64)
+        .wrapping_mul(1_000_000_000)
+        .wrapping_add(ts.tv_nsec as u64)
+}
+
 /// Coarse clock: unix seconds and the formatted `Date` value, refreshed once per second by a
 /// core-local timer (no `clock_gettime` or formatting per response).
 pub(crate) struct Clock {
@@ -198,9 +214,9 @@ pub(crate) struct Clock {
     /// Whole seconds since [`START`]: the health clock (ejections and probes).
     pub mono: Cell<u32>,
     pub http_date: RefCell<[u8; 29]>,
-    /// The system time and the monotonic time read together at the last tick, so a
+    /// The system time and [`monotonic_nanos`] read together at the last tick, so a
     /// monotonic reading converts to wall time without another clock read.
-    anchor: Cell<(Duration, Instant)>,
+    anchor: Cell<(Duration, u64)>,
 }
 
 impl Clock {
@@ -210,7 +226,7 @@ impl Clock {
             unix: Cell::new(0),
             mono: Cell::new(0),
             http_date: RefCell::new(*b"Thu, 01 Jan 1970 00:00:00 GMT"),
-            anchor: Cell::new((Duration::ZERO, Instant::now())),
+            anchor: Cell::new((Duration::ZERO, 0)),
         };
         clock.tick();
         clock
@@ -220,8 +236,8 @@ impl Clock {
         let wall = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
+        self.anchor.set((wall, monotonic_nanos()));
         let now = Instant::now();
-        self.anchor.set((wall, now));
         let start = *START.get_or_init(|| now);
         self.mono
             .set(now.saturating_duration_since(start).as_secs() as u32);
@@ -231,10 +247,11 @@ impl Clock {
             *self.http_date.borrow_mut() = imf_fixdate(now);
         }
     }
-    /// The time since the Unix epoch at `at`, a monotonic reading taken after the last tick.
-    pub fn wall(&self, at: Instant) -> Duration {
+    /// The time since the Unix epoch at `at`, a [`monotonic_nanos`] reading taken after the
+    /// last tick.
+    pub fn wall(&self, at: u64) -> Duration {
         let (wall, anchor) = self.anchor.get();
-        wall + at.saturating_duration_since(anchor)
+        wall + Duration::from_nanos(at.saturating_sub(anchor))
     }
 }
 
