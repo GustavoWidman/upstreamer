@@ -383,6 +383,253 @@ fn answer<'p>(terminal: &'p Terminal, ex: &mut Exchange) -> Outcome<'p> {
     }
 }
 
+/// Fuzz entry points; not part of the API.
+#[cfg(feature = "internals")]
+pub mod harness {
+    use super::*;
+    use crate::exchange::{ConnInfo, ErrorInfo, Proto, Scheme};
+    use crate::msg::{Target, Version};
+    use crate::plan::template::{Part, Placeholder, Template};
+    use crate::plan::{BalancePlan, KeyPlan, ListenerKind};
+    use crate::proto::h1::codec::{self, Limits, OutFraming, Parsed};
+    use std::cell::RefCell;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    /// Plans to route through: one that uses every placeholder, matcher and keyed feature,
+    /// then the fleet's configs.
+    const CONFIGS: [&str; 6] = [
+        include_str!("../tests/fixtures/fuzz/route.json"),
+        include_str!("../tests/fixtures/config/apps.json"),
+        include_str!("../tests/fixtures/config/custom.json"),
+        include_str!("../tests/fixtures/config/desktop.json"),
+        include_str!("../tests/fixtures/config/edge.json"),
+        include_str!("../tests/fixtures/config/observed.json"),
+    ];
+
+    /// The fragments the fleet's configs include, by store path.
+    struct Fragments;
+
+    impl crate::plan::compile::Sources for Fragments {
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            let text = match path.file_name().and_then(|n| n.to_str()) {
+                Some("blog.json") => include_str!("../tests/fixtures/site/upstreamer/blog.json"),
+                Some("main.json") => include_str!("../tests/fixtures/site/upstreamer/main.json"),
+                _ => return Err(std::io::ErrorKind::NotFound.into()),
+            };
+            Ok(text.replace("@out@", "/nonexistent").into_bytes())
+        }
+    }
+
+    struct Router {
+        plan: Plan,
+        regex: RegexCaches,
+        catalog: Catalog,
+        limits: Arc<Limiters>,
+    }
+
+    thread_local! {
+        static ROUTERS: RefCell<Vec<Router>> = RefCell::new(
+            CONFIGS
+                .iter()
+                .map(|text| {
+                    let config =
+                        crate::config::parse_config(crate::config::Format::Json, text.as_bytes())
+                            .unwrap_or_else(|e| panic!("{}: {}", e.pointer, e.message))
+                            .value;
+                    let (plan, _) = crate::plan::compile::compile(&config, &Fragments, 1)
+                        .unwrap_or_else(|d| panic!("{d:?}"));
+                    Router {
+                        regex: RegexCaches::for_plan(&plan),
+                        catalog: Catalog::default(),
+                        limits: Limiters::carry(&plan, None),
+                        plan,
+                    }
+                })
+                .collect()
+        );
+    }
+
+    const PEERS: [&str; 4] = [
+        "10.1.1.1:4000",
+        "192.0.2.9:4000",
+        "[2001:db8::5]:4000",
+        "[::1]:4000",
+    ];
+
+    /// No field value holds these (RFC 9110, section 5.5).
+    fn bad(b: &u8) -> bool {
+        (*b < 0x20 && *b != b'\t') || *b == 0x7f
+    }
+
+    fn assert_fields(fields: &crate::msg::Fields) {
+        for (name, value, _) in fields.live() {
+            assert!(
+                !value.iter().any(bad),
+                "{:?}: {value:?}",
+                String::from_utf8_lossy(name)
+            );
+        }
+    }
+
+    /// A request routed through a plan. The first byte picks the plan (low three bits), the
+    /// listener (next three) and the peer (top two). Then lines: `METHOD target` (or a
+    /// target for GET), the Host, and header fields, read by the HTTP/1.1 parser.
+    ///
+    /// Whatever the request, routing leaves a clean path, request and response header
+    /// fields without a control byte but HTAB, and a target for the upstream whose path is
+    /// the one the routes saw. The head a proxy step would send parses back whole, every byte of
+    /// it. A key hashes the same twice, and a `{header.Name}` key hashes as its expansion.
+    pub fn input(data: &[u8]) {
+        let Some((&options, rest)) = data.split_first() else {
+            return;
+        };
+        ROUTERS.with_borrow_mut(|routers| {
+            let count = routers.len();
+            let router = &mut routers[usize::from(options & 7) % count];
+            route(router, options, rest);
+        });
+    }
+
+    fn route(router: &mut Router, options: u8, rest: &[u8]) {
+        let plan = &router.plan;
+        let listener = plan.listeners[usize::from(options >> 3 & 7) % plan.listeners.len()].key;
+        let conn = ConnInfo {
+            remote: PEERS[usize::from(options >> 6)].parse().unwrap(),
+            local_port: listener.addr.port(),
+            scheme: match listener.kind {
+                ListenerKind::Http => Scheme::Http,
+                _ => Scheme::Https,
+            },
+            proto: Proto::H1,
+            listener,
+        };
+        // The request as the HTTP/1.1 parser reads it, so it holds what a client can send.
+        let mut lines = rest.split(|&b| b == b'\n');
+        let line = lines.next().unwrap_or_default();
+        let mut head = Vec::with_capacity(rest.len() + 64);
+        if !line.contains(&b' ') {
+            head.extend_from_slice(b"GET ");
+        }
+        head.extend_from_slice(line);
+        head.extend_from_slice(b" HTTP/1.1\r\nhost: ");
+        for line in lines {
+            head.extend_from_slice(line);
+            head.extend_from_slice(b"\r\n");
+        }
+        head.extend_from_slice(b"\r\n");
+        let mut ex = Exchange::new(conn, plan.var_count);
+        let params = crate::plan::ServerParams::default();
+        let limits = Limits {
+            max_head_bytes: params.max_head_bytes,
+            max_header_fields: params.max_header_fields,
+        };
+        if !matches!(
+            codec::parse_request(&head, &limits, &mut ex.req),
+            Ok(Parsed::Complete { .. })
+        ) {
+            return;
+        }
+        let Some((_, site)) = plan.site_for(&ex.conn.listener, ex.req.host()) else {
+            return;
+        };
+        if let Some(trust) = &plan.trust {
+            crate::trust::resolve(trust, &mut ex);
+        }
+        let mut fx = Effects {
+            regex: &mut router.regex,
+            catalog: &mut router.catalog,
+            now: 1_800_000_000,
+            limits: &router.limits,
+        };
+        let mut outcome = run(plan, site, &mut ex, &mut fx);
+        if let Outcome::Error(status) = outcome {
+            ex.error = Some(ErrorInfo { status });
+            if let Some(again) = run_error(plan, site, &mut ex, &mut fx) {
+                outcome = again;
+            }
+        }
+
+        crate::files::harness::assert_clean(ex.req.path().as_bytes());
+        assert_fields(&ex.req.fields);
+        let mut response = crate::pipeline::Response {
+            head: ex.response_head(Status::OK),
+            body: crate::body::Body::Empty,
+            upgrade: None,
+            local: true,
+        };
+        crate::pipeline::finalize(site, &mut ex, &mut response);
+        assert_fields(&response.head.fields);
+        let mut target = Vec::new();
+        ex.req.write_upstream_target(&mut target);
+        if target.first() == Some(&b'/') {
+            let mut again = crate::msg::RequestHead::new();
+            again
+                .set_line(b"GET", &target, Version::Http11)
+                .unwrap_or_else(|_| panic!("the upstream target {target:?} does not parse"));
+            if ex.req.target() == Target::Rebuilt || again.path() == ex.req.path() {
+                assert_eq!(again.path(), ex.req.path(), "upstream target {target:?}");
+            }
+        }
+
+        let mut keys = Vec::new();
+        limit_keys(&site.routes, &mut keys);
+        for key in keys {
+            check_key(key, &mut ex);
+        }
+        if let Outcome::Proxy(proxy) = outcome {
+            if let crate::plan::Target::Pool(id) = proxy.to
+                && let BalancePlan::Hash(key) = &plan.pools[id.0 as usize].balance
+            {
+                check_key(key, &mut ex);
+            }
+            let framing = match ex.req.method {
+                crate::msg::Method::Get => OutFraming::None,
+                _ => OutFraming::Length(3),
+            };
+            crate::proto::h1::client::write_request_head(&mut ex, proxy, framing, false);
+            assert_fields(&ex.req.fields);
+            let limits = Limits {
+                max_head_bytes: u32::MAX,
+                max_header_fields: 256,
+            };
+            let mut sent = crate::msg::RequestHead::new();
+            match codec::parse_request(&ex.out, &limits, &mut sent) {
+                Ok(Parsed::Complete { head_len, .. }) => {
+                    assert_eq!(
+                        head_len,
+                        ex.out.len(),
+                        "{:?}",
+                        String::from_utf8_lossy(&ex.out)
+                    )
+                }
+                other => panic!("{other:?}: {:?}", String::from_utf8_lossy(&ex.out)),
+            }
+        }
+    }
+
+    fn limit_keys<'p>(block: &'p Block, keys: &mut Vec<&'p KeyPlan>) {
+        for step in block.steps.iter() {
+            match &step.action {
+                Action::Limit(limit) => keys.push(&limit.key),
+                Action::Block(block) => limit_keys(block, keys),
+                _ => {}
+            }
+        }
+    }
+
+    fn check_key(key: &KeyPlan, ex: &mut Exchange) {
+        let seed = crate::key::FIXED_SEED;
+        let first = crate::key::hash(key, ex, seed);
+        assert_eq!(first, crate::key::hash(key, ex, seed), "{key:?}");
+        if let KeyPlan::Header(name) = key {
+            let template = Template::from_parts(vec![Part::Ph(Placeholder::Header(name.clone()))]);
+            let expanded = crate::key::hash(&KeyPlan::Template(template), ex, seed);
+            assert_eq!(first, expanded, "{key:?}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Golden routing tables (`tests/fixtures/routing/*.json`): each case is a request and what
