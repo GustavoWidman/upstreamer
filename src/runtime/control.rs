@@ -11,18 +11,26 @@
 //! certificate per name. Running reload twice with the same inputs publishes an equivalent
 //! generation.
 //!
+//! A SIGHUP that finds another program file at the path this one was started from hands over
+//! to it instead ([`handover`]): a process of the new file takes the listening sockets, and
+//! `MAINPID=` with `READY=1` moves the service's main process to it and ends the reload. This
+//! process then drains like a stopping one, without a word to systemd, whose main process it
+//! no longer is. A handover that fails is a failed reload: the running generation stays.
+//!
 //! The control thread also keeps what outlives generations ([`Live`]): the upstream registry
 //! (health cells, last discovered endpoints), the discovery feed, the metrics hub and the ACME
 //! client. A generation is published one way, [`publish`], whatever caused it: a reload, a
 //! ticket rotation, a discovery change or a certificate issued in process.
 
-use super::{BindFailure, Generation, START, TlsState, ToCore, Worker};
+use super::handover::{self, Start};
+use super::{BindFailure, Drain, Generation, Hold, START, TlsState, ToCore, Worker};
 use crate::access::{self, OpenFailure};
 use crate::acme;
 use crate::discover::Feed;
 use crate::limit::Limiters;
 use crate::log::{error, info, warning};
 use crate::metrics::{self, Hub};
+use crate::net::listen::Inherited;
 use crate::plan::{Diagnostic, ListenerKind, Plan};
 use crate::tls::{self, CertProblem, TicketKeys};
 use crate::upstream::Registry;
@@ -45,10 +53,12 @@ pub(crate) type LoadPlan<'a> =
 pub(crate) fn run(opts: RunOptions) -> Result<(), StartError> {
     crate::log::init();
     let path = opts.config;
+    let start = Start::from_env().map_err(|e| StartError::Runtime(std::io::Error::other(e)))?;
     serve(
         &mut |generation| crate::plan::load(&path, generation),
         opts.workers,
         &Notifier::from_env(),
+        start,
     )
 }
 
@@ -58,6 +68,9 @@ pub(crate) struct Live {
     pub discovery: Feed,
     pub hub: Arc<Hub>,
     pub acme: acme::Manager,
+    /// Ticket keys from the process this one took over from, for the first generation that
+    /// serves TLS.
+    tickets: Option<Arc<TicketKeys>>,
 }
 
 impl Live {
@@ -67,6 +80,7 @@ impl Live {
             discovery: Feed::new(),
             hub: Hub::new(cores),
             acme: acme::Manager::new(),
+            tickets: None,
         }
     }
 
@@ -78,17 +92,25 @@ impl Live {
     }
 }
 
-/// Starts the cores, then serves signals until SIGTERM or SIGINT. Blocks the calling thread.
+/// Starts the cores, then serves signals until SIGTERM or SIGINT, or until it has handed over
+/// to another process. Blocks the calling thread.
 pub(crate) fn serve(
     load: &mut LoadPlan<'_>,
     workers: Option<u16>,
     notifier: &Notifier,
+    start: Start,
 ) -> Result<(), StartError> {
+    let Start {
+        launch,
+        sockets,
+        tickets,
+        mut predecessor,
+    } = start;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(StartError::Runtime)?;
-    runtime.block_on(async {
+    let served = runtime.block_on(async {
         // Handlers first: from READY=1 on, a SIGHUP must reload rather than kill.
         let mut hangup = signal(SignalKind::hangup()).map_err(StartError::Runtime)?;
         let mut terminate = signal(SignalKind::terminate()).map_err(StartError::Runtime)?;
@@ -99,12 +121,36 @@ pub(crate) fn serve(
         let (plan, warnings) = load(generation).map_err(StartError::Config)?;
         let cpus = assign_cpus(workers.or(plan.workers));
         let mut live = Live::new(cpus.len());
+        // An inherited key rotates when it would have where it came from.
+        let mut rotated = Instant::now();
+        if let Some((keys, age)) = tickets {
+            live.tickets = Some(Arc::new(keys));
+            rotated = rotated.checked_sub(age).unwrap_or(rotated);
+        }
         let (current, problems) = assemble(plan, None, &mut live);
         report(&warnings, &problems);
         let mut current = Arc::new(current);
         live.hub.control().generation = generation;
-        let workers = super::spawn_workers(&cpus, current.clone())?;
-        live.adopted(&current);
+        let hold = match predecessor {
+            Some(_) => Hold::All,
+            None => Hold::Nothing,
+        };
+        let workers = super::spawn_workers_with(&cpus, current.clone(), sockets, hold)?;
+        live.discovery.set_sources(&current.plan);
+        if let Some(predecessor) = &mut predecessor {
+            let promoted = match predecessor.ready() {
+                Ok(()) => predecessor.promoted().await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = promoted {
+                super::stop(workers, Instant::now());
+                return Err(StartError::Runtime(e));
+            }
+            log_bind_failures(&release(&workers, Hold::Quic).await);
+        }
+        // Certificates are ordered by the main process alone: the validation requests of an
+        // order reach whichever process accepts them.
+        live.acme.set_plan(&current.plan);
         crate::discover::publish(&live.registry, &live.hub);
         info!(
             "serving generation {generation} on {} cores, {} listeners",
@@ -113,17 +159,53 @@ pub(crate) fn serve(
         );
         notifier.notify(&format!("READY=1\nSTATUS={}", status_line(&current, &live)));
 
+        let next_rotation = (rotated + TICKET_ROTATION).max(Instant::now());
         let mut rotate = tokio::time::interval_at(
-            tokio::time::Instant::now() + TICKET_ROTATION,
+            tokio::time::Instant::from_std(next_rotation),
             TICKET_ROTATION,
         );
-        loop {
+        let handed_over = loop {
             tokio::select! {
                 _ = hangup.recv() => {
                     generation += 1;
+                    if let Some(launch) = launch.as_ref().filter(|launch| launch.replaced()) {
+                        notifier.notify(&format!(
+                            "RELOADING=1\nMONOTONIC_USEC={}",
+                            monotonic_usec()
+                        ));
+                        let tickets = current
+                            .tls
+                            .as_ref()
+                            .map(|tls| handover::Tickets::of(&tls.tickets, rotated.elapsed()));
+                        let offered = tokio::select! {
+                            offered = hand_over(launch, &workers, tickets) => offered,
+                            // The offer is dropped, and its process killed with it.
+                            _ = terminate.recv() => break None,
+                            _ = interrupt.recv() => break None,
+                        };
+                        match offered {
+                            Ok(successor) => break Some(successor),
+                            Err(reason) => {
+                                live.hub.control().reloads_rejected += 1;
+                                let reason = format!(
+                                    "cannot hand over to {}: {}",
+                                    launch.path().display(),
+                                    reason.replace('\n', " ")
+                                );
+                                error!("reload rejected: {reason}");
+                                notifier.notify(&format!(
+                                    "READY=1\nSTATUS=reload failed, still serving generation {}: \
+                                     {reason}",
+                                    current.plan.generation
+                                ));
+                            }
+                        }
+                        continue;
+                    }
                     reload(load, &mut current, generation, &workers, notifier, &mut live).await;
                 }
                 _ = rotate.tick() => {
+                    rotated = Instant::now();
                     if let Some(tls) = &current.tls {
                         let next = Arc::new(Generation {
                             tls: Some(TlsState {
@@ -163,13 +245,107 @@ pub(crate) fn serve(
                         }
                     }
                 },
-                _ = terminate.recv() => break,
-                _ = interrupt.recv() => break,
+                () = released(&mut predecessor) => {
+                    predecessor = None;
+                    log_bind_failures(&release(&workers, Hold::Nothing).await);
+                }
+                _ = terminate.recv() => break None,
+                _ = interrupt.recv() => break None,
+            }
+        };
+        let grace = current.plan.server.shutdown;
+        match handed_over {
+            None => shutdown(workers, grace, notifier),
+            Some(successor) => {
+                // Discovery and certificate orders are the successor's from here on.
+                drop(live);
+                retire(workers, grace, notifier, successor);
             }
         }
-        shutdown(workers, current.plan.server.shutdown, notifier);
         Ok(())
-    })
+    });
+    if let (Err(e), Some(predecessor)) = (&served, &mut predecessor) {
+        predecessor.failed(&e.to_string());
+    }
+    served
+}
+
+/// Resolves once the process this one took over from reads the UDP sockets no more. Pending
+/// forever without such a process.
+async fn released(predecessor: &mut Option<handover::Predecessor>) {
+    match predecessor {
+        Some(predecessor) => predecessor.released().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Starts the program at `launch` with every core's listening sockets and waits until it is
+/// ready to serve them.
+async fn hand_over(
+    launch: &handover::Launch,
+    workers: &[Worker],
+    tickets: Option<handover::Tickets>,
+) -> Result<handover::Successor, String> {
+    let sockets = sockets(workers).await;
+    handover::offer(launch, sockets, tickets, handover::READY_TIMEOUT).await
+}
+
+/// The end of a process that handed over: the successor becomes the service's main process
+/// and is told so, then every core drains. Idle keep-alive connections stay open for half the
+/// grace, since nothing waits for this process to exit and a request that arrives on one is
+/// then answered instead of meeting a closed connection.
+fn retire(
+    workers: Vec<Worker>,
+    grace: Duration,
+    notifier: &Notifier,
+    successor: handover::Successor,
+) {
+    let pid = successor.pid;
+    info!(
+        "handing over to process {pid}; draining, at most {} ms",
+        grace.as_millis()
+    );
+    notifier.notify(&format!("MAINPID={pid}\nREADY=1"));
+    let released = successor
+        .promote()
+        .inspect_err(|e| error!("the handover pipe: {e}"))
+        .ok();
+    let now = Instant::now();
+    let drain = Drain {
+        deadline: now + grace,
+        idle_close: now + grace / 2,
+        released,
+    };
+    super::retire(workers, drain);
+}
+
+/// A descriptor of every listening socket, each core's in core order.
+async fn sockets(workers: &[Worker]) -> Vec<Inherited> {
+    let mut pending = Vec::with_capacity(workers.len());
+    for w in workers {
+        let (done, report) = tokio::sync::oneshot::channel();
+        if w.tx.send(ToCore::Sockets(done)).is_ok() {
+            pending.push(report);
+        }
+    }
+    let mut sockets = Vec::new();
+    for report in pending {
+        sockets.extend(report.await.unwrap_or_default());
+    }
+    sockets
+}
+
+/// Narrows every core's hold and waits until each serves what it no longer covers. Returns the
+/// listeners that could not be bound, once per address.
+async fn release(workers: &[Worker], hold: Hold) -> Vec<BindFailure> {
+    let mut pending = Vec::with_capacity(workers.len());
+    for w in workers {
+        let (done, report) = tokio::sync::oneshot::channel();
+        if w.tx.send(ToCore::Release(hold, done)).is_ok() {
+            pending.push(report);
+        }
+    }
+    collect(pending).await
 }
 
 async fn reload(
@@ -264,10 +440,11 @@ fn assemble(plan: Plan, current: Option<&Generation>, live: &mut Live) -> (Gener
     {
         let (mut certs, problems) = tls::load(&plan.certs, previous.map(|t| &*t.certs));
         certs.acme = acme.clone();
-        let tickets = previous.map_or_else(
-            || Arc::new(TicketKeys::generate(TICKET_LIFETIME_SECS)),
-            |t| t.tickets.clone(),
-        );
+        let tickets = match (previous, live.tickets.take()) {
+            (Some(previous), _) => previous.tickets.clone(),
+            (None, Some(inherited)) => inherited,
+            (None, None) => Arc::new(TicketKeys::generate(TICKET_LIFETIME_SECS)),
+        };
         let certs = Arc::new(certs);
         (Some(TlsState { certs, tickets }), problems)
     } else {
@@ -372,6 +549,13 @@ pub(crate) async fn publish(workers: &[Worker], generation: Arc<Generation>) -> 
             pending.push(report);
         }
     }
+    collect(pending).await
+}
+
+/// Every core's bind failures, once per address.
+async fn collect(
+    pending: Vec<tokio::sync::oneshot::Receiver<Vec<BindFailure>>>,
+) -> Vec<BindFailure> {
     let mut failures: Vec<BindFailure> = Vec::new();
     for report in pending {
         for f in report.await.unwrap_or_default() {
@@ -543,7 +727,12 @@ mod tests {
                     let addrs: &[_] = if generation <= RELOADS { &[a, b] } else { &[b] };
                     Ok((plan(generation, addrs), Vec::new()))
                 };
-                serve(&mut load, Some(2), &Notifier::to_path(path))
+                serve(
+                    &mut load,
+                    Some(2),
+                    &Notifier::to_path(path),
+                    Start::default(),
+                )
             }
         });
         assert_eq!(recv(&notifications), "READY=1\nSTATUS=serving generation 1");

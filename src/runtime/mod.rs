@@ -17,6 +17,7 @@
 //! itself once a second.
 
 pub(crate) mod control;
+pub(crate) mod handover;
 #[cfg(any(test, feature = "internals"))]
 pub mod harness;
 pub(crate) mod slots;
