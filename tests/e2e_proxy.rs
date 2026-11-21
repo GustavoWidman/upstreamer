@@ -468,25 +468,26 @@ fn a_slow_request_head_is_cut_at_the_header_timeout() {
 fn an_idle_connection_is_closed_at_the_keep_alive_timeout() {
     let proxy = Proxy::start_with(
         site(json!([{ "respond": { "body": "ok" } }])),
-        json!({ "timeouts": { "keepAlive": "300ms", "shutdown": "1s" } }),
+        json!({ "timeouts": { "keepAlive": "600ms", "shutdown": "1s" } }),
     );
     let mut client = proxy.client();
     let started = Instant::now();
     let mut idle_since = started;
-    for _ in 0..4 {
+    // Requests a quarter of the timeout apart, so a stalled test thread does not outlast it.
+    for _ in 0..8 {
         std::thread::sleep(Duration::from_millis(150));
         assert_eq!(client.get("/").status, 200);
         idle_since = Instant::now();
     }
     assert!(
-        started.elapsed() >= Duration::from_millis(600),
+        started.elapsed() >= Duration::from_millis(1200),
         "requests 150 ms apart kept the connection past two timeouts"
     );
     assert!(client.closed(), "closed without a response");
     let waited = idle_since.elapsed();
     assert!(
-        waited >= Duration::from_millis(280) && waited < Duration::from_secs(3),
-        "closed 300 ms after the last request: {waited:?}"
+        waited >= Duration::from_millis(580) && waited < Duration::from_secs(3),
+        "closed 600 ms after the last request: {waited:?}"
     );
 }
 
