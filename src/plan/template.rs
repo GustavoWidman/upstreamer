@@ -175,8 +175,17 @@ impl Template {
     /// Expands into the exchange's arena. Placeholders that have no value (unset var, absent
     /// header or cookie) expand to nothing.
     pub fn expand(&self, ex: &mut Exchange) -> ASpan {
+        self.expand_uri(ex).0
+    }
+
+    /// Expands a rewrite target, and says where its query starts: at the first `?` the
+    /// template writes itself, in a literal or with `{?query}` or `{uri}`, as an offset into
+    /// the span. A `?` that request data brings (a decoded `%3F` in `{path}`, a capture, a
+    /// header) is a byte of the path, so a client cannot move the end of the path.
+    pub fn expand_uri(&self, ex: &mut Exchange) -> (ASpan, Option<usize>) {
         if let Some(lit) = self.as_const() {
-            return ex.arena.push(lit);
+            let query = lit.iter().position(|&b| b == b'?');
+            return (ex.arena.push(lit), query);
         }
         let Exchange {
             req,
@@ -190,11 +199,17 @@ impl Template {
             refused,
             ..
         } = ex;
-        arena.build(|out| {
+        let mut query = None;
+        let span = arena.build(|out| {
+            let start = out.len();
             for part in self.parts.iter() {
+                let at = out.len();
                 let ph = match part {
                     Part::Lit(lit) => {
                         out.extend_from_slice(lit);
+                        if query.is_none() {
+                            query = lit.iter().position(|&b| b == b'?').map(|i| at - start + i);
+                        }
                         continue;
                     }
                     Part::Ph(ph) => ph,
@@ -268,8 +283,15 @@ impl Template {
                         }
                     }
                 }
+                if query.is_none() && matches!(ph, Placeholder::QuerySuffix | Placeholder::Uri) {
+                    query = out[at..]
+                        .iter()
+                        .position(|&b| b == b'?')
+                        .map(|i| at - start + i);
+                }
             }
-        })
+        });
+        (span, query)
     }
 }
 
