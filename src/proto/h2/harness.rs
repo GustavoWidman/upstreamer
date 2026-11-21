@@ -260,7 +260,8 @@ impl Responder {
 /// output within what a client that does not read can make it queue, must write only whole
 /// frames, and a client must decode from its field blocks exactly the heads that were
 /// sent, in the order they were sent, with its compression table in step with the server's
-/// after each.
+/// after each. After every read the streams in progress are within the limit and the
+/// windows within their bounds (see [`Engine::check_windows`]).
 pub fn frames_input(data: &[u8]) {
     let Some((&options, mut data)) = data.split_first() else {
         return;
@@ -335,6 +336,9 @@ pub fn frames_input(data: &[u8]) {
             }
         }
         assert!(session.engine.streams() <= MAX_STREAMS as usize);
+        if !failed {
+            session.engine.check_windows();
+        }
         // One read asks for at most its own size in replies, and streams stop at the high
         // mark, each overshooting it by less than one chunk of their body.
         assert!(

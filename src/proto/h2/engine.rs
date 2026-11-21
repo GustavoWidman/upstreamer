@@ -493,6 +493,28 @@ impl Engine {
         self.encoder.table_state()
     }
 
+    /// Panics unless the windows are within what RFC 9113 allows and what this side
+    /// advertised, and the request body bytes held for streams are within their windows.
+    #[cfg(any(test, feature = "internals"))]
+    pub fn check_windows(&self) {
+        let window = 0..=MAX_WINDOW;
+        assert!(self.send_window <= MAX_WINDOW, "{}", self.send_window);
+        assert!(window.contains(&self.peer_window), "{}", self.peer_window);
+        assert!((0..=i64::from(CONNECTION_WINDOW)).contains(&self.recv_window));
+        let mut held = 0;
+        for stream in self.streams.iter().filter(|s| s.id != 0) {
+            assert!(stream.send_window <= MAX_WINDOW, "{}", stream.send_window);
+            assert!(stream.recv_window <= i64::from(STREAM_WINDOW));
+            let bytes = stream.recv.iter().map(Bytes::len).sum::<usize>() + stream.recv_small.len();
+            assert!(
+                bytes <= STREAM_WINDOW as usize,
+                "{bytes} bytes held for a stream"
+            );
+            held += bytes;
+        }
+        assert!(held <= CONNECTION_WINDOW as usize, "{held} bytes held");
+    }
+
     /// How many slots a connection that admits `max_streams` streams uses at most: its
     /// streams in progress, those that linger, and one being let go of.
     pub fn slots(max_streams: u32) -> u32 {
