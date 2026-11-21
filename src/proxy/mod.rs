@@ -159,8 +159,9 @@ impl ProxyError {
 ///    response head. A pooled connection that failed before any response byte, for a request
 ///    that can be replayed, is retried once on a fresh connection: the origin closed an idle
 ///    connection, which is neither a further attempt nor a health failure;
-/// 4. [`Attempts::settle`] passes the result on, or (a pool's failed attempt that may move to
-///    another origin) goes back to 2.
+/// 4. [`Attempts::retry`] records a pool attempt's outcome; the result is returned from where
+///    it was produced, or (a pool's failed attempt that may move to another origin) the
+///    request goes back to 2.
 ///
 /// One async function holds every step: each nested future would carry its own copies of the
 /// arguments, and the request path moves this future's state on every poll of the pipeline
@@ -179,11 +180,11 @@ pub(crate) async fn forward(
     client::write_request_head(ex, plan, up_framing(&body), upgrade);
     let up = &*snap.upstreams;
     let mut attempts = Attempts::new(plan.to);
-    loop {
+    'origins: loop {
         let id = attempts.next(core, snap, ex)?;
         ex.origin = Some(id);
         let mut pooled = core.upstreams.checkout(up.origin(id), id, up.epoch);
-        let result = loop {
+        let error = loop {
             // A pool target's connection carries a busy guard, so the requests in flight to
             // an origin are this core's checked-out connections to it.
             let busy = match attempts {
@@ -195,22 +196,30 @@ pub(crate) async fn forward(
                 Some(conn) => conn,
                 None => match dial(core, up, id, plan.dial_timeout).await {
                     Ok(conn) => conn,
-                    Err(error) => break Err(error),
+                    Err(error) => break error,
                 },
             };
             conn.busy = busy;
             conn.buf = core.bufs.take();
             match attempt(core, snap, plan, ex, &mut body, conn, upgrade).await {
-                Ok(resp) => break Ok(resp),
+                // Returned from here, the response moves once on its way out.
+                Ok(resp) => {
+                    if !attempts.retry(core, snap, ex, &body, id, Ok(&resp)) {
+                        return Ok(resp);
+                    }
+                    discard(core, ex, resp);
+                    continue 'origins;
+                }
                 Err(Failed {
                     replayable: true, ..
                 }) if reused && ex.req.method.idempotent() && body.replayable() => {}
-                Err(Failed { error, .. }) => break Err(error),
+                Err(Failed { error, .. }) => break error,
             }
         };
-        if let Some(result) = attempts.settle(core, snap, ex, &body, id, result) {
-            return result;
+        if !attempts.retry(core, snap, ex, &body, id, Err(&error)) {
+            return Err(error);
         }
+        attempts.keep(error);
     }
 }
 
@@ -246,77 +255,113 @@ impl Attempts {
     }
 
     /// The origin of the next attempt.
+    #[inline]
     fn next(
         &mut self,
         core: &Core,
         snap: &CoreSnapshot,
         ex: &mut Exchange,
     ) -> Result<OriginId, ProxyError> {
-        let (pool, tried, last) = match self {
-            Attempts::Origin(id) => return Ok(*id),
-            Attempts::Pool { pool, tried, last } => (*pool, tried, last),
-        };
-        let spec = &snap.plan.pools[usize::from(pool.0)];
-        let up = &*snap.upstreams;
-        let members = up.members(pool);
-        let now = core.clock.mono.get();
-        let picked = {
-            let state = core.upstreams.pool(pool);
-            balance::pick(spec, members, up, &core.upstreams, &state, ex, tried, now)
-        };
-        picked.ok_or_else(|| {
-            last.take().unwrap_or_else(|| {
-                ex.refused = Some(Refused {
-                    by: RefusedBy::NoOrigin,
-                    retry_after: members.retry_after(up, now),
-                });
-                ProxyError::NoOrigin
-            })
-        })
+        match self {
+            Attempts::Origin(id) => Ok(*id),
+            Attempts::Pool { pool, tried, last } => pick(core, snap, ex, *pool, tried, last),
+        }
     }
 
-    /// After an attempt on `id`: the result to pass on, or `None` to try another origin.
-    fn settle(
+    /// After an attempt on `id`: records its outcome for a pool, and says whether the request
+    /// moves on to another origin.
+    #[inline]
+    fn retry(
         &mut self,
         core: &Core,
         snap: &CoreSnapshot,
-        ex: &mut Exchange,
+        ex: &Exchange,
         body: &RequestBody<'_>,
         id: OriginId,
-        result: Result<Response, ProxyError>,
-    ) -> Option<Result<Response, ProxyError>> {
-        let Attempts::Pool { pool, tried, last } = self else {
-            return Some(result);
-        };
-        let spec = &snap.plan.pools[usize::from(pool.0)];
-        let up = &*snap.upstreams;
-        let outcome = match &result {
-            Ok(resp) if spec.fail_statuses.contains(resp.head.status) => Outcome::Failed,
-            Ok(_) => Outcome::Answered,
-            Err(ProxyError::ClientGone) => Outcome::Neutral,
-            Err(_) => Outcome::Failed,
-        };
-        if let Some(local) = core.upstreams.local(id, up.epoch) {
-            let now = core.clock.mono.get();
-            health::observe(up.origin(id), &local, spec.passive.as_ref(), outcome, now);
+        result: Result<&Response, &ProxyError>,
+    ) -> bool {
+        match self {
+            Attempts::Origin(_) => false,
+            Attempts::Pool { pool, tried, .. } => {
+                settle(core, snap, ex, body, *pool, tried, id, result)
+            }
         }
-        let again = outcome == Outcome::Failed
-            && tried.len() < usize::from(spec.retries)
-            && ex.req.method.idempotent()
-            && body.replayable();
-        if !again {
-            return Some(result);
+    }
+
+    /// Keeps the error of a failed attempt, returned when no member is left to pick.
+    fn keep(&mut self, error: ProxyError) {
+        if let Attempts::Pool { last, .. } = self {
+            *last = Some(error);
         }
+    }
+}
+
+/// The pool member for the next attempt, or the error to answer with when none is left.
+#[inline(never)]
+fn pick(
+    core: &Core,
+    snap: &CoreSnapshot,
+    ex: &mut Exchange,
+    pool: PoolId,
+    tried: &Tried,
+    last: &mut Option<ProxyError>,
+) -> Result<OriginId, ProxyError> {
+    let spec = &snap.plan.pools[usize::from(pool.0)];
+    let up = &*snap.upstreams;
+    let members = up.members(pool);
+    let now = core.clock.mono.get();
+    let picked = {
+        let state = core.upstreams.pool(pool);
+        balance::pick(spec, members, up, &core.upstreams, &state, ex, tried, now)
+    };
+    picked.ok_or_else(|| {
+        last.take().unwrap_or_else(|| {
+            ex.refused = Some(Refused {
+                by: RefusedBy::NoOrigin,
+                retry_after: members.retry_after(up, now),
+            });
+            ProxyError::NoOrigin
+        })
+    })
+}
+
+/// Records the outcome of an attempt on pool member `id` (passive health) and decides a
+/// retry: a failed attempt moves on while retries are left and the request can be replayed.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn settle(
+    core: &Core,
+    snap: &CoreSnapshot,
+    ex: &Exchange,
+    body: &RequestBody<'_>,
+    pool: PoolId,
+    tried: &mut Tried,
+    id: OriginId,
+    result: Result<&Response, &ProxyError>,
+) -> bool {
+    let spec = &snap.plan.pools[usize::from(pool.0)];
+    let up = &*snap.upstreams;
+    let outcome = match result {
+        Ok(resp) if spec.fail_statuses.contains(resp.head.status) => Outcome::Failed,
+        Ok(_) => Outcome::Answered,
+        Err(ProxyError::ClientGone) => Outcome::Neutral,
+        Err(_) => Outcome::Failed,
+    };
+    if let Some(local) = core.upstreams.local(id, up.epoch) {
+        let now = core.clock.mono.get();
+        health::observe(up.origin(id), &local, spec.passive.as_ref(), outcome, now);
+    }
+    let again = outcome == Outcome::Failed
+        && tried.len() < usize::from(spec.retries)
+        && ex.req.method.idempotent()
+        && body.replayable();
+    if again {
         if let Some(metrics) = &snap.metrics {
             metrics.retried(id);
         }
-        match result {
-            Ok(resp) => discard(core, ex, resp),
-            Err(error) => *last = Some(error),
-        }
         tried.push(id);
-        None
     }
+    again
 }
 
 /// Drops a response that will not be passed on: its head goes back to the exchange, its
