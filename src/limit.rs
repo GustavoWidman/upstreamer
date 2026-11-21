@@ -54,7 +54,6 @@ use crate::plan::{LimitPlan, LimitSpec, Plan};
 use std::hash::{BuildHasher, RandomState};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::time::Instant;
 
 /// The tables of one generation, by `LimitId`. Built by the control thread; a table whose
 /// `LimitSpec` is unchanged across a reload is the same `Arc`, so its buckets survive.
@@ -70,8 +69,8 @@ pub(crate) struct Table {
     mask: u64,
     /// Random per table: keys cannot be aimed at a line.
     seed: u64,
-    /// The time origin of this table's TATs; carried with the table.
-    origin: Instant,
+    /// The time origin of this table's TATs, in [`monotonic_nanos`]; carried with the table.
+    origin: u64,
     /// Right shift that turns `nanoseconds x NS_TO_UNIT` into units of 2^-k seconds.
     shift: u32,
     /// Live buckets replaced to make room for a new key.
@@ -146,7 +145,7 @@ impl Table {
             lines: (0..lines).map(|_| Line::default()).collect(),
             mask: lines as u64 - 1,
             seed: RandomState::new().hash_one(0x006c_696d_6974_u64),
-            origin: Instant::now(),
+            origin: monotonic_nanos(),
             shift: 91 - u32::from(spec.unit_shift),
             evictions: AtomicU64::new(0),
         }
@@ -156,11 +155,7 @@ impl Table {
     /// changes the same slot.
     fn admit(&self, hash: u64, interval: u64, tolerance: u64) -> Admit {
         self.admit_with(hash, interval, tolerance, || {
-            self.units(
-                Instant::now()
-                    .saturating_duration_since(self.origin)
-                    .as_nanos() as u64,
-            )
+            self.units(monotonic_nanos().saturating_sub(self.origin))
         })
     }
 
@@ -245,6 +240,21 @@ impl Table {
     fn unit_shift(&self) -> u32 {
         91 - self.shift
     }
+}
+
+/// Nanoseconds on `CLOCK_MONOTONIC`, the clock `Instant` reads on Linux, as one integer: the
+/// time since a table's origin is one subtraction, where `Instant`'s is a checked subtraction
+/// of seconds and nanoseconds.
+fn monotonic_nanos() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid, writable timespec; CLOCK_MONOTONIC is always available.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    (ts.tv_sec as u64)
+        .wrapping_mul(1_000_000_000)
+        .wrapping_add(ts.tv_nsec as u64)
 }
 
 /// Units from `now` to the TAT in `word`, negative when it is in the past: the 40-bit
@@ -354,7 +364,7 @@ mod tests {
     use crate::plan::{Action, KeyPlan, LimitId, ListenerKey, ListenerKind, RouteSlot};
     use proptest::prelude::*;
     use std::collections::HashMap;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn spec(slots: u32, unit_shift: u8) -> LimitSpec {
         LimitSpec {
