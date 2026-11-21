@@ -80,7 +80,7 @@ pub(crate) fn serve(core: Rc<Core>, mut io: Transport, info: ConnInfo) -> impl F
         // Bytes of a pipelined next request that arrived with the previous one.
         let mut carry: Option<BytesMut> = None;
         let mut watch = Deadline::default();
-        let drain = core.until_drain();
+        let drain = core.until_idle_close();
         tokio::pin!(drain);
         let mut drain_watched = false;
         let close = loop {
@@ -197,7 +197,7 @@ fn poll_idle(
     if let Poll::Ready(ready) = readable.poll(cx) {
         return Poll::Ready(ready.map_err(Close::Io));
     }
-    if core.draining.get() {
+    if core.closing_idle.get() {
         return Poll::Ready(Err(Close::Shutdown));
     }
     // Polled once per connection: the drain signal keeps this task's waker from then on, and
