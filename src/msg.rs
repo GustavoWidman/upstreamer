@@ -820,6 +820,12 @@ impl RequestHead {
     /// [`Target::Rebuilt`].
     pub fn rewrite(&mut self, new_uri: &[u8]) -> Result<(), BadPath> {
         let (path, query) = split_query(new_uri);
+        self.rewrite_parts(path, query)
+    }
+
+    /// [`rewrite`](Self::rewrite) with the path and the query apart, for a rewrite whose
+    /// template says where its query starts: a `?` in `path` is a byte of the path.
+    pub fn rewrite_parts(&mut self, path: &[u8], query: Option<&[u8]>) -> Result<(), BadPath> {
         let start = self.fields.buf.len();
         self.fields.buf.extend_from_slice(path);
         match normalize(&mut self.fields.buf, start) {

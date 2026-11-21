@@ -480,7 +480,9 @@ pub mod harness {
             .set_line(b"GET", &encoded, Version::Http11)
             .expect("a clean path parses");
         assert_eq!(again.path().as_bytes(), path);
-        again.rewrite(path).expect("a clean path is a rewrite");
+        again
+            .rewrite_parts(path, None)
+            .expect("a clean path is a rewrite");
         assert_eq!(again.path().as_bytes(), path);
     }
 }

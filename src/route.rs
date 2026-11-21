@@ -285,8 +285,13 @@ fn transform<'p>(action: &'p Action, ex: &mut Exchange, fx: &mut Effects<'_>) ->
             }
         }
         Action::Rewrite(template) => {
-            let span = template.expand(ex);
-            if ex.req.rewrite(ex.arena.get(span)).is_err() {
+            let (span, query) = template.expand_uri(ex);
+            let uri = ex.arena.get(span);
+            let (path, query) = match query {
+                Some(at) => (&uri[..at], Some(&uri[at + 1..])),
+                None => (uri, None),
+            };
+            if ex.req.rewrite_parts(path, query).is_err() {
                 return Flow::Answer(Outcome::Error(Status::BAD_REQUEST));
             }
         }
@@ -295,7 +300,7 @@ fn transform<'p>(action: &'p Action, ex: &mut Exchange, fx: &mut Effects<'_>) ->
         }
         Action::TryFiles(probe) => {
             if let Some(found) = probe_first(probe, ex, fx)
-                && ex.req.rewrite(ex.arena.get(found)).is_err()
+                && ex.req.rewrite_parts(ex.arena.get(found), None).is_err()
             {
                 return Flow::Answer(Outcome::Error(Status::BAD_REQUEST));
             }
@@ -878,5 +883,64 @@ mod tests {
                 probe_allocs as f64 / n as f64
             );
         }
+    }
+
+    /// Routes `GET http://h<target>` through a plan with one site of `routes`; the path and
+    /// query after routing.
+    fn routed(routes: serde_json::Value, target: &str) -> (String, Option<String>) {
+        let plan = crate::runtime::testing::plan_from(
+            1,
+            &serde_json::json!({
+                "version": 1,
+                "listen": { "http": ["0.0.0.0:80"], "https": [] },
+                "sites": [{ "name": "t", "hosts": ["*"], "routes": routes }],
+            }),
+        );
+        let mut regex = RegexCaches::for_plan(&plan);
+        let mut catalog = Catalog::default();
+        let mut ex = Exchange::new(conn(Scheme::Http), plan.var_count);
+        begin(&mut ex, &plan, &format!("GET http://h{target}"), &[]);
+        let (_, site) = plan.site_for(&ex.conn.listener, ex.req.host()).unwrap();
+        run(&plan, site, &mut ex, &mut effects(&mut regex, &mut catalog));
+        let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        (text(ex.req.path().as_bytes()), ex.req.query().map(text))
+    }
+
+    #[test]
+    fn a_question_mark_from_the_request_stays_in_the_rewritten_path() {
+        let routes = serde_json::json!([
+            { "when": { "path": "/a/*" }, "rewrite": "/b{path}" },
+            { "when": { "path": "/q/*" }, "rewrite": "/c{path}?x=1" },
+            { "when": { "path": "/s/*" }, "rewrite": "/d{path}{?query}" },
+            { "respond": {} },
+        ]);
+        let cases = [
+            ("/a/q%3Fx.html?k=v", ("/b/a/q?x.html", Some("k=v"))),
+            ("/a/q%3F", ("/b/a/q?", None)),
+            ("/q/r%3Fs?k=v", ("/c/q/r?s", Some("x=1"))),
+            ("/s/t%3Fu?k=v", ("/d/s/t?u", Some("k=v"))),
+            ("/s/t%3Fu", ("/d/s/t?u", None)),
+        ];
+        for (target, (path, query)) in cases {
+            assert_eq!(
+                routed(routes.clone(), target),
+                (path.to_owned(), query.map(str::to_owned)),
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn try_files_serves_the_file_it_found_with_a_question_mark_in_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("q?x.html"), "found").unwrap();
+        let routes = serde_json::json!([
+            { "tryFiles": { "root": dir.path(), "paths": ["{path}.html"] } },
+            { "respond": {} },
+        ]);
+        assert_eq!(
+            routed(routes, "/q%3Fx?k=v"),
+            ("/q?x.html".to_owned(), Some("k=v".to_owned()))
+        );
     }
 }
