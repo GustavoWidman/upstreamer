@@ -192,26 +192,31 @@ impl Table {
                 *word = slot.load(Relaxed);
             }
             let now = clock();
-            let mut found = None;
-            let mut free = None;
-            let mut oldest: Option<(usize, i64)> = None;
-            for (i, &word) in words.iter().enumerate() {
-                let ahead = ahead(word, now);
-                let live = ahead > 0 && ahead <= reach;
-                if found.is_none() && word >> TAT_BITS == fingerprint {
-                    found = Some((i, if live { ahead } else { 0 }));
-                } else if !live {
-                    free = free.or(Some(i));
-                } else if oldest.is_none_or(|(_, least)| ahead < least) {
-                    oldest = Some((i, ahead));
-                }
-            }
-            let (slot, held, evicts) = match (found, free, oldest) {
-                (Some((i, ahead)), _, _) => (i, ahead, false),
-                (None, Some(i), _) => (i, 0, false),
-                (None, None, Some((i, _))) => (i, 0, true),
-                (None, None, None) => unreachable!("a line has slots"),
-            };
+            let live = |word: u64| Some(ahead(word, now)).filter(|&a| a > 0 && a <= reach);
+            // A key seen before finds its own slot, and only that slot's TAT matters; the
+            // others are read only to place a new key.
+            let (slot, held, evicts) =
+                match words.iter().position(|&w| w >> TAT_BITS == fingerprint) {
+                    Some(i) => (i, live(words[i]).unwrap_or(0), false),
+                    None => {
+                        let mut free = None;
+                        let mut oldest: Option<(usize, i64)> = None;
+                        for (i, &word) in words.iter().enumerate() {
+                            match live(word) {
+                                None => free = free.or(Some(i)),
+                                Some(ahead) if oldest.is_none_or(|(_, least)| ahead < least) => {
+                                    oldest = Some((i, ahead))
+                                }
+                                Some(_) => {}
+                            }
+                        }
+                        match (free, oldest) {
+                            (Some(i), _) => (i, 0, false),
+                            (None, Some((i, _))) => (i, 0, true),
+                            (None, None) => unreachable!("a line has slots"),
+                        }
+                    }
+                };
             let after = held + interval as i64;
             if after > tolerance as i64 {
                 let excess = (after - tolerance as i64) as u64;
