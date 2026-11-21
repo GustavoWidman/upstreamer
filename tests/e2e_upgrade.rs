@@ -96,6 +96,39 @@ fn program_of(pid: u32) -> PathBuf {
     std::fs::read_link(format!("/proc/{pid}/exe")).unwrap()
 }
 
+/// Whether process `pid` reads a UDP socket bound to `port`: one is registered with an epoll
+/// instance of the process. `/proc/net/udp` gives the sockets of the port by inode, and the
+/// `fdinfo` of an epoll descriptor lists what it watches the same way.
+fn reads_udp(pid: u32, port: u16) -> bool {
+    let sockets = std::fs::read_to_string("/proc/net/udp").unwrap();
+    let inodes: Vec<&str> = sockets
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .filter(|fields| fields.len() > 9 && fields[1].ends_with(&format!(":{port:04X}")))
+        .map(|fields| fields[9])
+        .collect();
+    assert!(
+        !inodes.is_empty(),
+        "a UDP socket on port {port}:\n{sockets}"
+    );
+    let Ok(descriptors) = std::fs::read_dir(format!("/proc/{pid}/fdinfo")) else {
+        return false;
+    };
+    // `tfd:        5 events:       1d data: ffffffffffffffff  pos:0 ino:61af sdev:7`
+    let watched = |info: String| -> Vec<String> {
+        let targets = info.lines().filter(|line| line.starts_with("tfd:"));
+        let inodes = targets.filter_map(|line| line.split("ino:").nth(1)?.split(' ').next());
+        inodes
+            .filter_map(|inode| u64::from_str_radix(inode, 16).ok())
+            .map(|inode| inode.to_string())
+            .collect()
+    };
+    descriptors
+        .filter_map(|entry| std::fs::read_to_string(entry.ok()?.path()).ok())
+        .flat_map(watched)
+        .any(|inode| inodes.contains(&inode.as_str()))
+}
+
 /// Reads the notifications of a handover that succeeds; returns the successor's process id.
 fn handed_over(proxy: &Proxy) -> u32 {
     let reloading = proxy.notification();
@@ -574,6 +607,10 @@ fn requests_in_flight_finish_on_the_old_process_while_the_new_one_serves() {
 
     // The old process reads the UDP sockets while it has a QUIC connection, so a handshake
     // begun now is answered once it lets go.
+    assert!(
+        reads_udp(proxy.pid(), tls.port()) && !reads_udp(new, tls.port()),
+        "a datagram has one reader: the process whose QUIC connections it may belong to"
+    );
     let asked = Instant::now();
     let h3_new = rt.spawn(async move {
         let mut h3 = H3::connect(tls, HOST).await?;
@@ -611,6 +648,10 @@ fn requests_in_flight_finish_on_the_old_process_while_the_new_one_serves() {
     );
     let status = proxy.exit_within(PATIENCE).expect("the old process exits");
     assert!(status.success(), "{status}");
+    assert!(
+        reads_udp(new, tls.port()),
+        "the new process took the UDP sockets"
+    );
     stop_successor(&proxy, new);
 }
 
