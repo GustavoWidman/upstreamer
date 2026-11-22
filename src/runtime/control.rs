@@ -957,11 +957,14 @@ mod tests {
 
     #[test]
     fn a_notification_carries_descriptors_to_the_receiver() {
+        use crate::plan::ListenerKind;
         let (_dir, path, sock) = listen_notify();
-        let a = crate::net::listen::bind(free_addr(), crate::plan::ListenerKind::Http).unwrap();
-        let b = crate::net::listen::bind(free_addr(), crate::plan::ListenerKind::Quic).unwrap();
-        Notifier::to_path(path)
-            .notify_with_fds("FDSTORE=1\nFDNAME=x", &[a.as_raw_fd(), b.as_raw_fd()]);
+        let sent = [
+            Inherited::fresh(ListenerKind::Http),
+            Inherited::fresh(ListenerKind::Quic),
+        ];
+        let fds: Vec<RawFd> = sent.iter().map(|socket| socket.fd.as_raw_fd()).collect();
+        Notifier::to_path(path).notify_with_fds("FDSTORE=1\nFDNAME=x", &fds);
         let (text, fds) = recv_with_fds(&sock);
         assert_eq!(text, "FDSTORE=1\nFDNAME=x");
         let received: Vec<_> = fds
@@ -969,9 +972,8 @@ mod tests {
             .map(|fd| Inherited::identify(fd).unwrap())
             .map(|socket| (socket.transport, socket.addr))
             .collect();
-        let sent: Vec<_> = [a, b]
-            .into_iter()
-            .map(|fd| Inherited::identify(fd).unwrap())
+        let sent: Vec<_> = sent
+            .iter()
             .map(|socket| (socket.transport, socket.addr))
             .collect();
         assert_eq!(received, sent, "the same sockets, in order");
@@ -982,20 +984,22 @@ mod tests {
     fn the_store_holds_the_listening_sockets_of_the_cores_and_no_other() {
         let (_dir, path, sock) = listen_notify();
         let notifier = Notifier::to_path(path);
-        let (a, b, gone) = (free_addr(), free_addr(), free_addr());
-        let inherited = |addr| {
-            let fd = crate::net::listen::bind(addr, crate::plan::ListenerKind::Http).unwrap();
-            Inherited::identify(fd).unwrap()
-        };
+        use crate::plan::ListenerKind::Http;
         // What the process before left in the store: three sockets for `a` (it had three
         // cores), two for `b`, and one for an address no listener has now.
+        let (first_a, first_b, only) = (
+            Inherited::fresh(Http),
+            Inherited::fresh(Http),
+            Inherited::fresh(Http),
+        );
+        let (a, b, gone) = (first_a.addr, first_b.addr, only.addr);
         let before = [
-            inherited(a),
-            inherited(a),
-            inherited(a),
-            inherited(b),
-            inherited(b),
-            inherited(gone),
+            first_a.sibling(Http),
+            first_a.sibling(Http),
+            first_a,
+            first_b.sibling(Http),
+            first_b,
+            only,
         ];
         let cpu = crate::runtime::allowed_cpus()[0];
         let workers = crate::runtime::spawn_workers(
