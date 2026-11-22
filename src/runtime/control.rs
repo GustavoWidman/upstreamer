@@ -896,9 +896,16 @@ mod tests {
         (dir, path, sock)
     }
 
+    /// The next datagram. A signal the lifecycle test raises is handled on whichever thread
+    /// the kernel picks, and one blocked in a receive with a timeout is interrupted by it.
     fn recv(sock: &UnixDatagram) -> String {
         let mut buf = [0u8; 4096];
-        let n = sock.recv(&mut buf).expect("a notification");
+        let n = loop {
+            match sock.recv(&mut buf) {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                received => break received.expect("a notification"),
+            }
+        };
         String::from_utf8(buf[..n].to_vec()).unwrap()
     }
 
@@ -933,7 +940,14 @@ mod tests {
             message.msg_iovlen = 1;
             message.msg_control = control.as_mut_ptr().cast();
             message.msg_controllen = size_of_val(&control) as _;
-            let n = libc::recvmsg(sock.as_raw_fd(), &mut message, 0);
+            let n = loop {
+                let n = libc::recvmsg(sock.as_raw_fd(), &mut message, 0);
+                let interrupted =
+                    || std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted;
+                if n >= 0 || !interrupted() {
+                    break n;
+                }
+            };
             assert!(n >= 0, "{}", std::io::Error::last_os_error());
             let mut fds = Vec::new();
             let mut header = libc::CMSG_FIRSTHDR(&message);
