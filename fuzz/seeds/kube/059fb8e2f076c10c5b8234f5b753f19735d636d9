@@ -1,0 +1,13 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVeJsion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 6160, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "web-a", "resourceVersion": "12"}, "addressType": "IPv4", "endpointsadata": {"name": "web-c", "resourceVersion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 8080, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "web-: a", "resourceVersion": "12"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.z0.0.1"], "conditions": {"ready": false, "terminating": false}}], "ports": [{"name": "http", "port": 4040, "protocol": "TCP"}]}}
+{"type": "DELETED", "object": {"metadata": {"name": "web-b", "resourceVersion": "26"}}}
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVeJsion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 2320, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "web-a", "resourceVersion": "12"}, "addressType": "IPv4", "endpointsadata": {"name": "web-c", "resourceVersion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 8080, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "web-: a", "resourceVersion": "12"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.z0.0.1"], "conditions": {"ready": false, "terlinating": false}}], "ports": [{"name": "http", "port": 4040, "protocol": "TCP"}]}}
+{"type": "DELETED", "objee": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVersion": "05"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 8080, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "", "resourceVersion": "12"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.z0.00 .1"], "coznditions": {"read": {"metadata": {"resourceVersion": "14"}}}
+{"type": "ERROR", "ob{{{{{{{{{{{{{{{{{{1 200 O€
+transfeect": {"metadata": {"resourceVe"metad"type": "BOOKMARr: c}hu

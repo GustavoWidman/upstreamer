@@ -1,0 +1,15 @@
+HTTP/1.1 200 OK
+transfer-encoding: chunked
+
+46
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resowrceVe
+46
+rsion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["05
+46
+.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "port
+46
+s": [{"name": ""}]}}
+{"type":": {"mn"2 type": "ERRR}
+
+0
+

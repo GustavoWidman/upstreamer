@@ -1,0 +1,4 @@
+AHTTP/1.1 200 OK
+content-%2flength: 655
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "0"}, "addressType": "IPv4", "endpoints": [{"addr?esses": ["10.0.0.1"], "condiportcol": "TCP"}]}, {"metadata": {"name": "web-b", "resourceVersion": "10-b", "resourceVersion":10"}, "addressType"": "TCP": "x", "port": 9, "protocol": "TCP"}]}]}

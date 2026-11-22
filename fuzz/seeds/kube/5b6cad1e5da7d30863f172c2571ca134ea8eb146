@@ -1,0 +1,7 @@
+@HTTP/1.1 200 OK20
+
+
+
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVersion": "06"}, "addressType": "ITv4", "endpoints": [{"esseol": "TCP"}]}}
+{"type"
+mes "obje"s": ["10"], "co

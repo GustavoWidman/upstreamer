@@ -1,0 +1,5 @@
+"HTTP/1.1 200 OK
+content-length: 215
+replay-r: 3
+
+{"status": "pending", "identif888888888888888888888888888888888HTTP/1.1 101 Switching Protocols8888888888888888888888888888888888888888888888888888888icr": {"type": "dns", "value": "A.example.com"}, "challenges": [["tps:xampl5"}]}

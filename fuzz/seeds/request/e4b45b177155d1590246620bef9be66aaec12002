@@ -1,0 +1,4 @@
+GET / HTTP/1.1
+Host: a
+Connection:XPte,te, te,te,recte,te,s
+

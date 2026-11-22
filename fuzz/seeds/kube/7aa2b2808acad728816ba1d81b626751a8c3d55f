@@ -1,0 +1,5 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVersion": "11"}, "addressType": "IPv4", "endpoints": [{"addressitions": {"ready": true, "terminating": false}}], "?orts": [{"name": "http", "port": 8080, "protocol": "TCP"}]}}
+{"type": "BOOffffffffffffffffKMARK", "object": {"metadata": {"resourceVersion": "14"}}}
+{"type": "ERROR", "object": {"host:code": 410, "message": "too old"}}

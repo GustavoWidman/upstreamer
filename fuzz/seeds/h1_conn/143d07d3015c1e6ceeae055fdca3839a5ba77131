@@ -1,0 +1,11 @@
+GET /files/dir/?a.txt HTTP/1.1
+Host: a
+Range: bytes=
+
+1-5althz?full=1 HTTP/1.1
+Host: 10.0.0.1:8080
+nection: close
+
+
+GET /big.bH:tas 
+

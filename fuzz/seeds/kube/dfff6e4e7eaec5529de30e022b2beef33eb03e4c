@@ -1,0 +1,4 @@
+HTTP/1.1 200 OK
+content-length: 655
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "9"}, "addressType": "IPv4", "endpoints": [{"addresses": ["1!0.0.0.1"], "conditions": {"ready": true, "terminating": false}}, {"addresses": ["10.0.0.2"], "cokkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkknditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 8080, "protocol": "TCP"}]}, {"metkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkadata": {"ÿname": "web-b", "resourceVersion": "10"}, "addressType": "IPv6", "endpoints": [{"addresse]": ["fd00::1"], "conditions": {"ready": true, "terminating":t": 8080, "protocol": "TCP"}, {"name": "x", "port": 9, "protocol": "TCP"}]}]}

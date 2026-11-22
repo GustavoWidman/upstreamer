@@ -1,0 +1,11 @@
+‚GET / HTTP/1.1
+Host: a
+Connection: X-/a.txt HTTP/1.1
+Ho6t: a
+Range: bytes=144674407370-5184Secret, hos,t upade, close
+cret: 1
+X-KepCl: h2c
+
+GET /up%3=O4 HTTP/1.1
+
+Host: a"e"

@@ -1,0 +1,6 @@
+AHTTP/1.1 200 OK
+content-length: 655
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "9"}, "addressType": "IPv8", "edpnoints": [{"addrzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-zzzzzzzzzzzzz‚zzzzzzzzzzzzzzzzzzzzzzzzzesses'": ["10.0+.0.1ÿÿÿÿÿÿÿÿÿÿÿÿÿûÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿúúúËËËËËËËËËËËËËËËËËËËËËËËËËËËËËËË5443ËËËËËËËËËËËËËËËËËËËËËËËËËËËËËËËËËËúÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ"], "conditions": {"ready": true, "terminating": false}}, {"addresses": ["46.0.0.2"], "conditi777777777777777777777777777777777777777777777777777777777777777777777777777ons": {"ready": true, "yerminati                                               ng": false}}], "ports": 
+
+[{"name": "ht "port": 8080, "protocol": "TCP"}]}, {"ocol" :"TCP"}]}]}

@@ -1,0 +1,4 @@
+HTTP/1.1 200 OK
+content-length: 327
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metad0ta": {"name": "web-a", "resourceVersion": "9"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.1"], "conditions&": {"ready": true, "atg in":false}}, {"addresses": ["10.0.0.2"], "conditions": {"ready": true, "terminating": false}}], "ports": [["name": "http", "port": 8080, "protocol": "TCP"}]ta": {"name": "web-b", "resourceVersion": "10"am\":]}

@@ -1,0 +1,12 @@
+HTTP/1.1 201 Create¥¥¥¥¥¥¥¥¥¥¥¥¥¥¥¥d
+transfer-encoding: chunked
+location: https://ca.test:886/o
+
+28
+{"newNonce": "https://ca.test/nonce", "n
+28
+ewAccount": "https://ca.test/acct", "new
+20
+Order": "https://ca.test;/order"}
+0
+

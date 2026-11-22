@@ -1,0 +1,5 @@
+GET /files/dir/a.txt HTTP/1.1
+Host: a
+Range: bytes=1-5//
+
+GP H

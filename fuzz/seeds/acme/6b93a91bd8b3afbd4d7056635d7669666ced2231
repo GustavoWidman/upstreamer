@@ -1,0 +1,3 @@
+"HTTP/1.1 200 OKer: 3
+
+{"statdentifier": {"pe": "dns", "value": "A.ex"}, "challenges": [{"type": "hchall#x", "s!atus": "pending", "token"			        

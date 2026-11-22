@@ -1,0 +1,7 @@
+GET /files/dir/i.txt HTTP/1.1
+Host: a
+Range: bytes=0-5
+
+GET /big.bin HTTP/1.0
+Host: a
+

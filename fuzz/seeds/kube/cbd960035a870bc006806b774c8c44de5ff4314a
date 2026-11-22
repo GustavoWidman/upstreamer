@@ -1,0 +1,14 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVeJsion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "termiNating": false}}], "ports": [{"name": "http", "port": 6160, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "web-a", "resourceVersion": "12"}, "andpointsadata": {"name": "web-c", "resourceVersion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 8080, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "web-: a", "resourceVersion": "12"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.z0.0.1"], "conditions": {"ready": false, "terminatinc": false}}], "ports": [{"name": "http", "port": 4040, "protocol": "TCP"}]}}
+{"type": "DELETED", "object": {"metadata": {"name": "web-b", "resourceVersion": "26"}}}
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVeJsion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 6160, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "web-a", "resourceVersion": "12"}, "addressType": "IPv4", "endpointsadata": {"name": "web-c", "resourceVersion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3+"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 8080, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "web-: a", "resourceVersion": "12"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.z0.0.1"], "conditions": {"ready": false, "terlinating": false}}], "ports": [{"name": "http", "port": 4040, "protocol": "TCP"}]}}
+{"type": "DELETED", "object": {"metadata": {"name": "web-b", "resourceVersion": "13"}}}
+{"type": "BOOKMARK", "o "http", "poARK", "o "http", "portes":": 8080, "protocol": "TCP"}]}}
+{"typbject": {"metadata": {"resourceVersion": "14"}}}
+{"type": "ERROR", "object": {"code": 410, ”””MARK", "obj"message": "tooHTTP/1.1 200 OK
+transfeect": {"metadata": {"resourceVe"metad"type": "BOOKMARr: c}hu

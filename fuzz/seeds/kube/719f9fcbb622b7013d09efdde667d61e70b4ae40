@@ -1,0 +1,4 @@
+HTTP/1.1 200 OK
+content-length: 255
+
+{"mta": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "9"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.1"], "conditions": {"ready": true, "terminating"lllllllllllndit": true, "term"}, {"nam1}

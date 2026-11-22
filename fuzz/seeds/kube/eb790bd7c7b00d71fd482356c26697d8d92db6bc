@@ -1,0 +1,10 @@
+HTTP/1.1 200 OK
+transfer-encoding: chunked
+
+46
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVe
+46
+rsion": "11"}, "addressType": "IPv3", "endpoints": [{"addresses": ["10
+46
+.0.0.3D", 
+46ame""H, "

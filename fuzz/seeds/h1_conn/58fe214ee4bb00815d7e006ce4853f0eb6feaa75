@@ -1,0 +1,7 @@
+SMTP /up/x HTTP/1.1
+Host: a
+Content-Length: 00000800000023095027
+Expect: 10-0continue
+
+h`ET /enc-x HTTÿÿ1.1
+HoKst: a

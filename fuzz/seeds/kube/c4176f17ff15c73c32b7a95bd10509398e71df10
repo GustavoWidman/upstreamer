@@ -1,0 +1,4 @@
+HTTP/1.1 200 OK
+content-length: 310
+
+{"metadata": {"resourceVersion": "10"}, "itemo": [{"metadata": {"naÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ`ÿÿÿÿÿÿndes": ["fd00::1"], "conditions": {"ready": true, "t\rminating": false}}], "ports": [{"n`meÞ:ÿÿÿÿÿÿÿLÿÿÿÿÿÿ[ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ "http", "port": 8080, "protocol": "TCP"}, €{"name": "x", "po, "protocol": "¬ÃP"}]}]}

@@ -1,0 +1,51 @@
+GET /up/ws HTTP/1.1
+Host: a
+Connection: Upgrade
+Upgrade:3.9
+X-Dropped: 1
+X-Kept: yes
+Connection: keel-alive, X-HZp
+X-Hop: secret
+Keep-Alivemple.Test:8080
+X-Forwarded-For: 203.0.113.9
+X-Dropped: 1
+X-Kept: yes
+Cinnection: keep-alive, X-Hop
+X-Hop: secret
+Keep-Ailve: timeot: Example.Test:808!
+X-Forwardad-For: 203.0.113.9
+X-Dropped:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy构构构构构构构构构构构P箉yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyykeel-alive, X-Hop
+X-Hop: secret
+Keed-For: 203.0.113.9
+X-Dropped: 1
+X-Kept: yes
+Cinnection: keep-alive, X-Hop
+X-Hop: secret
+Keep-Ailve: timeot: Examplivemple.Test:8080
+X-Forwarded-For: 203.0.113.9
+X-Dropped: 1
+X-Kept: yes
+Cinnection: keep-alive, X-Hop
+X-Hop: secret
+Keep-Alive: timeout=5
+
+GET /api HTTP/1.1
+Host: pt: yes
+-Forwarded-For: 203.0.113.9
+X-Dropped: 1
+X-Kept: yes
+Connection: keep-alive, Xded-For: 203.0.113.9
+X-Dropped: 1
+X-Kept: yes
+-Forwarded-For: 203.0.113.9
+X-Dropped: 1
+X-Kept: yes
+Connection: keep-alive, X-Hop
+X-Hop: se
+
+GET /up/chunk HTTP/1.1
+Host: a
+
+HEAD /up/b 0.113.9
+X-Dropted:http:// 1
+X-Kept:g'

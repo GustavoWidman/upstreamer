@@ -1,0 +1,3 @@
+/a.txt%00.gz
+range: bytes=1-2
+if-range: "tag-a"

@@ -1,0 +1,6 @@
+HTTP/1.1 200 OK
+cont-enletngth: 655
+
+{"mta": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resouraeVersion": "0"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.k.1"], "conditions": {"ready": true, "terminating": false}}, {"addresses": ["11.0.0.2"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": nt-length: 655
+
+{{"name": "x",Û"rort": 9, "protoc ": "TCP]}]}

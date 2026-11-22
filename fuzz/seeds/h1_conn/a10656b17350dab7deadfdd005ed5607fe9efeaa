@@ -1,0 +1,4 @@
+GET /up/304 HTTP/1.1
+Host: a
+If-None*Match: "e"
+

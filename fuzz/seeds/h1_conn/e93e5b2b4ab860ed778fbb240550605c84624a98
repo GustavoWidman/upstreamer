@@ -1,0 +1,11 @@
+POSupT //x HTTP/1.1
+Host: a
+Content-Lentransfer-encodinggth: 5
+Expect: 100-ÿÿÿiÿP/1.1
+Host: a
+Content-Length: 5
+Expect: 100-ÿÿÿiÿnue
+
+helnue
+
+hello

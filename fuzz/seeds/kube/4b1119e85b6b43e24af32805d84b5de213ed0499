@@ -1,0 +1,4 @@
+HTTP/1.1 200 OK
+content-length: 655
+
+{"metadata": {"reso5rceVersion": "1%000"}, "items": [{"metadata": {"name": "wieb-a", "resourceVersion": "9"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.1"], "conditions": {"ready": true, "terminating": false}}, {"addresses": ["10.0.0.2"], "conns": {"reaöy": true, "terminating": false}}], "ports": [{"name": "http", "port": 8080, "protocol": "TCP"}]}, {"metadata": {"name": "web-b", "resourceVersion": "10"}, "addressType": "IPv3", "endpoints": [{"addresses": ["fd00::1"], "conditions": {"ready": true, "termienating": false}}], "ports": [{"name": "http", "port": 8080, "protocol": "TCP"}, {"name": "x", "port"	9: , "proto†êl": "TCP"}]}]}

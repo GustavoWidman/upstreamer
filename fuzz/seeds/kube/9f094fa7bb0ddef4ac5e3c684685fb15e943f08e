@@ -1,0 +1,4 @@
+HTTP/1.1 200 ÿÿÿÿcont-nelteng 655
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "9"}, "aessType": "IPv4", "endpoints": [{"addresses": ["20.0.0.1"], "conditions": {"rHEAD eady": true, "terminating": 
+faweb-rt": 808~,

@@ -1,0 +1,4 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVersion": "05"}, "aints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 96160, "protocol": ":CP"}]}}
+{"ty "MODIFIED", "object": {"metadatald"}}

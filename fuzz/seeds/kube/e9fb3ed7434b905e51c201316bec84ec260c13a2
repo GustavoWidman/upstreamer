@@ -1,0 +1,5 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVersion": "11"}, "addressTy": {"name": "web-a", "resourceV": "web-b", "resourceVersion": "13"}}}
+{"type": "BOOKMARK", "object": {"meuadata": {"resourceVersion": "14"}}}
+{"type": "ERROR", "object": {"code": 41184467440737095516150, "message": "too old"}}

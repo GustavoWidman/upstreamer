@@ -1,0 +1,4 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVersion": "11"}, "addressTeVersion": "12"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.1"], "conditype": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 8080, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "obj"endpoints": [{"ad}

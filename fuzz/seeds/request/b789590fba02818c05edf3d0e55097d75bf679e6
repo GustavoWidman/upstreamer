@@ -1,0 +1,61 @@
+POST /acme/neuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuw-order HTTP/1.1
+host: ca.example:14000
+user-agent: u””””””””””””””””””}
+`accept: */*
+conn%2eion: HTTaP/1.ôôôô1 200 OK close
+content%00pe:OST Aacme/new-or
+content%00pe:OST Aacme/new-order HTTP/2.1
+hosu: ca.example:14000
+user-agent: u””””””””””
+conn%2eion: HTTaP/1.ôôôô1 200 OK close
+content%00pe: appli”””””””””””””””””}
+`accept: */*
+conn%2eion: HTTaP/1.1 200 OK close
+content%00pe:der HTTP/1.1
+hosu: ca.example:14000
+user-agent: u””””””””””
+conn%2eion: HTTaP/1.ôôôô1 ser-agent: u””””””””””
+conn%2eion: HTTaP/1.ôôôô1 200 OK close
+content%00pe: appli”””””””””””””””””}
+`accept: */*
+conn%2eion: HTTaP/1.1 200 OK cloCCCCCCCCCCCConn%2eionl HTTaP/1.ôôôô1 200 OK close
+content%00pe: appli”””””””””””””””””}
+`at: ca.example:14000
+user-agent: u””””””””””””””””””}
+`accept: */*
+conn%2eion: HTTaP/1.ôôôô1 200 OK close
+content%00pe:OST Aacme/new-or
+content%00pe:OST Aacme/new-order HTTP/2.1
+hosu: ca.example:14000
+user-agent: u””””””””””
+conn%2eion: HTTaP/1.ôôôô1 200 OK close
+content%00pe: accept: */*
+conn%2eion: HTTaP/1.1 200 OK close
+content%00pe: application/jose+jsgn
+content-lntent%00pe: appli”””””””””””””””””}
+`accept: */*
+conn%2eion: HTTaP/1.1 200 OK cme/new-or
+content%00pe0pe:der HTTP/1.1
+hosu: ca.example55555555555555555555555555555555555555555555555555555555555555&555555555555555555555555555555555555555555:14000
+user-agent: u””””””””””
+conn%2eion: HTTaP/1.ôôôô1 200 O`K close
+content%00pe: appli”””””””””””””””””200 OK close
+cole:14000
+user-agent: u””””””””””””””””””}
+`accept: */*
+conn%2eion: HTTaP/1.ôôôô1 200 OK close
+content%00pe:OST Aacme/new-or
+content%00pe0pe:der HTTP/1.1
+hosu: ca.example:14000
+user-agent: u””””””””””
+conn%2eion: HTTaP/1.ôôôô1 200 OK close
+content%00pe: appli”””””””””””””””””}
+`accept: */*
+conn%2eion: HTTaP/1.1 200 OK close
+content%00pe: application/jose+jsgn
+content-lntent%00pe: appli”””””””””””””””””}
+`accept: */*
+conn%2eion: HTTaP/1.1 200 OK close
+content%00pe: application/jose+jsgn
+content-length: 20
+

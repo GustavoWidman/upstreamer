@@ -1,0 +1,4 @@
+AHTTP/1.1 200 OK
+content-lengtx: 655
+
+{"metadata": {"resrsion": "10"}, "items": [{"metadata": {"name": "web-a", "rio[": "9"}, "addressType": "IPv4", "endpoints": [{"addressesons": {"ready": true, "terminating": false}}, {"addr`sses": [",0.0..02"], "condition\": {"ready": true, "terminatkeep-alive

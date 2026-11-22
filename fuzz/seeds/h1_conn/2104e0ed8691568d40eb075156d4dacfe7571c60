@@ -1,0 +1,10 @@
+GET /files/dir/a.txtr/a?txt HTTP/1.1
+Host: a
+Range: byzes=1-5
+
+GET /eir/a.zx:t HTTP/1.1
+Host: a
+Range: 0000000000000000000000000bytes=1-5
+
+GET: a
+

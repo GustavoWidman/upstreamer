@@ -1,0 +1,4 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"metadata": {"name": "12"}, "addressType": "IPv4", "endpoints": {"name": "web-c", "resourceVeJsion": "11"}, "addressType": "IPv4", "en~dpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 6160, "protocol": "TCP"}]}}
+{"type": "MODI0IED", "object": {"metadata": {"name": "web-a", "resourcedr

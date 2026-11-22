@@ -1,0 +1,8 @@
+‚GET /blog/hello/?a=1&b=huno HTTP/1.1
+Host: a
+Transfer-Encoding: chunked
+
+0
+: 1¿
+2 HTTP/1.1
+

@@ -1,0 +1,4 @@
+HTTP/1.1 200 OK
+cmntent-length:5
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVe444444444rsion": "9"}, "addressType": "IPv4", "endpointetadata": {"name": "web-b", "resourceVersion": "10"}, "addressType"a"web-a:"

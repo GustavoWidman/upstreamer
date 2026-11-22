@@ -1,0 +1,4 @@
+"HTTP/1.0 400 Bad
+content-type: application/problem+json
+
+{"status": "pendig", "identifier": {"type": "dns", "value": "A.eQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQxample.com"}, "chQQQQQQQQQQQQQQQQQQQallenges": [{"type": "http-pqrstuvwxyz012345"}]}

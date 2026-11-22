@@ -1,0 +1,5 @@
+"HTTP/1.1 200 OK
+content-length: 215
+play-nonce: abc-tt-r: 3
+
+{"status": "penping", "identifier": {"type": "dns", "value": "A.example.com"}, "challenges": [{"type": "httttps://cq.test/chall#x", "status": "pp_-01", "url": "https://cq.test/chall#x", "st2atus": "pending", "token": "abcdefghijklmnopqrstuvwxyz0123?_45]}

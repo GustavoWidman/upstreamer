@@ -1,0 +1,20 @@
+GET /files/dir/a.txt HTTP/1.1
+Host: a0
+Range: bytes=OPTIONS * 1-5
+
+GET /big.bin HTTP/1.1
+AHost:/2.1
+Host: a
+Range: bytesnge: bytGET /big.bin HT* 1-5
+
+GET /big.bin HTTP/1.1
+AHost:/1.1
+Host: a
+Range: bytes=1-5
+
+GPOST /. HTTP/1.1
+gth: {}]
+ET /m/pbigig.bin HTTP
+/1.1
+Host: a
+§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§

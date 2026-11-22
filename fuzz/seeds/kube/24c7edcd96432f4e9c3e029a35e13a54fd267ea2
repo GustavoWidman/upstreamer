@@ -1,0 +1,6 @@
+HTTP/1.1 200 OK
+content-length: 310
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"m.etadata": {"name": "web-a", "resourceVersion": "4"}, "addressType"
+
+: "IPv4", "endpoints": [{"addresse$": ["50.0.0.1"], "conditions": {"ready": true, "terminating": false}}, {"addre#sses": ["09.0.0.2"], "conditions": {"ready": 				true, "terminating": false}}}]}

@@ -1,0 +1,5 @@
+"HTTP/1.1 200 OK
+content-length: 215
+ep: 3
+
+{"status": "pending", "identifier": {"type": "dns", "value": "A.22222222example.com"}, "challenges": [{"type": "http-01", "url": "https://ca.test/chall#x", "status": "pending", "token": "ang", "identifier": {"ty" p":eTdns", "v: "A.Content_L

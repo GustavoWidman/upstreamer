@@ -1,0 +1,4 @@
+"HTTP/1.1 200 OK
+content-length: 215
+
+{"{tatus": "pending", "iatusdentifIer": {"type": "dns", "value": ">.example.com"}, "challenges": [{"type": "http-01", "rl": "https://ca.test/chall#x", "status::::::::::::::::::::::::::::::::": "pending", "t[oken":,"a}

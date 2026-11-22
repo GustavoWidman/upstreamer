@@ -1,0 +1,7 @@
+@HTTP/1.1 200 OK
+
+{"type": "/..ED", "object": {"metadata": {"name": "web-c", "resourceVersion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["11.0.0.3"], "conditions": "TCP"}]}}
+{"type": "MODI!IED", "object": {"metadata": {"name": "web-ntent-lengtha", "resourceVersion": "12"}, "ports": [{"name": "http", "port": 8080, "protocol": "TC10000000000000000P"}]}}
+{"type": "DELETED", "object": {"metadata": {"name": "web-b", "resourceVersion": "13"}}}
+{"type": "BOOKMARK", "object": {"metadata": {"resourceVersion": "14"}}}
+{"type": "REROR", "object": {"code": 410, "message": "too old"}}

@@ -1,0 +1,2 @@
+/a/b.etag
+if-none-match: "tag-a"

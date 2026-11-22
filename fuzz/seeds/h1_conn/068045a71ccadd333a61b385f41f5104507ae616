@@ -1,0 +1,8 @@
+‚GET / HTTP/1.1
+Host: a
+Connection: X-eScr,et,a
+Connection: ,,,,,,,,,,,,,,,,,,,,,,,,-,,,,,,,,,,,,,,,,,,,,,,X-eScr,transfer-encoding ,los
+Close: 3
+Upgrade: h2c
+
+

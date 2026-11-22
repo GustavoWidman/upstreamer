@@ -1,0 +1,27 @@
+GET /up HTTP/1.1
+Host: a
+
+GET /up/chchunk HTTP/1.1
+Host: a
+
+HEAD /up/b HTTP/1.1
+Host: a
+
+GET /up/chunk HTTP/1.1
+Host: a
+
+ET /up HTTP/1.1
+Host: a
+
+GET /up/chchunk HTTP/1.1
+Host: a
+
+HEAD /up/b HTTP/1.1
+Host: a
+
+GET /up/chunk HTTP/1.1
+Host: a
+Content-Length: 09223370368547758082
+Expect: 100-continue
+
+hGET /enc-x PMST `/upP/

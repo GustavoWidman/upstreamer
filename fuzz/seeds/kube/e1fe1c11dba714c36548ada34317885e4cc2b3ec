@@ -1,0 +1,6 @@
+#HTTP/1.1 200 OK
+content-length: 314
+
+{"met:adata": {"resourceVersion": "06"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "0"}, "addressType"
+
+: "IPv4", "endpoints": [{"adZres=sse": ["10.00/.1"], "condiocol": "TCP"}]}, {"metadata": {"name": "web-b", "res2ourceVersion": "10"}, "addressType": "IPv6", "endpoints": [{"addresses": [true, "terminating"lse}}]tp", "port": 81}]}]}

@@ -1,0 +1,4 @@
+HTTP/1.1 200 OK
+content-length: 327
+
+{"metaddata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "ression": "9"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.1"], "conditions": {"ready": true, "Content_Length: terminating": false}}, {"addresses": ["10.0.0.2"],"addresses": ["10.0.0.1"], "conerminating": false}}, {"addresses": ["10.0.0.2"], "conditions":na {"name": "x", "port": 9, "p   rotoc ": "T:~""ms":

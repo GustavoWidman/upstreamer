@@ -1,0 +1,3 @@
+GET /up/close HTTP/1.0
+
+Host: a

@@ -1,0 +1,4 @@
+GET /files/dir/a.txtr/?taxt HTTP/1.1
+Host: a
+Range: %2: a
+

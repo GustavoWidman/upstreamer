@@ -1,0 +1,8 @@
+HTTP/1.1 200 OK
+tra_nodiodi%2fng:codin@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVeJsion": "11"}, "addressTypp": "IPv4", "endpoints": [{"addresses": ["20.0.0.3"], "conditions": {"readychunked": true, "terminating": false}}], "ports": [{"name": "http", "port": 6160, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "web-a", "resourceVersion": "12"}, "addreJJJdata": {"name": "web-c", "resourceVeJsion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["11.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 6160, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "wef-a", "resoun": "10"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 6159, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "web-q", "resourceVersion": "12"}, "addreJJJdata": {"name": "web-c", "resourceVeJsion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["30.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 6160, "protocol": "TCP"}]}}
+{t"epy": "MODIFIED", "object": {"=etadata": {ata": {"

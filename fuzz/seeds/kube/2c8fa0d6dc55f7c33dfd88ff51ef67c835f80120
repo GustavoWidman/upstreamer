@@ -1,0 +1,9 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVersion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"nake": "http", "port": 8080, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "web-a", "resourceVersion": "12"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.1"], "conditions": {"ready": false, "terminating": false}}], "ports": [{"name": "http", "port": 8080, "protocol": "TC10000000ffffffffffffffff000000000P"}]}}
+{"type": "DELETED", "obe": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVersion": "11"}, "addressType": [{"name": "http", "port": 8080, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "web-a", "resourceVersion": "12"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.1"], "conditions": {"ready": false, "terminating": false}}], "ports": [{"name": "http", "port": 8080, "protocol": "TC10000000ffffffffffffffff000000000P"}]}}
+{"type": "DELETED", "object": {"metadata": {"name": "web-b", "resourceVersion": "06"}}}
+{"type": "BOOKMARK", "object": {"meuadata": {"resourceVersion": "14"}}}
+{"type": "REROR", "objode": 410, "message":, "objode": 410, "message": "too old"}}

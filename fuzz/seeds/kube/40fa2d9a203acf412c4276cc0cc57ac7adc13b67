@@ -1,0 +1,19 @@
+AHTTP/1.1 200 OK
+transfer-encoding: chunked
+
+64
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": 
+64
+"9"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.1"], "conditions": {"ready": true,
+64
+ "terminating": false}}, {"addresses": ["10.0.0.2"], "conditions": {"ready": true, "terminating": fa
+64
+lse}}], "ports": [{"name": "http", "port": 8080, "protocol": "TCP"}]}, {"metadata": {"name": "web-b"
+64
+, "resourceVersion": "10"}, "addressType": "IPv6", "endpoints": [{"addresses": ["fd00::1"], "conditi
+64
+ons": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 8080, "protocol": 
+37
+"TCP"}, {"name": "x", "port": 9, "protocol": "TCP"}]}]}
+0
+

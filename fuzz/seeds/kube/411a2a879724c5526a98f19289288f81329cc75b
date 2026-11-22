@@ -1,0 +1,3 @@
+HTTP/1.1 200 OKngth: 655
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metatata": {"name": "web-a", "resion": "9"}, "addressType": "IPv4", "endpoints": [{"ad*dresses": ["10.0.0.1"], "conditions": {"ready": true, "terminating": false}}, {"addresses": ["09.0.0.2"], "conditions": {"ready": true, "terminating": true, "terminating": false}data": {"resourceVersion": "10"}, "items": [{"metaterminrt": 2, "protocol": "TCP"}]}]}

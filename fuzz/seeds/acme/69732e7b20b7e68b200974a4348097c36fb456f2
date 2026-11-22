@@ -1,0 +1,5 @@
+"HTTP/1.1 200 OK
+content-length: 215
+replay-nonce: 3
+
+{"status": "penindg", "identifier": {"type": "dns", "value": "A.example.com"}, "challenges": [{"type": "http-01", "url": "https://ca.test]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]/chall#x", "status":616]}

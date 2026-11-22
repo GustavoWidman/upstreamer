@@ -1,0 +1,15 @@
+AHTTP/1.1 200 OK
+contonnection: ngth: 655
+
+{"metadata": {"resourceVdrsion": "10"}, "items": [{"metadata": {"name": "web-a", "resous": [{"addresses": ["10.0.0.1"], "conditions": {"ready": true, "terminating": false}}, {"addresses": ["10.0.0.2"], "conditions": {"ready": true, "terminating": false}}], "po@ts": [{"name": "h99999999999999999999999addressType"
+
+
+,
+
+
+
+
+
+
+
+ol": "TCP"}]}]}

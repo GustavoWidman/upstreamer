@@ -1,0 +1,32 @@
+GET /enc-x HTTP/1.1
+Host: a
+Accept-Enchdilg: gzÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿc/x HTTP/1.1
+Host: a
+Accept-Encoding: gzÿÿÿÿ.1
+Host: a
+Accept-Encodilg: ÿgÿÿÿÿzÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ!/x HTTP/1.1
+Host: a
+Accept-Encoding: gzÿÿÿÿÿÿ
+Accept-Encodilg: gzÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿc/x HTTP/1.1
+Host: a
+Accept-Encoding: gzÿÿÿÿ.1
+Host: a
+Accept-Encodilg: gzÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ!/x HTTP/1.1
+Host: a
+Accept-Encoding: gzÿÿÿÿÿÿ
+Accept-Encodilg: gzÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿc/x HTTP/1.1
+Host: a
+Accept-Encodyng: gzÿÿÿÿ.1
+Host: a
+Accept-Encodilg: gÿÿzÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿc/x HTTP/1.1
+Host: a
+Accept-Encoding: gzÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿc/x HTTP/1.1
+Host: a
+Accept-Encoding: gzÿÿÿÿ.1
+Host: a
+Accept-Encodilg: gzÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿc/x HTTP/1.1
+Host: a
+Accept-Encoding: gzÿÿÿÿ.1
+Host: a
+Accept-Encodilg: gzÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿcÿÿÿÿip
+

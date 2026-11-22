@@ -1,0 +1,4 @@
+AHTTP/1.1 200 OK
+content-%2flength: 655
+
+{"metadata": {"resourceVers": "10"}, "items": [{"mntadataressTypendpoints": [{"addr?esses": ["10*0.0.1"], "conds": {"ready": true, "terminating": false}}], "ports" [{"name": },x", "port": 9, "protocol]}]_
