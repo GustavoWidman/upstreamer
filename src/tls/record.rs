@@ -128,11 +128,13 @@ impl Keys {
     }
 }
 
-fn tls12_aad(seq: u64, typ: u8, len: usize) -> [u8; 13] {
+/// The additional data of a TLS 1.2 record: its sequence number, and the type, version and
+/// plaintext length of its header (RFC 5246 6.2.3.3), so none of them can change on the way.
+fn tls12_aad(seq: u64, typ: u8, version: [u8; 2], len: usize) -> [u8; 13] {
     let mut aad = [0u8; 13];
     aad[..8].copy_from_slice(&seq.to_be_bytes());
     aad[8] = typ;
-    aad[9..11].copy_from_slice(&LEGACY_VERSION);
+    aad[9..11].copy_from_slice(&version);
     aad[11..].copy_from_slice(&(len as u16).to_be_bytes());
     aad
 }
@@ -228,7 +230,8 @@ impl Session {
                 }
                 let mut nonce = keys.iv;
                 nonce[4..].copy_from_slice(&body[..8]);
-                let aad = tls12_aad(keys.seq, outer, body.len() - 8 - TAG);
+                let version = [header[1], header[2]];
+                let aad = tls12_aad(keys.seq, outer, version, body.len() - 8 - TAG);
                 let plain = keys
                     .aead
                     .open_in_place(
@@ -243,7 +246,8 @@ impl Session {
                 if body.len() < TAG {
                     return Err(Error::DecryptError);
                 }
-                let aad = tls12_aad(keys.seq, outer, body.len() - TAG);
+                let version = [header[1], header[2]];
+                let aad = tls12_aad(keys.seq, outer, version, body.len() - TAG);
                 let nonce = Nonce::assume_unique_for_key(keys.nonce());
                 let plain = keys
                     .aead
@@ -457,7 +461,7 @@ impl Session {
                 HEADER
             }
             Framing::Tls12Gcm | Framing::Tls12ChaCha => {
-                aad = tls12_aad(keys.seq, typ, n);
+                aad = tls12_aad(keys.seq, typ, LEGACY_VERSION, n);
                 aad.len()
             }
         };
@@ -498,7 +502,7 @@ fn unexpected(what: &'static str) -> Error {
 }
 
 /// Fuzz entry points; not part of the API.
-#[cfg(feature = "internals")]
+#[cfg(any(test, feature = "internals"))]
 pub mod harness {
     use super::*;
     use aws_lc_rs::aead::Algorithm;
@@ -511,14 +515,14 @@ pub mod harness {
     use std::sync::Arc;
 
     /// A connection's server half after the handshake, and what its client seals with.
-    struct Connection {
-        session: Session,
+    pub(super) struct Connection {
+        pub session: Session,
         /// The client's sending key, IV and first sequence number: the server's opening ones.
         client: (&'static Algorithm, Vec<u8>, [u8; NONCE_LEN], u64),
     }
 
     impl Connection {
-        fn keys(&self) -> Keys {
+        pub fn keys(&self) -> Keys {
             let (algorithm, key, iv, seq) = &self.client;
             Keys {
                 aead: LessSafeKey::new(UnboundKey::new(algorithm, key).unwrap()),
@@ -539,7 +543,7 @@ pub mod harness {
 
     /// A handshake between a rustls client and the unbuffered server the proxy runs, in
     /// memory, with one cipher suite.
-    fn connect(suite: SupportedCipherSuite) -> Connection {
+    pub(super) fn connect(suite: SupportedCipherSuite) -> Connection {
         let provider = Arc::new(CryptoProvider {
             cipher_suites: vec![suite],
             ..rustls::crypto::aws_lc_rs::default_provider()
@@ -647,7 +651,13 @@ pub mod harness {
 
     /// Seals one record as the client would: `typ` and `plain`, and for TLS 1.3 `pad` zero
     /// bytes of padding after the content type.
-    fn seal(framing: Framing, keys: &mut Keys, typ: u8, plain: &[u8], pad: usize) -> Vec<u8> {
+    pub(super) fn seal(
+        framing: Framing,
+        keys: &mut Keys,
+        typ: u8,
+        plain: &[u8],
+        pad: usize,
+    ) -> Vec<u8> {
         let nonce = keys.nonce();
         let (outer, mut body, aad) = match framing {
             Framing::Tls13 => {
@@ -659,7 +669,7 @@ pub mod harness {
             _ => (
                 typ,
                 plain.to_vec(),
-                Some(tls12_aad(keys.seq, typ, plain.len())),
+                Some(tls12_aad(keys.seq, typ, LEGACY_VERSION, plain.len())),
             ),
         };
         let explicit = match framing {
@@ -790,5 +800,37 @@ pub mod harness {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::harness::{connect, seal};
+    use super::*;
+    use rustls::crypto::aws_lc_rs::cipher_suite::*;
+
+    #[test]
+    fn a_tls12_record_whose_version_changed_does_not_open() {
+        for suite in [
+            TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+            TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        ] {
+            let mut connection = connect(suite);
+            let framing = connection.session.framing;
+            let mut client = connection.keys();
+            let mut record = seal(framing, &mut client, APPLICATION_DATA, b"payload", 0);
+            let mut changed = seal(framing, &mut client, APPLICATION_DATA, b"payload", 0);
+            changed[2] = 2;
+            let opened = connection.session.open(&mut record).unwrap();
+            assert_eq!(
+                opened,
+                Opened::Data(record.len() - 7 - TAG..record.len() - TAG)
+            );
+            assert_eq!(
+                connection.session.open(&mut changed),
+                Err(Error::DecryptError),
+                "{suite:?}"
+            );
+        }
     }
 }
