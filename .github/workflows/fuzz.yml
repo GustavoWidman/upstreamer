@@ -1,0 +1,90 @@
+name: fuzz
+
+# Every fuzz target under AddressSanitizer (fuzz/README.md). A pull request runs each one for
+# a minute from the committed seeds. The daily run fuzzes each one for 15 minutes from the
+# corpus earlier daily runs kept in the actions cache, minimizes it and keeps it. Either way
+# a crashing input fails the run and is uploaded as an artifact.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  schedule:
+    # 03:17 BRT.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+# Supersede only PR runs.
+concurrency:
+  group: fuzz-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: request, dict: http.dict }
+          - { target: response, dict: http.dict }
+          - { target: chunked, dict: http.dict }
+          - { target: h1_conn, dict: http.dict }
+          - { target: h2_frames, dict: h2.dict }
+          - { target: h2_hpack, dict: h2.dict }
+          - { target: h2_conn, dict: h2.dict }
+          - { target: files, dict: http.dict }
+          - { target: trust, dict: http.dict }
+          - { target: route, dict: http.dict }
+          - { target: acme, dict: http.dict }
+          - { target: kube, dict: http.dict }
+    env:
+      TARGET: ${{ matrix.target }}
+      DICT: ${{ matrix.dict }}
+      SECONDS_PER_TARGET: ${{ github.event_name == 'pull_request' && 60 || 900 }}
+      DAILY: ${{ github.event_name != 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: nixbuild/nix-quick-install-action@v34
+        with:
+          nix_conf: |
+            substituters = https://cache.nixos.org/ https://cache.r3dlust.com
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= cache.r3dlust.com-1:Wdkf9mes2ued0P7C7CL3Jax1b4KPuJwQpM3h4G/Z+yI=
+      - name: Restore the corpus of earlier daily runs
+        if: env.DAILY == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Build
+        working-directory: fuzz
+        run: nix develop ..#fuzz --command cargo fuzz build "$TARGET"
+      - name: Fuzz
+        working-directory: fuzz
+        run: |
+          mkdir -p "corpus/$TARGET"
+          nix develop ..#fuzz --command cargo fuzz run "$TARGET" "corpus/$TARGET" "seeds/$TARGET" -- \
+            -dict="$DICT" -max_total_time="$SECONDS_PER_TARGET" -timeout=20 \
+            -rss_limit_mb=4096 -max_len=65536 -print_final_stats=1
+      - name: Minimize the corpus
+        if: env.DAILY == 'true'
+        working-directory: fuzz
+        run: nix develop ..#fuzz --command cargo fuzz cmin "$TARGET" "corpus/$TARGET"
+      - name: Keep the corpus
+        if: env.DAILY == 'true' && !cancelled()
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+      - name: Upload the crashing input
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
+          retention-days: 30
