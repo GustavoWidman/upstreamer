@@ -71,7 +71,7 @@ let
         reloadServices = sorted cert.reloadServices;
         # The renewal reloads the proxy itself and waits for it, so it fails when the proxy
         # did not take the certificate.
-        reloadsProxy = lib.hasSuffix "/bin/systemctl try-reload-or-restart upstreamer.service\n" cert.postRun;
+        reloadsProxy = lib.hasInfix "/bin/systemctl try-reload-or-restart upstreamer.service" cert.postRun;
       }) c.security.acme.certs;
       unit = {
         inherit (u.serviceConfig)
