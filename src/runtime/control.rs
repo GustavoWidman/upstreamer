@@ -192,23 +192,33 @@ pub(crate) fn serve(
                             _ = terminate.recv() => break None,
                             _ = interrupt.recv() => break None,
                         };
-                        match offered {
-                            Ok(successor) => break Some(successor),
-                            Err(reason) => {
-                                live.hub.control().reloads_rejected += 1;
-                                let reason = format!(
-                                    "cannot hand over to {}: {}",
-                                    launch.path().display(),
-                                    reason.replace('\n', " ")
-                                );
-                                error!("reload rejected: {reason}");
-                                notifier.notify(&format!(
-                                    "READY=1\nSTATUS=reload failed, still serving generation {}: \
-                                     {reason}",
-                                    current.plan.generation
-                                ));
+                        // The successor is the main process from this notification on, and
+                        // the byte it waits for tells it so. A successor that died meanwhile
+                        // is no main process (systemd refuses a process that is gone, and
+                        // treats one that goes as the service failing), and this process goes
+                        // on serving.
+                        let refused = match offered {
+                            Ok(successor) => {
+                                let pid = successor.pid;
+                                notifier.notify(&format!("MAINPID={pid}\nREADY=1"));
+                                match successor.promote() {
+                                    Ok(released) => break Some((pid, released)),
+                                    Err(e) => format!("it went away as it took over: {e}"),
+                                }
                             }
-                        }
+                            Err(reason) => reason,
+                        };
+                        live.hub.control().reloads_rejected += 1;
+                        let reason = format!(
+                            "cannot hand over to {}: {}",
+                            launch.path().display(),
+                            refused.replace('\n', " ")
+                        );
+                        error!("reload rejected: {reason}");
+                        notifier.notify(&format!(
+                            "READY=1\nSTATUS=reload failed, still serving generation {}: {reason}",
+                            current.plan.generation
+                        ));
                         continue;
                     }
                     reload(load, &mut current, generation, &workers, notifier, &mut live).await;
@@ -274,10 +284,14 @@ pub(crate) fn serve(
         let grace = current.plan.server.shutdown;
         match handed_over {
             None => shutdown(workers, grace, notifier),
-            Some(successor) => {
+            Some((pid, released)) => {
                 // Discovery and certificate orders are the successor's from here on.
                 drop(live);
-                retire(workers, grace, notifier, successor, &mut predecessor).await;
+                info!(
+                    "handed over to process {pid}; draining, at most {} ms",
+                    grace.as_millis()
+                );
+                retire(workers, grace, released, &mut predecessor).await;
             }
         }
         Ok(())
@@ -308,35 +322,25 @@ async fn hand_over(
     handover::offer(launch, sockets, tickets, handover::READY_TIMEOUT).await
 }
 
-/// The end of a process that handed over: the successor becomes the service's main process
-/// and is told so, then every core drains. Idle keep-alive connections stay open for half the
-/// grace, since nothing waits for this process to exit and a request that arrives on one is
-/// then answered instead of meeting a closed connection.
+/// The end of a process that handed over: every core drains, without a word to systemd, whose
+/// main process this no longer is. Idle keep-alive connections stay open for half the grace,
+/// since nothing waits for this process to exit and a request that arrives on one is then
+/// answered instead of meeting a closed connection.
 ///
-/// A process that hands over while its own predecessor still reads the UDP sockets passes
-/// that wait on: its successor may read them once both let go.
+/// `released` is this process's end of the handover pipe: the successor reads the UDP sockets
+/// once every copy is closed. Each core drops its copy when it reads none any more. A process
+/// that hands over while its own predecessor still reads them keeps one until that let go.
 async fn retire(
     workers: Vec<Worker>,
     grace: Duration,
-    notifier: &Notifier,
-    successor: handover::Successor,
+    released: Arc<std::os::fd::OwnedFd>,
     predecessor: &mut Option<handover::Predecessor>,
 ) {
-    let pid = successor.pid;
-    info!(
-        "handing over to process {pid}; draining, at most {} ms",
-        grace.as_millis()
-    );
-    notifier.notify(&format!("MAINPID={pid}\nREADY=1"));
-    let released = successor
-        .promote()
-        .inspect_err(|e| error!("the handover pipe: {e}"))
-        .ok();
     let now = Instant::now();
     let drain = Drain {
         deadline: now + grace,
         idle_close: now + grace / 2,
-        released: released.clone(),
+        released: Some(released.clone()),
     };
     let deadline = tokio::time::Instant::from_std(drain.deadline);
     super::start_drain(&workers, drain);
