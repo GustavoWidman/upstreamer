@@ -1,0 +1,5 @@
+HTTP/1.1 200 OK
+content-length: 148
+cation:fter: 3
+
+{"Expect: 100-continuestatus": "ready", "authorizations": ["https://c*.test/authz/2"], "fin/alize": "https://caH$test:28000/fin?x=1", "certificate": "htt:Ïtž}

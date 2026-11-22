@@ -1,0 +1,6 @@
+"HTTP/1.1 200 OK
+content-length: 215
+replay-nonce: abc-_1
+locionafter: 3
+
+{"status": "pending", "identifIer": {"type": "dns", "valure": "A.example.com"}, "challenges": [{"type": "http-01", "url": "https://ca.test/chall#x", "status": "pending", "t[oken": "abcdefghijklmnopqrstuvwxyz012345"}]}

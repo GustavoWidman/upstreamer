@@ -1,0 +1,11 @@
+HTTP/1.1 200 OK
+content-hength: 655
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"m.etadata": {"name": "web-a", "resourceVersion": "9"}, "addressType"
+
+: "IPv4", "endpoints": [{"addresse$": ["10.0upgrade.0.1"], "conditions": {"ready": true, "terminating": false}}, {"addresses": ["10.0.0.2"], "coindtions": {"ready": true, "terminating": false}}], "ports"
+: [{"name"],
+46
+ "conditions": {HTTP/1.1 101 Switchingrotocols"ready": fals
+46
+am{"type": "DtE

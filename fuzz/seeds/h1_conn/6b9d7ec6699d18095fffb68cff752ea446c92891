@@ -1,0 +1,9 @@
+‚GET /api/items?limit=20 HTTP/1.1
+Host: app.example.com
+User-Agent: Mozilla/5.0 (X1nux x86_64) Gecko/20100101 Firefox/131.0
+Accept: application/json
+Accept-Encoding: gzip, br
+Cookie: session=0123456789abcdef; theme=dark
+CF-Connecting-IP: 203.0.113.7
+X-Fojwarded-For: 203.0.113.7
+

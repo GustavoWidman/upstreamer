@@ -1,0 +1,4 @@
+HTTP/1.1 200 OK
+content-leclosength: 655
+
+{"metaadta": {"resourceVersikn": "10"}, "items": [{"ports": [{"na": "http","": {"ng": false}}], "ports": [{"nameHTTP/1}

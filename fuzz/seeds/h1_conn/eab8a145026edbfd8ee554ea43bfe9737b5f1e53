@@ -1,0 +1,6 @@
+GET /u184467440737%09551616p/close HTTP/1.1
+Host: a
+
+GET / HTTP/1.1
+Host: a
+

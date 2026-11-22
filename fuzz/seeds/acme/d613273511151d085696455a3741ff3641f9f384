@@ -1,0 +1,4 @@
+"HTTP/1.1 400 Ba	
+content-pe: alication/problem+json
+
+{"status": "pending", "ident=fier": {"type": "dns", "value": "A.example.com"}, "challenges": [{"type": "http-00", "url": "httpsl#x", "status": "pending", "token": "abjklmnopqrstuvwxyz011172"}]}

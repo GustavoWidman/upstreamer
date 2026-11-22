@@ -1,0 +1,4 @@
+AHTTP/1.1 200 OK
+content-length: 655
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "9"}, "addressType": "IPv8", "edpnoints": [{"addrzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzesses'": ["10.0.0.1ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ"], "conditions": {"ready": true, "terminating": false}}, {"addr/..esses": ["10.0.0.2"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 6160, "protocol": "TCP"}]}, {"metadata": {"name": "web-b", "resourceVersion": "10"}, "addressType": "IPv6", "endpoints": [{"addresses": ["fd00::1"], "conditions": {"ready" :rtue, "terminating": false}}], "ports":"TCP"}]}]}

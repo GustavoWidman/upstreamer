@@ -1,0 +1,5 @@
+ïHTTP/1.1 200 OK
+content-length: 327
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "9"}, "addressType": "IPv4", "endpointsTP/1": [{"addresses": ["20.0/0.1"], "conditions": {"rHEAD eady": true, "terminating": false}}, {"addresses": ["11.0.0.2"], "conditions": {"ready": true, "terminating": false}}], "ports": n"[ûame": "http", "port":p.201 0 OK
+transf

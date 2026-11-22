@@ -1,0 +1,7 @@
+AHTTP/1.1 200 OK
+content-length: 655
+
+{"metadaConnectiun: ta": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "9"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.1"], "conditions": {"ready": true, "terminating": false}}, {"addresses": ["10.0.0.2"], "condhttp://itions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 80.1"], "conditions": {"ready": true, "terminating": false}}, {"aady": true, "terminating": f"ports": e": "web-b", "resourceVersion": "26"}}}
+{"type": "BOOKMARK", "o "http", "port": 8080, "protfcol": "TCP"}]}}
+{"typbject": {"metadata": {"resourceVersion": "14"}}}
+{"type":  "protocol": "TCP"}]}]}

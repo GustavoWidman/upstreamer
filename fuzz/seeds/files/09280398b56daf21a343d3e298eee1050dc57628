@@ -1,0 +1,3 @@
+http://h/a.txt
+range: bytes=1-2
+if-range: "tag-a"

@@ -1,0 +1,4 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"taadd2ressType": "IPv4", "endpoints": [{"addresses": "TCP"}]}}
+{"type

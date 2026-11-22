@@ -1,0 +1,5 @@
+€GET /hdr/x?limit=1
+a.test
+x-key: a
+Trailer:x-key: a
+Trailer: x- : b

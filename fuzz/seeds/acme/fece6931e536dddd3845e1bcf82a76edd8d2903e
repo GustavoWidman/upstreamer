@@ -1,0 +1,5 @@
+"HTTP/1.1 200 OK
+content-length: 215
+replay-nonce: abcþ
+
+{"status": "pending", "identifier": {"type": "dns", "value": "A.example.com"}, "challenges": [{"type": "http-01", "url": "https://ca.test/chall#x", "status": "pending", "token": "ang", "identifier": {"typeT": "dns", "value":ent_Tength: qrstuvwxyz012345"}]}

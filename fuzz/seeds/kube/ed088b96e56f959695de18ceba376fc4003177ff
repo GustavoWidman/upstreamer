@@ -1,0 +1,6 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVeJsion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 4155, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "web-a", "resourceVersion": "12"}, "addreJJJdata": {"name": "web-c", "resourceVeJsion": "11"}, "addressType": "IPv4", "enDpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"naocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "web-a", "resourceVersion": ""} ,"21addreJJJdata": {"name": "web-c", "resourceVeJsion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"rdaey": true, "terminating": false}}], "ports": [{"name": "http", "port": 6160, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "web-a", "res"n": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": tr "condithu

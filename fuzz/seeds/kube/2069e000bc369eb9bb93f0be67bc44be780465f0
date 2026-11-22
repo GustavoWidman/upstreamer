@@ -1,0 +1,4 @@
+HTTP/1.1 200 OK
+content-l: ten655
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "9"}, "addressType": "IPv4", "endpoints": [{"addresses": ["20.0.0.1"], "s": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 8080, "protocol": "TC‚P"}]}, {d0otocol": "TCP"}]}¢}

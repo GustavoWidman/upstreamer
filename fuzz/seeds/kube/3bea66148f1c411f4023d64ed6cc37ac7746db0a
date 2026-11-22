@@ -1,0 +1,4 @@
+HTTP/1.1 200 OK
+conte2t-length: 655
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "9"}, "addressType": "1Pv4", "endpoints": 184467440737095516160.0.1"]"resourceVersion":CP"}]}]}

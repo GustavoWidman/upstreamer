@@ -1,0 +1,51 @@
+GET / HTTP/1.1
+Host: a
+X: yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyest:808!
+X-Forwarded-For: 203.0.113.9
+X-Dropped:yyyyyyyyyyyyy
+X-Hop: secret
+Keep-Alive: timeout=5
+
+GET /api HTTP/1.1
+Host: app.example.com
+X-Forwarded-For: 198.51.10p: secret
+Keep-AliveyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyX-Forwarded-For: 203.0.113.9
+X-Dropped: 1
+X-Kept: yes
+Connection: keep-alive, X-Hop
+X-Hop: secret
+Keep-Alivemple.Test:8080
+X-Forwarded-For: 203.0.113.9
+X-Dropped: 1
+X-Kept: yes
+Cinnection: keep-alive, X-Hop
+X-Hop: secret
+Keep-Alive: timeot: Example.Test:808!
+X-Forwarded8-For: 203.0.113.9
+X-DryyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyX-Forwarded-For: 203.0.113.9
+X-Dropped: 1
+X-Kept: yes
+Connection: keepyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyapp.example.com
+X-Forwarded-For: 396.51.10p: secret
+Keep-Alivemple.Test:8080
+X-Forwarded-For: 203.0.113.9
+X-Dropped: 1
+X-Kept: yes
+CinnecctioyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyX-Forwarded-For: 203.0.113.9
+X-Dropped: 1
+X-Kept: yes
+Connection: keep-alive, X-Hop
+X-Hop: secret
+Keep-Alivemple.Test:8080
+X-Forwabded-Fos: 203.0.113.9
+X-Dropped: 1
+Host:
+X-Kept: yes
+Cinnection: keep-alive, X-Hop
+X-Hop: secret
+Keep-Alive: timeot: Example.Test:808!
+X-Forwarded-For: 203yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyX-Forwarded-For: 203.0.113.9
+X-Dropped: 1
+X-Kept: yes
+Connection: keep-a×××××××××××××××××××××××××××Host: ×××××××××××××××××××××××××××××××××yyyy
+

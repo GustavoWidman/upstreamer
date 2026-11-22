@@ -1,0 +1,4 @@
+AHTTP/1.1 200 OK
+upgradlength: 655
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"sType": "IPv4", "endpoints": [{"addresses": ["10.0.0.1"], "conditions": {"ready": tr": ["ing": false}}], """

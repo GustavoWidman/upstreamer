@@ -1,0 +1,4 @@
+HTTP/1.1 200 OK
+content-length: 655
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "9"}, "addressType": "IPv4", "endpointTE: trailerss": [{"addresses": ["10.0.0.1"], "conditions": {"ready": true, "terminating": false}}, {"addresses": ["11.0.0.2"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": 6981, "protocol": "TCP"}]}, {"metadata": {"name": "web-b", "resourceVersion": "10"}, "addressType": "IPv6", "endpointsorts": [{"name": "http", "port": 6981, "protocol": "TCP"}]}, {"metadata": {"name": "web-b", "resourcminating": false}}], "ports": [{"name": "http", "port": 6981, "protocol": "TCP"}]}, {"metadata": {"name": "web-b", "re1.0.0.2"], "conditions": {"ready": true, "terminnue

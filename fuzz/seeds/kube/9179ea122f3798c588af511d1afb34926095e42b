@@ -1,0 +1,4 @@
+AHTTP/1.1 200 OK
+conte+t-length: 655
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "0"}, "addressType": "IPv8", "endpoints": [{"add": "http", "port": 80, "conditi\ns": {"ready": true, "terminating":  "porT": 9,l": "TCP"}]}]}

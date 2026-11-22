@@ -1,0 +1,4 @@
+AHTTP/1.1 200 OK
+content-length: 310
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "4"}, "addressType": "IPv4", "endpoints": [{"address18446744073709551615es": ["10.žžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžžž0.0.1"], "conditions": {"ready": true, "upgradetermn], –tions": {"ready": true, "termitocol": "TCP"}]}]}

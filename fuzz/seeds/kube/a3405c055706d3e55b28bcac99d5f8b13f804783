@@ -1,0 +1,4 @@
+AHTTP/1.1 200 OK
+content-length: 655
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "0"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.1"], "conditions": {"readyrsion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "0"}, "addressType": "IPv4", "endpoints": [{"addressооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооes": ["10.0.0.1"], "condiЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪЪtions": {"ready": true, "termina((($(((ting": false}}, {"addresses": ["10.0.0.2"], "conditions": {"ready": 0.true, "termina(((((AHTT(tP/

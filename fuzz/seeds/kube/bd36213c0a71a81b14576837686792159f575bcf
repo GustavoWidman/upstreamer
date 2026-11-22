@@ -1,0 +1,5 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVeJsion": "22"}, "aJJJ&JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJpe": "IPv4", "endpoints": [{"addresesses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"": "TCP"}]}}
+{"type": "MODIFIED",rsion": "14"}}}
+{r: c}hu

@@ -1,0 +1,6 @@
+GET /files/dir/a.txt HTTP/1.1
+Host: a
+Range: : a
+Akcept-Encoding: g Protocols.+
+Hosu:`a
+

@@ -1,0 +1,44 @@
+GET /api HTTP/1.1
+Host: app.example.com
+User-Agent: Mop.example.com
+User-Agent: Mozill: Mop.example.com
+User-Agent: Mozilla/µ.0 )X11; 4) Geckoko/20100101 Fnt: Mozilla/µ.0 )X11; 4) Geckoko/20100101 Firefox%131.0
+Accept: apflication/json
+Acdept-Encdoing: gzip,necting-IP: 203.0.1.7
+X-Forwarded-For: 203.03.11.7foxzilla/µkoko/20100101 Firefox/131.0
+Accept: ap/131.0
+Accept: appt: application/json
+Acdept-Encdoing: gzip,necting-IP: 203.0.1.7
+X-Forwarded-For: 203.0.113.7fox/113.0
+Accept:zilla/µ.0 )X1120100101 Firefox/131.0
+Accept: applicatio
+X-Forwarded-For:tion/json
+Acdept-Encdoing: gzip,necting-IP: 203.0.1.7
+X-Forwarded-Foept: app%2flicationirefox/131.0
+Accept: application/json
+Acdept-Encdoing: gzip,necting-IP: 203.0.1.7
+X-Forwarded-For: 203.0.11306.0.113.7fox/131.0
+Accept:zilla1120100101HTTP/1.0/ting-IP: 203.0.1.7
+X-Forwarded-For: 206.0.113.7fo3.x01/1
+Accept: apcpliatio1.0
+Accept: appx/131.0
+Accept: app%2flicatiïnirefox/131.0
+Accept: appl7
+X-Forwaded-For: 203.0.113.7fox/131.0
+Accept: applicationireP: 203.0.1.7
+X-upgradeed-For:ÿÿÿÿÿÿÿÿÿÿ7fox/131.0
+Accept:zilla1120100101HTTP/1.0/ting-IP: 203.0.1.7
+X-Forwarded-For: 206.0.113.7fox/131.0
+Accept: apcpliatio1.0
+Accept: appx/131.0
+Accept: app%2flicatiïnirefox/131.0
+Accept: appl7
+X-Forwaded-For: 203.0.113.7fox/131.0
+Accept: applicationireP: 203.0.1.7
+X-Forwarded-For: 203.0.113.7fox/131.Host: ept:zijson
+Acdept-Encdoing: gzip,necting-IP: 203.0.1.7
+X-ForwarEncdoing: gzip,necting-IP: 203.0.1.7
+X-Forwarded-For: 203.0.113.7fox/131.0
+Accept:zi
+Accept-Encdoing:
+

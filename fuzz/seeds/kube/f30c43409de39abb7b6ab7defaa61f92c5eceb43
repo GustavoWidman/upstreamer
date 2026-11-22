@@ -1,0 +1,6 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVeJsion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "ports": [{"n=me": "http", "port": 6160, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "w\b-a", "resourceVersion": "12"}, "addreJJHdata": {"name": "web-c", "r%00urceVeJsion": "11"}, "addressType": "IPv4", "endpoints": [{"addressesme": "http", "port": 6160, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": {"name": "w\b-a", "resoressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": false}}], "object": {"metadž‹a": {"name00 OK
+transfe/./ : {"meta`ata": {"resourceVe"metad"type c}hu

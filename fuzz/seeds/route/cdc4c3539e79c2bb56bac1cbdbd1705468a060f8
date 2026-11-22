@@ -1,0 +1,21 @@
+	T /p
+
+Upgrade: Ecle: Eclmse se ERP
+Connection:clmse
+Up: host:ERP
+Connection:clDse
+Upgrade: ERP
+Connection:clDse
+Upgrade:n:	clmse ERP
+Connection:clmse
+Up: t
+Up:   mse se ERP
+Connection:clmse
+Up: host:ERP
+Connection:clDse
+Upgrade: ERP
+Connection:clDse
+Upgrade:n:	clmse ERP
+Connection:clmse
+Up: t
+Up:   U

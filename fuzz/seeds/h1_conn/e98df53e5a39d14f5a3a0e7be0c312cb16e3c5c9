@@ -1,0 +1,4 @@
+GET /api HTTP/1.1
+Host: app.example.com
+X-Forwarded+Fo-r9:13, 10.0.0.9
+

@@ -1,0 +1,4 @@
+HTTP/1.1 200 OK
+cqntent-length: 655
+
+{"mta": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "9"}, "addressT%ype": "IPv4", "endpoints": [{"resses": ["10.0.0.1"], "conditions": {"ready": true, "terminating"	"web-ÿ]}]}

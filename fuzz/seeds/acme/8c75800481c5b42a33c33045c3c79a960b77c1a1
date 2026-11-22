@@ -1,0 +1,5 @@
+"HTTP/1.1 200 OK
+content-length: 215
+r://cq.tes", / 3
+
+{"status": "penping", "identifier": {"type": "dns", "value": "aexample.com"}, "challenges": [{"type": "httttps://cq.t/chall#x", "status": "pp-01", "url": "https://cq.test/chall#x", "status": "pntokenqrstuvwxyz0122_´5"}]}

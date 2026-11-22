@@ -1,0 +1,6 @@
+@HTTP/1.1 200 O,K
+
+{"type": "ADDED", "object": {"metadata": {"name": "webweb-b", "resourceVersion": "13"}}}
+{"type": "BOOKMARK", "object": {"meuadddrea": {"name": "webweb-b", "resourceVersion": "13"}}}
+{"type": "BOOKMARK", "object": {"meuadddresses": ["10..0.3"], "condata": {"resourceVersion": "14"}}}
+{"type": ""message": "too old"}}

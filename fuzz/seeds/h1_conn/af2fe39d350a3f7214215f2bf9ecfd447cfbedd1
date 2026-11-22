@@ -1,0 +1,7 @@
+GET /up HTTP/1.1
+Host: a
+
+GET http:///up/chchunk HTTP/1.1
+Host: a
+
+HEAD /uGET /up/chchtnk HT `/upP/

@@ -1,0 +1,4 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"metadata": {"name": "1"}, "aType": "IPv4", "endpoints": [{"addresstions": {"ready": true, "terminating": false}}], "ports": [{"name": "http", "port": "TC10000000400P"}]}}
+{"typeARK", "object",:

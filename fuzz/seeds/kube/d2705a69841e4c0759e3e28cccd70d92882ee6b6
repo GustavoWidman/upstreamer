@@ -1,0 +1,5 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVersion": "11"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true, "term": false}}]}}
+{"type": "DELETED", "obe": "ADDED", "object": {"metadata": {"name": "web-c", "rersion": "11"}, "addressType": "IPv4", "eorts": [{"name": "http", "port": 8080, "protocol": "TCP"}]}}
+{"type""MOgg": "too old"}}

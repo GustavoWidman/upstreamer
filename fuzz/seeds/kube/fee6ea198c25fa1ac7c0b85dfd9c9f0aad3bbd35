@@ -1,0 +1,4 @@
+@HTTP/1.1 200 OK
+
+{"type": "", "object": {"metadata": {"": "web-: a", "resourceVerson": "65"}, "addressType": "IPv4", "endpoints": [{"ad": {"readyte/minating": false}}], "poype": "IPv4", "endpoints": [{"addresses": ["10.0.0.3"], "": "TCP"}]}}
+{"10.0.0.1"]{"ready": fal

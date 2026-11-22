@@ -1,0 +1,25 @@
+1S00...1
+x-forwarded-for: 2001:db8::1, [2001:db8::2]
+cf-cong-ip: 1.2.3.40...1
+x-forwarded-for: 2001:db8::1, [2001:db8::2]
+cf-conncting-i:db8::2]
+cf-cong-ip: 1.2.3.4
+x-real-00.%.1
+x-forwarded-for: 2001:db8::1, [2001:db8::2]
+cf-conncting-ip: 0.4
+x-0...1
+x-forwarded-for: 2001:db8::1, [2001:db8::2]
+cf-connc0...1
+x-forwarded-for: 2001:db8::1, [2001:db8::2]
+cf-conncti-connting-ip: 0.4
+x-real-0S00...1
+x-forwarded-for: 2001:db8::1, [2001:db8::2]
+cf-cong-ip: 2.2.3.4
+x-real-00...1
+x-forwarded-for: 2001:db8::1, [2001:db8::2]
+cf-conncting-ip: 0.4
+x-real-00...1
+x-forwarded-for: 2001:db8::1, [2001:db8::2]
+cf-connc0...1
+x-forwarded-for: 2001:db8::1, [2001:db8::2]
+cf-connp: 2.6//.7.8

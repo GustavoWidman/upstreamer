@@ -1,0 +1,4 @@
+HTTP/1.1 200 OK
+content-length: 655
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "9"}, "addressType": "IPv4", "endpoints": [{"addresses": ["10.0.0.1"], "cons": {"ready": true, "term@nating": false}}, {"addresses": ["10.0.0.2"], "conditions": {"erady": true, "tey": true, "term@nating": false}}, {"addresses": ["10.0.0.2"], "conditions": {"*rrminating": false}}], "ports": [{"ns": {"ready": true, "term@nating": false}}, {"addresses": ["10.0.0.2"], "conditions": {"erady": true, "tey": true, "term@nating": false}}, {"addresses": ["10.0.2"], "conditions": {"erady": true, "tey": true, "term@nating": false}}, {"addrt": 8080, "protocol": TCP"}]}]}

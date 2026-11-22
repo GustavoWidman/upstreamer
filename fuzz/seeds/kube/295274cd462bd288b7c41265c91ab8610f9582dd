@@ -1,0 +1,5 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADD /ED", "object": {"metadata": {"name": "web-c", "resourceVersio.": "11"}, "addressType": "IPv4", "endpoints": [{"addresses1.1 304 Not Modifiedort": 2320, "protocol": "TCP"}]}}
+{"type": "MODIFIED", "object": {"metadata": [{"addresses": ["10.0.0.3"], "conditionl": "TCP"}]}}
+{"type": "MODIFIED", object": {"metadcode": 410, @"message": "too old"}}

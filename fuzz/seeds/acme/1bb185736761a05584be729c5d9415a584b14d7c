@@ -1,0 +1,3 @@
+HTTP/1.1 400 json
+
+{"status": "ready", "autzat": ["1"], "finalize": "httpsx=0", "certificate": "https://[::2]:/cert"}

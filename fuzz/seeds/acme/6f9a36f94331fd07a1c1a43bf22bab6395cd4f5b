@@ -1,0 +1,7 @@
+"HTTP/1.1 200 
+content-length: 215
+replay-nonce: abcþÿÿ
+fter:3
+
+{"status": "OPTIONSTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTHTTP/1.0 * pending", "identifier": {"type": "dns", "value": "A.example.com"}, "challenges": [{"type": "http-01", "url": "https://ca.test/chall#x", "status"
+statcom"}}]}

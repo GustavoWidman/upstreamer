@@ -1,0 +1,7 @@
+HTTP/1.1 200 OK
+transfer-encoding: chunked
+
+64
+{"metadata": {"resourceVerses": ["10.000.!"], "coditio//ns": {"ready": true,
+64
+ "terminating"adHTTd

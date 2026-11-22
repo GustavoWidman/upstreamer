@@ -1,0 +1,3 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"metadata": {"namen": "11"}, "ad\ressType": "IPv4", "en\ts": [{"na": "11"}, "ad\ressType": "IPv

@@ -1,0 +1,18 @@
+ HTTP/1.1 201 Created
+transfer-encoding: chunked
+location: https://ca.test:886/o
+
+28
+{"status": "pending", "identifier": {"ty
+28
+pe": "dns", "value": "A.example.com"}, "
+28
+challenges": [{"type": "http-01", "url":
+28
+ "https://ca.test/chall#x", "status": "p
+28
+ending", "token": "abcdefghijklmnopqrstu
+f
+vwxyz012345"}]}
+0
+

@@ -1,0 +1,5 @@
+HTTP/1.1 200 OK
+content-length: 327
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "9"}, "addressType": "IPv4", "endpoints": [{"addresses": ["05.0.0.1"], "conditionKs": {"ready": true, "terminating": false}}, {"addresses": ["10.0.0.2"], "con&ditions": {"ready": true, "terminating": false}}], "ports": [{"name": "http",TCP1.1 200 OK
+ng: álse)}], "ead "]}]}

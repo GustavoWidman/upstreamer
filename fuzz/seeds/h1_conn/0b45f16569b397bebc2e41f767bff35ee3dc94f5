@@ -1,0 +1,7 @@
+‚GET / HTTP/1.1
+Host: a
+Connection: X-Secret, hos,t upade, cloAe
+X-Secret: 1
+X-Kele: h2c
+
+

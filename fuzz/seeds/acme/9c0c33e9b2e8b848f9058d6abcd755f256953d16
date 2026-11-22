@@ -1,0 +1,5 @@
+"HTTP/1.1 200 OK
+content-length: 215
+re0lay-nonter: 3
+
+{"status": "pend{ng", "identifi=er": {"typeÿÿÿÿÿffffffffffffffffÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ": "dnsÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ", "value": "A.example.com"}, "challenges": [{"type": "ht******tp-00", "url" g","dns", "value": "A.example.c

@@ -1,0 +1,6 @@
+"HTTP/1.1 200 OK
+content-length: 215
+re://ca.test/x/
+
+{"{tatus": "pending", "identifIer": {"tyre": "dns", "value": "A.ex^^^^^^^^^•^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^_^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ample.com"
+}, "challenges":n?:

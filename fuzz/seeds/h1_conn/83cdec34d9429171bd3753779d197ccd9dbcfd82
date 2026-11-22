@@ -1,0 +1,4 @@
+GET /files/dir/a.t:t HTTP/1.1
+Host: a
+Rq%2e: byostt: a
+

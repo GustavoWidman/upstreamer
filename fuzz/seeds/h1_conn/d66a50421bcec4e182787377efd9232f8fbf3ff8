@@ -1,0 +1,11 @@
+GETET / HTTP/1.0
+Connection:Al.1
+Host: Example.com:443
+Accept:  */* 
+
+PUET /a/../%1fb?x=1 HTTP/1.1
+Host:•Example.com:443
+Accept:  */* 
+
+PUT /y HTTP/1.1
+HHost:BOËY

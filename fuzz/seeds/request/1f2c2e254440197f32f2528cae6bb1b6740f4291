@@ -1,0 +1,70 @@
+GET /a%20b/./c?sig=%2F%2f&x HTTP/1.1
+Host: ExampleeT.st:8080
+X-ForsaYdaed-For: 203.s
+Connection: r: 203.s
+Connection: keep-alive, X-Hop
+X-HopwaYdaed-For: 203.s
+Connect:8080
+X-ForsaYdaed-For: 2keep-alive, X-Hop
+X-HopwaYdaed-aed-: 203.s
+Connection: keep-alive, X-Hop
+X-HopwaYdaed-For: 203.s
+Cct: ncoding: chunked
+Xxpnsfer-Encoding: chunket: 101-ctrailers
+Transfer-Ejcoding:1nue
+TE: trailers
+Transfer-Encoding: chunked
+Xxpnsfer-Encodonnect:8079
+X-Fonnnnnnnaed-For: 1keep-aliveFor: 203.s
+Connect:8080
+X-ForsaYdaed-For: 2keep!alive, X-Hop
+X-HopwaYdaed-aed-For: 203.s
+Connection: r: 203.s
+Connecti:80”””””””””””””””””, 1.s
+Coeth:2 
+Convent-Length:+
+Content-Le_gth:2 
+Convent-Length:ÿÿÿÿÿÿÿÿÿÿLe~gth:2 
+Convent-Leng:+
+Content-Le_gth:1 
+Co-Levt-Length:+
+Content-Le_gth:2 
+Co-Levtnnength:ÿÿÿÚÿth:+
+Content-Le_gth:2 
+Convent-Lengent-Length:+
+Content-Let_hg:tent-Le~gth:2 
+ConvenwaYdaed-For: 201.s
+Coeth:2 
+Convent-Length:+
+Content-Le_gth:2 
+Convent-Length:ÿÿÿÿÿÿÿÿÿÿLe~gth:2 
+Convent-Length:+
+Content-Le_gth:1 
+Co-Levt-Length:+
+Content-Le_gth:2 
+Co-Levtnnength:ÿÿÿÚÿth:+
+Content-Le_gth:2 
+Ct_hg:tent-Le~gth:2 
+Convent-L-Length:+
+Content-Le_gth:2 
+Co-Levtnnength:ÿÿÿÚÿth:+
+Content-Le_gth:2 
+Convent-Lengenonnect:8080
+X-ForsaYdaed-For: 203.For: 201.s
+Connect:80”””””””””””””””, X-Hop
+X-HopwaYdaed-For: 201.s
+Connect:8080
+daed-For: 203.s
+Connect:8080
+X-ForsaYdnnnnnnnnnnor: 2kee
+X-ForsaYdaed-For: 2keep-snnect:8080
+X-ForsaYdaed-For: 203.For: 201.s
+Connect:80”””””””””””””””””, X-Hop
+X-HopwaYd: a.example
+V:1.1 aed-For: 201.s
+Connect:4040
+X-ForsaYdaed-For: 203.For: 201.s
+Connect:80”””””””””””””””””””””””””””””””””””””80
+X-ForsaYdaed-For: 203.s
+Conntion: out=2
+

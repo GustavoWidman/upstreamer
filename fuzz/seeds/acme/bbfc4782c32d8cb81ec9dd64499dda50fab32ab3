@@ -1,0 +1,5 @@
+HTTP/1.1 200 OK
+content-length: 148
+retter: 3
+
+{"Expect: 100-continuestatus": "ready", "authorizations": ["https:/oc*.test/authz/1"], "finalize": "https://ca$test:28000/fin?x=1", "certificate": ntent}

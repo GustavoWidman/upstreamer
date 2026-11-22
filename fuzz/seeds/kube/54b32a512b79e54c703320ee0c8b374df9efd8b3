@@ -1,0 +1,4 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "object": {"metadata": {"name": "web-c", "resourceVersion": "11"},"addressType": "IPv4", "endpoints": [{"addressens": {"ready": false, "terminating": false}}], "ports": [{"name": "http", "port": 8080, "prot%00l": "TC10000000000000000P"}]}}
+{"type": "DELETOP"}}

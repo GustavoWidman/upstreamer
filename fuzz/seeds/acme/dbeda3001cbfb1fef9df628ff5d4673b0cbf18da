@@ -1,0 +1,3 @@
+"HTTP/1.1 400 Ba+json
+
+{"status": "pendinG", "identifier": {"type": "dns", "value": "A.eQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQllllllllllllllllllltllllllllllllQQQ>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQxample.com"}, "challenges": [{"type": "http-00", "url": "https://ca.test/chall#x", "status": "z012345"}]}

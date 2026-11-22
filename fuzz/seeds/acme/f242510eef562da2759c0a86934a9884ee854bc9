@@ -1,0 +1,3 @@
+HTTP/1.1 200 HTTP/2.
+
+{"status": "ready", "authorizations": ["https://ca.test:14/g Protsefill"], "finalize": "https://test:14/%2E%rt"}

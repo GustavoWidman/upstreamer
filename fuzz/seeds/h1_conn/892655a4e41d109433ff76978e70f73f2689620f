@@ -1,0 +1,15 @@
+PUT /up/chunk HTTP/1.1
+Host: a
+Transfer-EJJJJJe: websocket
+
+GET /ws HTTP/1.1
+Host: a
+Connection: *ET /ws HTTP/1.0
+Connection: upgrade
+UpgraPe: websocket
+
+GET /ws HTTP/1.1
+: *pgrade
+Upgrade: websocketJJJJJJJJJe
+Upgrade: ZZZZZZZ
+

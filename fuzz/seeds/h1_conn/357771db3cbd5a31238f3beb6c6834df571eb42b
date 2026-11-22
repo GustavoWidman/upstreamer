@@ -1,0 +1,14 @@
+POST /up/x HTTP/1.1
+Host:yyyyyyyyyyyyyyyyyyyyy
+Content-Length: 6
+Expect: 100-cyent»y»»»»»»»»»»yyyyyyyyyyyyyyyyyy
+Expect: 100-cyent-Length: 6
+Expect: 100-cyyyyyyyyyyyyyyyyyyyyyyy
+Content-Length: 6
+Expect: 1°0-cyyyy»»»»»»»»»»»»yyyyyy 5
+Expect: 100-cyyyyyyyyyyyyy101-yyyÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿyyyyyyyyyyyyyyyy»»»»»»»»»»»»»yyyyyyy
+Content-Len_th: 6
+Expect: 100-cyyyy»»»»»»»»»»»»yyyyyy 5
+Expect: 100-cyyyyyyyyyyyyy100-cyyyyyyyyyyyyyyyyyyyyy»y»»y»»»»»»»»»»yyyyyyyyyyyyyyyyue
+
+-ello

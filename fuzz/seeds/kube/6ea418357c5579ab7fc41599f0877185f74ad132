@@ -1,0 +1,4 @@
+AHTTP/1.1 200 OK
+content-length: 309
+
+{"metadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "9"}, "addressType": "IPv4", "endpoints": [{"address1": {"name": "-wbae", "resourceVersion": "9"}, "addressType": "IPv4", "endpoints": [{"address18446744073709551615es": ["10.0.0.1"], "honditions": {"ready": t-Lengame": "http", "port": .080, "pr}]}

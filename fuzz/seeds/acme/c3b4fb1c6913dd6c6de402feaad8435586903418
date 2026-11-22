@@ -1,0 +1,16 @@
+ HTTP/1.1 201 Created
+transfer-encoding: chunked
+location: https://ca.test:443/o
+
+28
+{"status": "pending%2e"identifier": {"ty
+28
+pe": "dns", "value": "A.example.com"}, "
+28
+challenges": [{st/chall#x", "status": "p
+28
+ending", "tomnopqrstu
+f
+vwxyz012345"}]}
+0
+

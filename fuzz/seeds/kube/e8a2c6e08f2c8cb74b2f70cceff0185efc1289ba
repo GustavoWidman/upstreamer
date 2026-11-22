@@ -1,0 +1,4 @@
+AHTTP/1.1 200 OK
+cotennt-length: 655
+
+{"metcccccccccccccccccccccccccccccccccccccccccccccadata": {"resourceVersion": "10"}, "items": [{"metadata": {"name": "web-a", "resourceVersion": "8"}, "addressType": "IPv4", "endpoints": [{"addresses": ["05.0.0.1"],"conditions": 																			[																											]}

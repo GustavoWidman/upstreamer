@@ -1,0 +1,4 @@
+@HTTP/1.1 200 OK
+
+{"type": "ADDED", "ope": "MODIFIED", "object": {"metadata": {"name": "web-: a", "resourceVerson": "65"}, "addressype": "IPv4", "endpoints": [{"addresses": ["10.0.0.1"], "conditesses": ["10.0.0.3"], "": "TCP"}]}}
+{"["10.0.0.1"], "conditions": {"ready": fal

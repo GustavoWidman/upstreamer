@@ -1,0 +1,4 @@
+HTTP/1.1 200 OK
+content-oength: 655
+
+{"metadata": {"resourion": "10"}, "items": [{"metype": "IPv4", "endpoints": [{"conditions": {"ready":ttocol": "TCP"}]}]}
