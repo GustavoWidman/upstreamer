@@ -144,6 +144,30 @@ pub(crate) fn serve(
         };
         let workers = super::spawn_workers_with(&cpus, current.clone(), sockets, hold)?;
         live.discovery.set_sources(&current.plan);
+        if predecessor.is_some() {
+            // The process this one takes over from serves its sources' last endpoints; this
+            // one takes over once it has its own.
+            let Live {
+                registry,
+                discovery,
+                ..
+            } = &mut live;
+            let reports = async || discovery.recv().await;
+            let synced = first_reports(
+                reports,
+                &mut current,
+                &workers,
+                registry,
+                DISCOVERY_PATIENCE,
+            );
+            if let Err(source) = synced.await {
+                super::stop(workers, Instant::now());
+                return Err(StartError::Runtime(std::io::Error::other(format!(
+                    "discovery source {source} did not sync in {} s",
+                    DISCOVERY_PATIENCE.as_secs()
+                ))));
+            }
+        }
         if let Some(predecessor) = &mut predecessor {
             let promoted = match predecessor.ready() {
                 Ok(()) => predecessor.promoted().await,
@@ -239,20 +263,7 @@ pub(crate) fn serve(
                     }
                 }
                 found = live.discovery.recv() => {
-                    if let Some(upstreams) = live.registry.discovered(&current.plan, found) {
-                        // The same plan `Arc`: cores keep their regex caches and file catalog
-                        // and re-index their origin slots by identity.
-                        let metrics = current.metrics.as_ref().map(|(_, hub)| {
-                            (metrics::Layout::build(&current.plan, &upstreams), hub.clone())
-                        });
-                        let next = Arc::new(Generation {
-                            upstreams,
-                            metrics,
-                            ..(*current).clone()
-                        });
-                        log_bind_failures(&publish(&workers, next.clone()).await);
-                        current = next;
-                    }
+                    discovered(found, &mut current, &workers, &mut live.registry).await;
                     crate::discover::publish(&live.registry, &live.hub);
                     notifier.notify(&format!("STATUS={}", status_line(&current, &live)));
                 }
@@ -300,6 +311,61 @@ pub(crate) fn serve(
         predecessor.failed(&e.to_string());
     }
     served
+}
+
+/// A discovery source reported: publishes the plan with the source's endpoints when they
+/// changed.
+async fn discovered(
+    found: crate::discover::Found,
+    current: &mut Arc<Generation>,
+    workers: &[Worker],
+    registry: &mut Registry,
+) {
+    if let Some(upstreams) = registry.discovered(&current.plan, found) {
+        // The same plan `Arc`: cores keep their regex caches and file catalog and re-index
+        // their origin slots by identity.
+        let metrics = current.metrics.as_ref().map(|(_, hub)| {
+            (
+                metrics::Layout::build(&current.plan, &upstreams),
+                hub.clone(),
+            )
+        });
+        let next = Arc::new(Generation {
+            upstreams,
+            metrics,
+            ..(**current).clone()
+        });
+        log_bind_failures(&publish(workers, next.clone()).await);
+        *current = next;
+    }
+}
+
+/// How long a process that takes over from another waits for its discovery sources.
+const DISCOVERY_PATIENCE: Duration = Duration::from_secs(10);
+
+/// Applies discovery reports until every source of the plan has synced. An error names a
+/// source that has not after `patience`.
+async fn first_reports(
+    mut next: impl AsyncFnMut() -> crate::discover::Found,
+    current: &mut Arc<Generation>,
+    workers: &[Worker],
+    registry: &mut Registry,
+    patience: Duration,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + patience;
+    loop {
+        let unsynced = registry
+            .sources()
+            .find(|(_, endpoints)| !endpoints.synced())
+            .map(|(source, _)| source.label());
+        let Some(unsynced) = unsynced else {
+            return Ok(());
+        };
+        match tokio::time::timeout_at(deadline, next()).await {
+            Ok(found) => discovered(found, current, workers, registry).await,
+            Err(_) => return Err(unsynced),
+        }
+    }
 }
 
 /// Resolves once the process this one took over from reads the UDP sockets no more. Pending
@@ -998,6 +1064,102 @@ mod tests {
         let mut buf = [0u8; 16];
         assert!(sock.recv(&mut buf).is_err(), "nothing without a store");
         crate::runtime::stop(workers, Instant::now());
+    }
+
+    #[cfg(feature = "kubernetes")]
+    #[test]
+    fn a_process_that_takes_over_waits_until_every_discovery_source_has_synced() {
+        use crate::discover::{Found, SourceKey, SourceState};
+        let plan = crate::runtime::testing::plan_from(
+            1,
+            &serde_json::json!({
+                "version": 1,
+                "listen": { "http": [free_addr()], "https": [] },
+                "sites": [{
+                    "name": "shop",
+                    "hosts": ["*"],
+                    "routes": [{ "proxy": { "to": { "kubernetes": {
+                        "namespace": "shop", "service": "web", "port": 8080,
+                    } } } }],
+                }],
+            }),
+        );
+        let crate::plan::SourceSpec::Kubernetes(spec) = &plan.sources[0];
+        let source = SourceKey::Kubernetes(spec.watch.clone());
+        let endpoint: std::net::SocketAddr = "10.0.0.7:8080".parse().unwrap();
+        let report = |state, endpoints: &[std::net::SocketAddr]| Found {
+            source: source.clone(),
+            endpoints: endpoints.into(),
+            state,
+        };
+        let unreachable = SourceState::Unreachable {
+            since: std::time::SystemTime::now(),
+            error: "refused".into(),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let start = |plan| {
+            let mut live = Live::new(1);
+            let (current, _) = assemble(plan, None, &mut live);
+            (Arc::new(current), live)
+        };
+
+        let (mut current, mut live) = start(plan);
+        let mut reports = std::collections::VecDeque::from([
+            report(unreachable.clone(), &[]),
+            report(SourceState::Synced, &[endpoint]),
+        ]);
+        let next = async || match reports.pop_front() {
+            Some(found) => found,
+            None => std::future::pending().await,
+        };
+        let waited = first_reports(
+            next,
+            &mut current,
+            &[],
+            &mut live.registry,
+            Duration::from_secs(5),
+        );
+        runtime.block_on(waited).expect("the source synced");
+        let origins: Vec<_> = current
+            .upstreams
+            .origins()
+            .iter()
+            .map(|origin| match origin.spec.addr {
+                crate::plan::OriginAddr::Ip(addr) => Some(addr),
+                crate::plan::OriginAddr::Name => None,
+            })
+            .collect();
+        assert_eq!(
+            origins,
+            [Some(endpoint)],
+            "and its endpoints are in the generation"
+        );
+
+        let plan = Arc::try_unwrap(current)
+            .ok()
+            .and_then(|generation| Arc::try_unwrap(generation.plan).ok())
+            .expect("the only holder of the plan");
+        let (mut current, mut live) = start(plan);
+        let mut reports = std::collections::VecDeque::from([report(unreachable, &[])]);
+        let next = async || match reports.pop_front() {
+            Some(found) => found,
+            None => std::future::pending().await,
+        };
+        let waited = first_reports(
+            next,
+            &mut current,
+            &[],
+            &mut live.registry,
+            Duration::from_millis(100),
+        );
+        assert_eq!(
+            runtime.block_on(waited),
+            Err("kubernetes:shop/web:8080".to_owned()),
+            "a source that only reports its API server unreachable has not synced"
+        );
     }
 
     #[test]
