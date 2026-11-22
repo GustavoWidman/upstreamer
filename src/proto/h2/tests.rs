@@ -1299,30 +1299,116 @@ fn a_stream_that_finished_out_of_turn_does_not_keep_the_others_waiting() {
     assert_eq!(engine.streams(), 0);
 }
 
+/// Asserts that `sent` ends with a GOAWAY naming `last`, and holds no other GOAWAY.
+fn ends_with_goaway(sent: &[Sent], last: u32) {
+    let goaways = sent
+        .iter()
+        .filter(|s| matches!(s, Sent::GoAway { .. }))
+        .count();
+    assert_eq!(goaways, 1, "{sent:?}");
+    assert_eq!(
+        sent.last(),
+        Some(&Sent::GoAway { last, code: 0 }),
+        "{sent:?}"
+    );
+}
+
 #[test]
-fn a_shutdown_announces_itself_then_names_the_last_stream() {
+fn a_shutdown_with_no_stream_in_progress_names_the_last_stream_at_once() {
     let mut client = Client::new();
-    let first = client.get(1);
+    let slot = client.get(1);
+    client.respond(slot, 0);
+    client.session.engine.finish(slot);
+    client.sent();
     client.session.engine.start_shutdown();
     client.session.engine.start_shutdown();
     assert_eq!(
         client.sent(),
+        [Sent::GoAway { last: 1, code: 0 }],
+        "no PING and no GOAWAY that admits more streams"
+    );
+    assert!(client.session.engine.finished());
+    assert!(
+        client.ok(&headers(3, &GET, true)).is_empty(),
+        "a request on its way is above the last stream id, safe for the client to retry"
+    );
+    assert!(client.sent().is_empty());
+    assert!(
+        !client.session.engine.shutdown_waited(),
+        "nothing to wait for"
+    );
+}
+
+#[test]
+fn a_shutdown_holds_its_goaway_until_the_streams_in_progress_finish() {
+    let mut client = Client::new();
+    let first = client.get(1);
+    client.session.engine.start_shutdown();
+    assert!(
+        client.sent().is_empty(),
+        "nothing is said while a stream is in progress"
+    );
+    let second = client.get(3);
+    client.respond(first, 0);
+    client.session.engine.finish(first);
+    assert!(
+        !client.sent().contains(&Sent::GoAway { last: 3, code: 0 }),
+        "stream 3 is still in progress"
+    );
+    assert_eq!(cancelled(&client.ok(&rst_stream(3))), [second]);
+    client.session.engine.release(second);
+    ends_with_goaway(&client.sent(), 3);
+    assert!(client.session.engine.finished());
+
+    let mut client = Client::new();
+    let slot = client.get(1);
+    client.session.engine.start_shutdown();
+    client.respond(slot, 0);
+    client.session.engine.finish(slot);
+    let sent = client.sent();
+    assert!(
+        matches!(
+            sent[0],
+            Sent::Headers {
+                stream: 1,
+                end: true,
+                ..
+            }
+        ),
+        "{sent:?}"
+    );
+    ends_with_goaway(&sent, 1);
+}
+
+#[test]
+fn a_shutdown_held_too_long_is_announced_with_the_ping_ahead_of_the_goaway() {
+    let mut client = Client::new();
+    let first = client.get(1);
+    client.session.engine.start_shutdown();
+    assert!(
+        client.session.engine.shutdown_waited(),
+        "the ACK is waited for"
+    );
+    assert_eq!(
+        client.sent(),
         [
-            Sent::GoAway {
-                last: (1 << 31) - 1,
-                code: 0,
-            },
             Sent::Ping {
                 ack: false,
                 opaque: b"shutdown".to_vec(),
             },
+            Sent::GoAway {
+                last: (1 << 31) - 1,
+                code: 0,
+            },
         ]
     );
-    // A request the client sent before it read the GOAWAY is served.
     let second = client.get(3);
-    assert!(client.session.engine.shutdown_announced());
     client.ok(&frame(frame::PING, frame::ACK, 0, b"shutdown"));
-    assert_eq!(client.sent(), [Sent::GoAway { last: 3, code: 0 }]);
+    assert_eq!(
+        client.sent(),
+        [Sent::GoAway { last: 3, code: 0 }],
+        "a request the client sent before it read the GOAWAY is served"
+    );
     assert!(client.ok(&headers(5, &GET, true)).is_empty());
     assert!(client.sent().is_empty(), "a later stream is ignored");
 
@@ -1332,6 +1418,19 @@ fn a_shutdown_announces_itself_then_names_the_last_stream() {
         client.session.engine.finish(slot);
     }
     assert!(client.session.engine.finished());
+    assert!(!client.session.engine.shutdown_waited());
+
+    let mut client = Client::new();
+    client.get(1);
+    client.session.engine.start_shutdown();
+    client.session.engine.shutdown_waited();
+    client.sent();
+    assert!(!client.session.engine.shutdown_waited(), "the last wait");
+    assert_eq!(
+        client.sent(),
+        [Sent::GoAway { last: 1, code: 0 }],
+        "a client that never answers the PING gets the final GOAWAY all the same"
+    );
 
     let mut client = Client::new();
     client.ok(&frame(frame::GOAWAY, 0, 0, &[0; 8]));

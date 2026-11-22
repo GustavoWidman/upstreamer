@@ -82,8 +82,8 @@ const MAX_DRAIN: usize = 64 * 1024;
 const RECENT: usize = 16;
 /// Capacity the buffers of field block decoding keep between blocks.
 const SCRATCH_KEEP: usize = 4096;
-/// The PING sent with the first GOAWAY of a shutdown; its ACK shows the client has read
-/// that GOAWAY.
+/// The PING written just ahead of the GOAWAY that announces a shutdown; its ACK comes back
+/// a round trip after that GOAWAY left.
 const SHUTDOWN_PING: [u8; 8] = *b"shutdown";
 
 /// The frames to write, in order. Small pieces are gathered in one buffer; large DATA
@@ -369,8 +369,11 @@ pub(super) enum Step {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Shutdown {
     No,
-    /// GOAWAY with the largest stream id is out; streams are still accepted until the client
-    /// has seen it.
+    /// Nothing is said yet: the GOAWAY waits for the streams in progress to finish, and
+    /// streams are still accepted.
+    Holding,
+    /// The shutdown PING and a GOAWAY with the largest stream id are out; streams are still
+    /// accepted until the PING's ACK.
     Announced,
     /// GOAWAY with the last stream id is out; later streams are ignored.
     Final,
@@ -542,11 +545,6 @@ impl Engine {
         (self.shutdown == Shutdown::Final || self.peer_left) && self.active == 0
     }
 
-    /// Whether a shutdown waits for the client to acknowledge its first GOAWAY.
-    pub fn shutdown_announced(&self) -> bool {
-        self.shutdown == Shutdown::Announced
-    }
-
     /// Whether the driver should stop reading frames until output has been written.
     pub fn congested(&self) -> bool {
         self.out.len() >= OUT_HIGH
@@ -673,6 +671,7 @@ impl Engine {
         // If this stream had been given the connection's capacity and not used it yet,
         // the next one in line gets it.
         self.grant();
+        self.release_hold();
         in_progress
     }
 
@@ -1417,6 +1416,7 @@ impl Engine {
         {
             self.forget(oldest);
         }
+        self.release_hold();
     }
 
     /// Frees the slot of a cancelled stream, once its work is dropped.
@@ -1456,14 +1456,52 @@ impl Engine {
         }
     }
 
-    /// Starts a graceful shutdown (RFC 9113 6.8): a GOAWAY that still admits every stream,
-    /// and a PING whose ACK shows the client has read it. [`Engine::finish_shutdown`]
-    /// follows on that ACK, or when the driver has waited long enough.
+    /// Starts a graceful shutdown (RFC 9113 6.8). The GOAWAY waits until no stream is in
+    /// progress, and then names the last stream served: clients built on Python's `h2`
+    /// fail every stream a GOAWAY leaves open, reject any frame but another GOAWAY after
+    /// one, and retry a request only when the GOAWAY's last stream id is below its stream.
+    /// A stream the client opens as that GOAWAY is on its way is above its last stream id,
+    /// which tells the client the request was not processed and is safe to retry (8.7).
+    /// Streams are accepted while the GOAWAY waits; when the driver has waited long enough,
+    /// [`Engine::shutdown_waited`] announces the shutdown instead.
     pub fn start_shutdown(&mut self) {
         if self.shutdown == Shutdown::No {
-            frame::put_goaway(&mut self.out.buf, frame::MAX_STREAM_ID, Reason::NoError);
-            frame::put_ping(&mut self.out.buf, 0, &SHUTDOWN_PING);
-            self.shutdown = Shutdown::Announced;
+            self.shutdown = Shutdown::Holding;
+            self.release_hold();
+        }
+    }
+
+    /// Sends the GOAWAY a shutdown holds back once no stream is in progress.
+    fn release_hold(&mut self) {
+        if self.shutdown == Shutdown::Holding && self.active == 0 {
+            self.finish_shutdown();
+        }
+    }
+
+    /// Moves a shutdown on when the driver's wait for its current step is over; returns
+    /// whether another wait follows.
+    ///
+    /// Streams still in progress after the hold get the shutdown announced as 6.8 has it: a
+    /// GOAWAY that still admits every stream, so the client opens no more, with the PING
+    /// just ahead of it in the same write. The PING's ACK comes back a round trip after the
+    /// GOAWAY left, the time 6.8 asks to leave for streams the client opened before it read
+    /// the GOAWAY, and [`Engine::finish_shutdown`] follows it. The PING goes first because
+    /// a client that takes the connection as closed once it has read a GOAWAY (Python's
+    /// `h2`) rejects a PING after it, but answers one before it. A client that has not
+    /// answered by the end of the next wait gets the final GOAWAY all the same.
+    pub fn shutdown_waited(&mut self) -> bool {
+        match self.shutdown {
+            Shutdown::Holding => {
+                frame::put_ping(&mut self.out.buf, 0, &SHUTDOWN_PING);
+                frame::put_goaway(&mut self.out.buf, frame::MAX_STREAM_ID, Reason::NoError);
+                self.shutdown = Shutdown::Announced;
+                true
+            }
+            Shutdown::Announced => {
+                self.finish_shutdown();
+                false
+            }
+            Shutdown::No | Shutdown::Final => false,
         }
     }
 
