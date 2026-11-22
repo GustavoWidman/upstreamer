@@ -399,4 +399,46 @@ mod tests {
             "the connection ends with a GOAWAY"
         );
     }
+
+    #[test]
+    fn a_proxied_request_body_that_goes_silent_fails_and_the_connection_ends() {
+        // Half of the declared body, then nothing, with the client's side open.
+        let request = b"POST /up/x HTTP/1.1\r\nhost: a\r\ncontent-length: 10\r\n\r\nhello";
+        let out = SERVER.with(|s| s.serve(Proto::H1, &[request], false));
+        let out = String::from_utf8_lossy(&out);
+        assert!(out.starts_with("HTTP/1.1 502 "), "{out}");
+
+        let mut block = Vec::new();
+        for (name, value) in [
+            (":method", "PUT"),
+            (":scheme", "https"),
+            (":path", "/up/x"),
+            (":authority", "a"),
+        ] {
+            block.push(0);
+            block.push(name.len() as u8);
+            block.extend_from_slice(name.as_bytes());
+            block.push(value.len() as u8);
+            block.extend_from_slice(value.as_bytes());
+        }
+        let mut preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
+        preface.extend(frame(4, 0, 0, &[]));
+        // HEADERS without END_STREAM, one DATA frame, and nothing after it.
+        let pieces = [
+            preface,
+            frame(4, 1, 0, &[]),
+            frame(1, 0x4, 1, &block),
+            frame(0, 0, 1, b"hello"),
+        ];
+        let pieces: Vec<&[u8]> = pieces.iter().map(Vec::as_slice).collect();
+        let out = SERVER.with(|s| s.serve(Proto::H2, &pieces, false));
+        let headers = frames(&out).into_iter().find(|f| f.0 == 1 && f.1 == 1);
+        let (_, _, block) = headers.expect("stream 1 is answered");
+        let fields = crate::proto::h2::harness::decode(&block);
+        assert_eq!(
+            fields[0],
+            (b":status".to_vec(), b"502".to_vec()),
+            "{fields:?}"
+        );
+    }
 }

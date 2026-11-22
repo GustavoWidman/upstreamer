@@ -120,7 +120,8 @@ pub(crate) enum ProxyError {
     /// Reset or EOF before a complete response head.
     Upstream(io::Error),
     BadResponse,
-    /// The client went away while the request body was being forwarded.
+    /// The client went away while the request body was being forwarded, or sent none of it
+    /// for the keep-alive timeout.
     ClientGone,
     /// No member of the pool may be picked; `ex.refused` says when to retry.
     NoOrigin,
@@ -397,9 +398,12 @@ async fn attempt(
     mut conn: UpstreamConn,
     upgrade: bool,
 ) -> Result<Response, Failed> {
+    // A request body that goes silent for the keep-alive timeout is a client gone: it would
+    // hold this connection to the origin, and the client's, as long as it liked.
+    let idle = snap.plan.server.keep_alive;
     let sent = match &mut *body {
         RequestBody::H1(body) if !body.state.is_empty() => {
-            relay::copy_request(core, &ex.out, body, &mut conn).await
+            relay::copy_request(core, &ex.out, body, &mut conn, idle).await
         }
         RequestBody::Empty | RequestBody::H1(_) => {
             // A failed write shows as a failed read of the response just below.
@@ -409,7 +413,7 @@ async fn attempt(
                 .await;
             Ok(Sent::All)
         }
-        body => send_chunks(&ex.out, body, &mut conn).await,
+        body => send_chunks(&ex.out, body, &mut conn, idle).await,
     };
     let sent = match sent {
         Ok(sent) => sent,
@@ -579,11 +583,14 @@ async fn send_chunks(
     mut head: &[u8],
     body: &mut RequestBody<'_>,
     conn: &mut UpstreamConn,
+    idle: Duration,
 ) -> io::Result<Sent> {
     let chunked = body.len().is_none();
     let mut size = [0u8; 18];
     loop {
-        let chunk = body.next_chunk().await?;
+        let chunk = tokio::time::timeout(idle, body.next_chunk())
+            .await
+            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
         let data = chunk.as_deref().unwrap_or_default();
         let mut slices = relay::framed(head, data, chunked, chunk.is_none(), &mut size);
         if conn.io.write_all_vectored(&mut slices).await.is_err() {
