@@ -2311,3 +2311,160 @@ mod driver {
         );
     }
 }
+
+/// The driver over a socket pair, against a client that grants no stream window: the work of
+/// each stream answers its head, then waits in its block for room to send the body until the
+/// client grants some, resets the stream or leaves.
+mod waiting_work {
+    use super::{GET, frame, headers, rst_stream, settings, window_update};
+    use crate::exchange::{ConnInfo, Proto, Scheme};
+    use crate::net::{Socket, Transport};
+    use crate::plan::{ListenerKey, ListenerKind};
+    use crate::runtime::Generation;
+    use crate::runtime::testing::{core, plan};
+    use std::os::fd::OwnedFd;
+    use std::rc::Rc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    struct Peer {
+        io: UnixStream,
+        rx: Vec<u8>,
+        pings: u64,
+    }
+
+    impl Peer {
+        async fn send(&mut self, bytes: &[u8]) {
+            self.io.write_all(bytes).await.unwrap();
+        }
+
+        /// The frames the server sent in answer to everything sent before: what comes before
+        /// the acknowledgement of a second PING, sent once the first one is acknowledged (the
+        /// work a read starts runs before the next read).
+        async fn answers(&mut self) -> Vec<(frame::Head, Vec<u8>)> {
+            let mut frames = Vec::new();
+            for _ in 0..2 {
+                self.pings += 1;
+                let opaque = self.pings.to_be_bytes();
+                self.send(&super::frame(frame::PING, 0, 0, &opaque)).await;
+                loop {
+                    let (head, payload) = self.next_frame().await;
+                    if head.kind == frame::PING && head.has(frame::ACK) && payload == opaque {
+                        break;
+                    }
+                    frames.push((head, payload));
+                }
+            }
+            frames
+        }
+
+        async fn next_frame(&mut self) -> (frame::Head, Vec<u8>) {
+            loop {
+                if let Some(head) = frame::Head::parse(&self.rx)
+                    && self.rx.len() >= frame::HEADER_LEN + head.len
+                {
+                    let payload = self.rx[frame::HEADER_LEN..][..head.len].to_vec();
+                    self.rx.drain(..frame::HEADER_LEN + head.len);
+                    return (head, payload);
+                }
+                let n = self.io.read_buf(&mut self.rx).await.unwrap();
+                assert_ne!(n, 0, "the server closed the connection");
+            }
+        }
+    }
+
+    /// (kind, stream, END_STREAM) of each frame other than SETTINGS and WINDOW_UPDATE.
+    fn kinds(frames: &[(frame::Head, Vec<u8>)]) -> Vec<(u8, u32, bool)> {
+        frames
+            .iter()
+            .filter(|(head, _)| !matches!(head.kind, frame::SETTINGS | frame::WINDOW_UPDATE))
+            .map(|(head, _)| (head.kind, head.stream, head.has(frame::END_STREAM)))
+            .collect()
+    }
+
+    #[test]
+    fn work_waiting_in_place_is_finished_reset_or_dropped_with_the_connection() {
+        let listen = "127.0.0.1:8443".parse().unwrap();
+        let generation = Generation::standalone(plan(1, &[listen]), None, Default::default());
+        let info = ConnInfo {
+            remote: "192.0.2.1:5000".parse().unwrap(),
+            local_port: listen.port(),
+            scheme: Scheme::Http,
+            proto: Proto::H2,
+            listener: ListenerKey {
+                addr: listen,
+                kind: ListenerKind::Http,
+            },
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let core = core(&generation);
+        let snapshot = core.snapshot();
+        let held = || Rc::strong_count(&snapshot) - 2;
+        runtime.block_on(async {
+            let (server, client) = std::os::unix::net::UnixStream::pair().unwrap();
+            server.set_nonblocking(true).unwrap();
+            client.set_nonblocking(true).unwrap();
+            let server = Socket::from_fd(OwnedFd::from(server)).unwrap();
+            let mut peer = Peer {
+                io: UnixStream::from_std(client).unwrap(),
+                rx: Vec::new(),
+                pings: 0,
+            };
+            let serving = super::super::serve(core.clone(), Transport::Plain(server), info);
+            let client = async {
+                let mut hello = frame::PREFACE.to_vec();
+                hello.extend_from_slice(&settings(&[(frame::SETTINGS_INITIAL_WINDOW_SIZE, 0)]));
+                hello.extend_from_slice(&super::frame(frame::SETTINGS, frame::ACK, 0, &[]));
+                peer.send(&hello).await;
+                peer.answers().await;
+
+                peer.send(&headers(1, &GET, true)).await;
+                assert_eq!(
+                    kinds(&peer.answers().await),
+                    [(frame::HEADERS, 1, false)],
+                    "the head goes out and the body waits for window"
+                );
+                assert_eq!(held(), 1, "the work of stream 1 waits");
+
+                peer.send(&rst_stream(1)).await;
+                assert_eq!(kinds(&peer.answers().await), []);
+                assert_eq!(held(), 0, "a reset drops the waiting work");
+
+                let mut two = headers(3, &GET, true);
+                two.extend_from_slice(&headers(5, &GET, true));
+                peer.send(&two).await;
+                assert_eq!(
+                    kinds(&peer.answers().await),
+                    [(frame::HEADERS, 3, false), (frame::HEADERS, 5, false)]
+                );
+                assert_eq!(held(), 2);
+
+                peer.send(&window_update(3, 1 << 16)).await;
+                assert_eq!(
+                    kinds(&peer.answers().await),
+                    [(frame::DATA, 3, true)],
+                    "window lets the work of stream 3 finish"
+                );
+                assert_eq!(held(), 1);
+
+                let mut burst = headers(7, &GET, true);
+                burst.extend_from_slice(&rst_stream(5));
+                burst.extend_from_slice(&headers(9, &GET, true));
+                burst.extend_from_slice(&rst_stream(9));
+                peer.send(&burst).await;
+                assert_eq!(
+                    kinds(&peer.answers().await),
+                    [(frame::HEADERS, 7, false)],
+                    "a request reset in the read that opened it never starts"
+                );
+                assert_eq!(held(), 1, "stream 5 dropped, stream 7 waits");
+                drop(peer);
+            };
+            tokio::join!(serving, client);
+        });
+        assert_eq!(held(), 0, "the connection's end drops the waiting work");
+    }
+}
