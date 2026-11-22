@@ -1,6 +1,8 @@
 # What the discovery tests watch: three pods behind Service `web` in namespace `shop`. The
 # Service's label is what a `selector` source matches (the EndpointSlice controller copies it
-# onto the slices). maxUnavailable 0 makes a rollout keep at least one ready pod.
+# onto the slices). maxUnavailable 0 makes a rollout keep at least one ready pod. A stopping pod
+# is marked terminating on its slice at once but keeps serving for 5 s (preStop) before it gets
+# SIGTERM, the window Kubernetes advises for clients to see the change before the pod goes.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -22,11 +24,14 @@ spec:
     metadata:
       labels: {app: web}
     spec:
-      terminationGracePeriodSeconds: 2
+      terminationGracePeriodSeconds: 10
       containers:
         - name: web
           image: registry.k8s.io/e2e-test-images/agnhost:2.47
           args: ["netexec", "--http-port=8080"]
+          lifecycle:
+            preStop:
+              sleep: {seconds: 5}
           ports:
             - {name: http, containerPort: 8080}
           readinessProbe:
