@@ -17,6 +17,8 @@
 //! itself once a second.
 
 pub(crate) mod control;
+#[cfg(any(test, feature = "internals"))]
+pub mod harness;
 pub(crate) mod slots;
 
 use crate::StartError;

@@ -81,5 +81,19 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "h1_conn"
+path = "fuzz_targets/h1_conn.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_conn"
+path = "fuzz_targets/h2_conn.rs"
+test = false
+doc = false
+bench = false
+
 # Not a member of the proxy's build; built by `cargo fuzz` on its own.
 [workspace]

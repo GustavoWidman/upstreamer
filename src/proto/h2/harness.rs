@@ -407,3 +407,105 @@ pub fn hpack_input(data: &[u8]) {
         assert_eq!(back, fields);
     });
 }
+
+/// Checks what a server wrote on a connection against what the client sent after its
+/// preface (`reads`). The server writes whole frames no larger than the default frame
+/// size; a field block decodes; HEADERS and DATA go only on streams the client opened, and
+/// never push; and DATA stays within the windows the client granted: per stream, the
+/// largest initial window it could have had plus the stream's WINDOW_UPDATEs, and on the
+/// connection 65,535 bytes plus the connection's (RFC 9113 6.9).
+pub(crate) fn check_conversation(reads: &[&[u8]], out: &[u8]) {
+    let sent = reads.concat();
+    let mut opened = std::collections::HashSet::new();
+    let mut granted = std::collections::HashMap::<u32, u64>::new();
+    let mut connection: u64 = 65_535;
+    let mut initial: u64 = 65_535;
+    let mut raised: u64 = 0;
+    let mut at = 0;
+    while let Some(head) = frame::Head::parse(&sent[at..]) {
+        let start = at + frame::HEADER_LEN;
+        let Some(payload) = sent.get(start..start + head.len) else {
+            break;
+        };
+        at = start + head.len;
+        match head.kind {
+            frame::HEADERS => {
+                opened.insert(head.stream);
+            }
+            frame::WINDOW_UPDATE if payload.len() == 4 => {
+                let increment = u64::from(frame::u32_at(payload) & frame::MAX_STREAM_ID);
+                match head.stream {
+                    0 => connection += increment,
+                    stream => *granted.entry(stream).or_default() += increment,
+                }
+            }
+            frame::SETTINGS if !head.has(frame::ACK) => {
+                for setting in payload.as_chunks::<6>().0 {
+                    if u16::from_be_bytes([setting[0], setting[1]])
+                        == frame::SETTINGS_INITIAL_WINDOW_SIZE
+                    {
+                        let value = u64::from(frame::u32_at(&setting[2..]));
+                        raised += value.saturating_sub(initial);
+                        initial = value;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut client = Decoder::new();
+    let mut block = Vec::new();
+    let mut data: u64 = 0;
+    let mut data_on = std::collections::HashMap::<u32, u64>::new();
+    let mut at = 0;
+    while at < out.len() {
+        let head = frame::Head::parse(&out[at..]).expect("a whole frame header");
+        assert!(head.len <= frame::MAX_FRAME, "{head:?}");
+        let start = at + frame::HEADER_LEN;
+        let payload = out.get(start..start + head.len).expect("a whole frame");
+        at = start + head.len;
+        match head.kind {
+            frame::HEADERS | frame::CONTINUATION => {
+                assert!(
+                    opened.contains(&head.stream),
+                    "{head:?} on a stream never opened"
+                );
+                let fragment = match head.kind {
+                    frame::HEADERS => frame::unpad(head, payload)
+                        .map(|(s, e)| &payload[s..e])
+                        .expect("a whole HEADERS payload"),
+                    _ => payload,
+                };
+                block.extend_from_slice(fragment);
+                if head.has(frame::END_HEADERS) {
+                    client
+                        .decode(&block, |_, _| {})
+                        .expect("a response block decodes");
+                    block.clear();
+                }
+            }
+            frame::DATA => {
+                assert!(
+                    opened.contains(&head.stream),
+                    "{head:?} on a stream never opened"
+                );
+                data += head.len as u64;
+                let on = data_on.entry(head.stream).or_default();
+                *on += head.len as u64;
+                let window = 65_535 + raised + granted.get(&head.stream).copied().unwrap_or(0);
+                assert!(
+                    *on <= window,
+                    "{on} bytes of DATA on {} for a window of {window}",
+                    head.stream
+                );
+                assert!(
+                    data <= connection,
+                    "{data} bytes of DATA for a window of {connection}"
+                );
+            }
+            frame::PUSH_PROMISE => panic!("a push"),
+            _ => assert!(block.is_empty(), "a block is not interleaved"),
+        }
+    }
+}
