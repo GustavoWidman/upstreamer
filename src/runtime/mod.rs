@@ -1309,6 +1309,12 @@ pub(crate) mod testing {
         }
     }
 
+    /// Core 0 of `generation`, with no listener: connections are handed to its drivers
+    /// directly.
+    pub fn core(generation: &Generation) -> Rc<Core> {
+        Rc::new(Core::new(0, generation))
+    }
+
     pub fn generation(generation: u64, addrs: &[SocketAddr]) -> Arc<Generation> {
         Arc::new(Generation::standalone(
             plan(generation, addrs),
