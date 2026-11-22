@@ -846,6 +846,83 @@ fn the_reload_command_succeeds_once_the_config_is_applied_or_the_new_program_ser
 }
 
 #[test]
+fn a_connection_made_after_a_handover_is_reported_is_served_by_the_new_process() {
+    let program = Program::install();
+    let proxy = Proxy::start_program(&program.path, plain_site("old"), json!({}));
+    program.replace();
+    proxy.rewrite(plain_site("new"));
+
+    // Clients that open a connection per request, and note when and which process answered.
+    const CLIENTS: usize = 4;
+    let stop = Arc::new(AtomicBool::new(false));
+    let answered = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let clients: Vec<_> = (0..CLIENTS)
+        .map(|_| {
+            let (stop, answered, addr) = (stop.clone(), answered.clone(), proxy.addr);
+            std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                while !stop.load(Ordering::Relaxed) {
+                    let opened = Instant::now();
+                    let answer = h1_connect(addr)
+                        .and_then(|mut conn| h1_exchange(&mut conn, "/", true))
+                        .map(|(reply, _)| reply.text());
+                    let by_new = usize::from(answer.as_deref() == Ok("new"));
+                    answered[by_new].fetch_add(1, Ordering::Relaxed);
+                    seen.push((opened, answer));
+                }
+                seen
+            })
+        })
+        .collect();
+    let [by_old, by_new] = &*answered;
+    support::eventually("the old process answers the clients", || {
+        by_old.load(Ordering::Relaxed) > CLIENTS
+    });
+
+    proxy.signal(libc::SIGHUP);
+    assert!(proxy.notification().starts_with("RELOADING=1"));
+    let moved = proxy.notification();
+    let reported = Instant::now();
+    let new: u32 = moved
+        .strip_prefix("MAINPID=")
+        .and_then(|rest| rest.strip_suffix("\nREADY=1"))
+        .unwrap_or_else(|| panic!("the main process moves and the reload ends: {moved:?}"))
+        .parse()
+        .unwrap();
+    // More answers than clients: one client's second, on a connection made after the report.
+    let so_far = by_new.load(Ordering::Relaxed);
+    support::eventually("the new process answers the clients", || {
+        by_new.load(Ordering::Relaxed) > so_far + CLIENTS
+    });
+    stop.store(true, Ordering::Relaxed);
+
+    let seen: Vec<(Instant, Result<String, String>)> = clients
+        .into_iter()
+        .flat_map(|client| client.join().unwrap())
+        .collect();
+    let failed: Vec<_> = seen.iter().filter_map(|(_, a)| a.as_ref().err()).collect();
+    assert!(failed.is_empty(), "no request fails: {failed:?}");
+    let by = |process: &str, after: bool| {
+        let answered = seen.iter().filter(|(opened, answer)| {
+            (*opened > reported) == after && answer.as_deref() == Ok(process)
+        });
+        answered.count()
+    };
+    assert_eq!(
+        by("old", true),
+        0,
+        "the old process answers no connection made after the reload was reported done \
+         ({} of them answered by the new one)",
+        by("new", true)
+    );
+    assert!(
+        by("old", false) > 0 && by("new", true) > 0,
+        "the clients ran across the handover"
+    );
+    stop_successor(&proxy, new);
+}
+
+#[test]
 fn a_program_that_cannot_take_over_leaves_the_running_one_serving() {
     let program = Program::install();
     let mut proxy = Proxy::start_program(&program.path, plain_site("one"), json!({}));

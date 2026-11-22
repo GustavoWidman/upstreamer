@@ -189,22 +189,35 @@ process, the predecessor, hands over to a process of that file, the successor
    nothing and accepts nothing. It waits until its discovery sources have synced, since the
    predecessor serves their last endpoints and a fresh process has none. It writes `ready`
    to its pipe, or `failed <reason>`.
-3. On `ready` the predecessor sends systemd `MAINPID=<successor>` with `READY=1`, writes one
-   byte to the control pipe and drains (`runtime::Drain`). On a failure, an exit or 30 s
-   without a word it kills the successor, which never touched a connection, ends the
-   reload with `READY=1` and a status that says why, and answers the client that asked with
-   the same reason. A successor that is gone when the byte is written leaves the predecessor
-   serving too.
+3. On `ready` every core of the predecessor stops taking new connections and says so
+   (`ToCore::Pause`): it ends its accept loops and keeps its sockets, and its QUIC endpoints
+   answer no new connection. Then the predecessor sends systemd `MAINPID=<successor>` with
+   `READY=1`, writes one byte to the control pipe and drains (`runtime::Drain`). On a
+   failure, an exit or 30 s without a word it kills the successor, which never touched a
+   connection, ends the reload with `READY=1` and a status that says why, and answers the
+   client that asked with the same reason; its cores never stopped accepting. A successor
+   that is gone when the byte is written leaves the predecessor serving too: its cores
+   accept again (`ToCore::Resume`), the connections that queued meanwhile first.
 4. On the byte the successor serves the TCP listeners on the inherited sockets, reports its
    status, and accepts on the reload socket, whose queue holds whoever asked meanwhile. Its
    QUIC listeners stay held until the control pipe closes.
+
+The order of step 3 is what a reported reload means: a connection made after the reload is
+reported done (the `READY=1`, the reload command's exit) is served by the successor, never
+by the predecessor, whose cores had all stopped accepting before the report. A connection
+that arrives between that and the successor's first accept waits in its socket's queue
+(4096 connections per socket). The queue is never closed in between, because the socket never
+is: the successor has held its descriptors since before it reported ready, and the
+predecessor's cores keep theirs until they drain.
 
 Inheriting the sockets, rather than binding new ones next to them, is what makes this exact:
 the kernel's queues of connections never close, so no connection is refused or reset whatever
 `net.ipv4.tcp_migrate_req` says, and the group of `SO_REUSEPORT` sockets of an address does
 not change, so the kernel keeps sending each client's packets to the same socket. A successor
 with more cores than the predecessor binds the missing sockets; one with fewer closes the
-extra ones.
+extra ones, which then close for good when the predecessor drains. That is the one case that
+leans on `net.ipv4.tcp_migrate_req`, which the NixOS module turns on: what queued on such a
+socket moves to a sibling socket, where it would otherwise be reset.
 
 QUIC is why the successor waits for the control pipe to close. Every datagram on a UDP socket
 goes to one reader, and the predecessor's QUIC connections live in its memory, so while it has

@@ -316,8 +316,10 @@ fn imf_fixdate(t: i64) -> [u8; 29] {
 /// A listening socket of this core and the task that serves it.
 struct Bound {
     key: ListenerKey,
-    task: JoinHandle<()>,
-    /// A second descriptor of the socket, for the process this one hands over to.
+    /// The task that takes the socket's connections. A TCP listener that is paused has none.
+    task: Option<JoinHandle<()>>,
+    /// A second descriptor of the socket: for the process this one hands over to, and what
+    /// keeps the socket and its queue while the listener is paused.
     socket: OwnedFd,
     quic: Option<Quic>,
 }
@@ -475,8 +477,9 @@ impl Core {
         *self.snapshot.borrow_mut() = new.clone();
         self.sync_listeners(&new).await
     }
-    /// Makes the bound listeners match the snapshot's plan, by key, leaving out the held ones.
-    /// An inherited socket that no listener of the plan takes is closed, unless it is held.
+    /// Makes the bound listeners match the snapshot's plan, by key, leaving out the held ones,
+    /// and makes each take new connections: a paused one does again. An inherited socket that
+    /// no listener of the plan takes is closed, unless it is held.
     async fn sync_listeners(self: &Rc<Self>, snap: &CoreSnapshot) -> Vec<BindFailure> {
         let hold = self.hold.get();
         let wanted = &snap.plan.listeners;
@@ -492,25 +495,15 @@ impl Core {
             .iter()
             .filter(|l| !hold.covers(SocketKind::of(l.key.kind)))
         {
-            match bound.iter().find(|b| b.key == spec.key) {
-                Some(b) => {
-                    if let (Some(quic), Some(config)) = (&b.quic, &snap.quic) {
-                        match quic_config(config.clone(), &snap.plan.server) {
-                            Ok(config) => quic.endpoint.set_server_config(Some(config)),
-                            Err(error) => failures.push(BindFailure {
-                                addr: spec.key.addr,
-                                error,
-                            }),
-                        }
-                    }
-                }
-                None => match self.listen(spec.key, snap) {
-                    Ok(b) => bound.push(b),
-                    Err(error) => failures.push(BindFailure {
-                        addr: spec.key.addr,
-                        error,
-                    }),
-                },
+            let served = match bound.iter_mut().find(|b| b.key == spec.key) {
+                Some(b) => self.serve(b, snap),
+                None => self.listen(spec.key, snap).map(|b| bound.push(b)),
+            };
+            if let Err(error) = served {
+                failures.push(BindFailure {
+                    addr: spec.key.addr,
+                    error,
+                });
             }
         }
         *self.listeners.borrow_mut() = bound;
@@ -537,7 +530,7 @@ impl Core {
                 let task = tokio::task::spawn_local(accept_loop(self.clone(), listener));
                 Ok(Bound {
                     key,
-                    task,
+                    task: Some(task),
                     socket,
                     quic: None,
                 })
@@ -553,12 +546,63 @@ impl Core {
                     tokio::task::spawn_local(quic_accept_loop(self.clone(), key, endpoint.clone()));
                 Ok(Bound {
                     key,
-                    task,
+                    task: Some(task),
                     socket,
                     quic: Some(Quic { endpoint, io }),
                 })
             }
         }
+    }
+    /// Makes a bound listener take new connections under `snap`: a QUIC endpoint gets the
+    /// snapshot's TLS config, and a paused TCP listener accepts again, on its socket, whose
+    /// queue holds the connections that arrived meanwhile.
+    fn serve(self: &Rc<Self>, bound: &mut Bound, snap: &CoreSnapshot) -> io::Result<()> {
+        match &bound.quic {
+            Some(quic) => {
+                if let Some(config) = &snap.quic {
+                    let config = quic_config(config.clone(), &snap.plan.server)?;
+                    quic.endpoint.set_server_config(Some(config));
+                }
+            }
+            None if bound.task.is_none() => {
+                let listener = Listener::new(bound.key, bound.socket.try_clone()?)?;
+                bound.task = Some(tokio::task::spawn_local(accept_loop(
+                    self.clone(),
+                    listener,
+                )));
+            }
+            None => {}
+        }
+        Ok(())
+    }
+    /// Stops taking new connections, and closes no socket. A TCP connection that arrives from
+    /// here on waits in its socket's queue for whoever accepts on the socket next: this core
+    /// once [`Core::resume`] runs, or the process that was handed the socket. A QUIC endpoint
+    /// goes on serving the connections it has and answers no new one. When this returns,
+    /// nothing of this core accepts.
+    async fn pause(&self) {
+        let accepting: Vec<JoinHandle<()>> = self
+            .listeners
+            .borrow_mut()
+            .iter_mut()
+            .filter_map(|bound| match &bound.quic {
+                Some(quic) => {
+                    quic.endpoint.set_server_config(None);
+                    None
+                }
+                None => bound.task.take(),
+            })
+            .collect();
+        // An accept loop is suspended where it holds no connection: waiting for its socket to
+        // be readable, or sleeping after an accept that failed. Ending it there drops none.
+        for task in accepting {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+    /// Takes new connections again after [`Core::pause`], the queued ones first.
+    async fn resume(self: &Rc<Self>) -> Vec<BindFailure> {
+        self.sync_listeners(&self.snapshot()).await
     }
     /// Narrows the hold and serves the listeners it no longer covers.
     async fn release(self: &Rc<Self>, hold: Hold) -> Vec<BindFailure> {
@@ -707,8 +751,10 @@ async fn close(listeners: Vec<Bound>) {
         if let Some(quic) = &b.quic {
             quic.endpoint.set_server_config(None);
         }
-        b.task.abort();
-        let _ = b.task.await;
+        if let Some(task) = b.task {
+            task.abort();
+            let _ = task.await;
+        }
     }
 }
 
@@ -749,6 +795,12 @@ pub(crate) enum ToCore {
     Release(Hold, oneshot::Sender<Vec<BindFailure>>),
     /// Report a descriptor of every listening socket of the core.
     Sockets(oneshot::Sender<Vec<Inherited>>),
+    /// Stop taking new connections and keep every socket, then report. What follows is
+    /// [`ToCore::Resume`], or [`ToCore::Drain`] once another process accepts on the sockets.
+    Pause(oneshot::Sender<()>),
+    /// Take new connections again, the ones queued since [`ToCore::Pause`] first, then report
+    /// the listeners that could not.
+    Resume(oneshot::Sender<Vec<BindFailure>>),
     /// Stop accepting, GOAWAY, finish in-flight within the deadline.
     Drain(Drain),
 }
@@ -923,6 +975,13 @@ fn worker_main(
                 }
                 ToCore::Sockets(done) => {
                     let _ = done.send(core.sockets());
+                }
+                ToCore::Pause(done) => {
+                    core.pause().await;
+                    let _ = done.send(());
+                }
+                ToCore::Resume(done) => {
+                    let _ = done.send(core.resume().await);
                 }
                 ToCore::Drain(drain) => {
                     core.drain(drain).await;
@@ -1640,11 +1699,6 @@ mod tests {
         let addr = inherited.addr;
         let workers =
             spawn_workers_with(&[0], generation(1, &[addr]), vec![inherited], Hold::All).unwrap();
-        fn ask<T>(worker: &Worker, message: impl FnOnce(oneshot::Sender<T>) -> ToCore) -> T {
-            let (done, answer) = oneshot::channel();
-            worker.tx.send(message(done)).ok().unwrap();
-            answer.blocking_recv().unwrap()
-        }
         let sockets = ask(&workers[0], ToCore::Sockets);
         assert_eq!(
             sockets.iter().map(|s| s.addr).collect::<Vec<_>>(),
@@ -1676,6 +1730,110 @@ mod tests {
         assert_eq!(body, b"gen=000001\n", "the queued request is answered");
         assert_eq!(ask(&workers[0], ToCore::Sockets).len(), 1);
         stop(workers, Instant::now());
+    }
+
+    fn ask<T>(worker: &Worker, message: impl FnOnce(oneshot::Sender<T>) -> ToCore) -> T {
+        let (done, answer) = oneshot::channel();
+        worker.tx.send(message(done)).ok().unwrap();
+        answer.blocking_recv().unwrap()
+    }
+
+    /// Connects and sends a request, as many times as asked.
+    fn requests(addr: SocketAddr, count: usize) -> Vec<std::net::TcpStream> {
+        (0..count)
+            .map(|_| {
+                let mut conn = connect(addr);
+                std::io::Write::write_all(&mut conn, b"GET / HTTP/1.1\r\nHost: test\r\n\r\n")
+                    .unwrap();
+                conn
+            })
+            .collect()
+    }
+
+    /// Asserts that nothing answers `conn` for a while.
+    fn unanswered(conn: &mut std::net::TcpStream, why: &str) {
+        conn.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let waited = read_response(conn).unwrap_err();
+        assert!(
+            matches!(
+                waited.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ),
+            "{why}: {waited}"
+        );
+        conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    }
+
+    #[test]
+    fn a_paused_core_accepts_nothing_and_serves_what_queued_once_it_resumes() {
+        let addr = free_addr();
+        let workers = spawn_workers(&[0], generation(1, &[addr])).unwrap();
+        let mut kept = connect(addr);
+        assert_eq!(get(&mut kept).unwrap(), 1);
+
+        ask(&workers[0], ToCore::Pause);
+        assert!(listening_here(addr), "the socket stays open");
+        assert_eq!(
+            get(&mut kept).unwrap(),
+            1,
+            "a connection accepted before goes on"
+        );
+        let mut queued = requests(addr, 8);
+        unanswered(
+            &mut queued[0],
+            "a new connection waits in the socket's queue",
+        );
+
+        let failures = ask(&workers[0], ToCore::Resume);
+        assert!(failures.is_empty(), "{failures:?}");
+        for conn in &mut queued {
+            let (head, body) = read_response(conn).unwrap();
+            assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+            assert_eq!(body, b"gen=000001\n", "every queued request is answered");
+        }
+        assert_eq!(get(&mut connect(addr)).unwrap(), 1, "and so are new ones");
+
+        ask(&workers[0], ToCore::Pause);
+        let install = |done| ToCore::Install(generation(2, &[addr]), done);
+        assert!(ask(&workers[0], install).is_empty());
+        assert_eq!(
+            get(&mut connect(addr)).unwrap(),
+            2,
+            "a generation installed on a paused core is served"
+        );
+        stop(workers, Instant::now());
+    }
+
+    #[test]
+    fn what_queues_on_a_paused_core_is_served_by_the_process_handed_its_sockets() {
+        let addr = free_addr();
+        let before = spawn_workers(&[0], generation(1, &[addr])).unwrap();
+        let handed = ask(&before[0], ToCore::Sockets);
+        let after = spawn_workers_with(&[0], generation(2, &[addr]), handed, Hold::All).unwrap();
+
+        ask(&before[0], ToCore::Pause);
+        let mut queued = requests(addr, 32);
+        unanswered(&mut queued[0], "neither set of cores accepts");
+        // The cores that paused are gone before the others accept: the queue outlives them.
+        stop(before, Instant::now());
+        let mut late = requests(addr, 8);
+        unanswered(
+            &mut late[0],
+            "the socket takes connections with one holder left",
+        );
+
+        let failures = ask(&after[0], |done| ToCore::Release(Hold::Nothing, done));
+        assert!(failures.is_empty(), "{failures:?}");
+        for conn in queued.iter_mut().chain(&mut late) {
+            let (head, body) = read_response(conn).unwrap();
+            assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+            assert_eq!(
+                body, b"gen=000002\n",
+                "every connection made meanwhile is answered by the cores that took over"
+            );
+        }
+        stop(after, Instant::now());
     }
 
     #[test]

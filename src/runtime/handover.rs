@@ -12,15 +12,19 @@
 //! 2. The successor loads the config and starts its cores with every listener held: it accepts
 //!    nothing and binds nothing. It then writes `ready` to the first pipe. A successor that
 //!    cannot start writes `failed <reason>`, or just exits.
-//! 3. On `ready` the predecessor tells the service manager that the successor is the main
+//! 3. On `ready` the predecessor's cores stop accepting, each keeping its sockets. Once every
+//!    core has, the predecessor tells the service manager that the successor is the main
 //!    process, writes one byte to the second pipe, and drains. On anything else (a failure, an
 //!    exit, [`READY_TIMEOUT`]) it kills the successor and keeps serving: no connection ever
-//!    reached the successor. It also keeps serving when the byte cannot be written, which is
-//!    a successor that went away after it reported.
+//!    reached the successor, and its cores never stopped accepting. When the byte cannot be
+//!    written, which is a successor that went away after it reported, its cores accept again
+//!    and it keeps serving.
 //! 4. On that byte the successor serves the TCP listeners: the same sockets, so a connection
-//!    that arrived in between waited in their queues. The QUIC listeners stay held until the
-//!    second pipe closes, which the predecessor's cores do once they read no UDP socket any
-//!    more: their QUIC connections are gone. A predecessor that dies closes it as well.
+//!    that arrived since the predecessor's cores stopped waited in their queues, and none
+//!    that arrives after the handover is reported reaches the predecessor. The QUIC listeners
+//!    stay held until the second pipe closes, which the predecessor's cores do once they read
+//!    no UDP socket any more: their QUIC connections are gone. A predecessor that dies closes
+//!    it as well.
 //!
 //! The document is read by another version of this program. A field may be added and is
 //! ignored by a version that does not know it; a change an older version must not ignore
@@ -747,6 +751,29 @@ mod predecessor {
     }
 }
 
+/// Shell scripts that stand in for a successor.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) mod stand_in {
+    use super::{FileId, Launch};
+
+    /// A launch of `/bin/sh -c script`.
+    pub(crate) fn shell(script: &str) -> Launch {
+        let path = std::path::PathBuf::from("/bin/sh");
+        Launch {
+            running: FileId::of(&path).unwrap(),
+            path,
+            args: vec!["-c".into(), script.into()],
+        }
+    }
+
+    /// Reads the document and binds the descriptor numbers of its two pipes to `$ready` and
+    /// `$control`. Descriptors are reached through `/proc/self/fd`: not every `sh` redirects
+    /// to a number above 9.
+    pub(crate) const READ: &str = r#"doc=$(cat "/proc/self/fd/$UPSTREAMER_HANDOVER")
+        ready=$(printf %s "$doc" | sed 's/.*"ready":\([0-9]*\).*/\1/')
+        control=$(printf %s "$doc" | sed 's/.*"control":\([0-9]*\).*/\1/')"#;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1163,20 +1190,7 @@ mod tests {
         use super::*;
         use std::os::unix::fs::PermissionsExt;
 
-        /// A launch of `/bin/sh -c script`: the script stands in for a successor.
-        fn shell(script: &str) -> Launch {
-            let path = std::path::PathBuf::from("/bin/sh");
-            Launch {
-                running: FileId::of(&path).unwrap(),
-                path,
-                args: vec!["-c".into(), script.into()],
-            }
-        }
-
-        /// Reads the document and binds its `ready` descriptor number to `$ready`. Descriptors
-        /// are reached through `/proc/self/fd`: not every `sh` redirects to a number above 9.
-        const READ: &str = r#"doc=$(cat "/proc/self/fd/$UPSTREAMER_HANDOVER")
-            ready=$(printf %s "$doc" | sed 's/.*"ready":\([0-9]*\).*/\1/')"#;
+        use super::super::stand_in::{READ, shell};
 
         fn offered(script: &str, patience: Duration) -> Result<Successor, String> {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1209,7 +1223,6 @@ mod tests {
             let seen = dir.path().join("seen");
             let script = format!(
                 r#"{READ}
-                control=$(printf %s "$doc" | sed 's/.*"control":\([0-9]*\).*/\1/')
                 echo ready > "/proc/self/fd/$ready"
                 head -c 1 "/proc/self/fd/$control" > {seen}.part
                 echo " $(cut -d' ' -f4 /proc/$$/stat)" >> {seen}.part

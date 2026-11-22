@@ -22,6 +22,10 @@
 //! This process then drains like a stopping one, without a word to systemd, whose main process
 //! it no longer is. A handover that fails is a failed reload: the running generation stays.
 //!
+//! Whichever it is, a reload is reported done (`READY=1`, the answer to the client) only once
+//! no core serves a new connection the old way: every core installed the generation, or, in
+//! a handover, every core stopped accepting ([`promote`]).
+//!
 //! Where systemd keeps a file descriptor store for the unit (`FileDescriptorStoreMax=`), the
 //! listening sockets are kept in it ([`Stored`]): after a restart or a crash the next process
 //! is given them back and serves what queued on them meanwhile, where it would otherwise bind
@@ -320,15 +324,10 @@ pub(crate) fn serve(
                         }
                         break None;
                     };
-                    // The successor is the main process from this notification on, and the
-                    // byte it waits for tells it so. A successor that died meanwhile is no
-                    // main process (systemd refuses a process that is gone, and treats one
-                    // that goes as the service failing), and this process goes on serving.
                     let refused = match offered {
                         Ok(successor) => {
                             let pid = successor.pid;
-                            notifier.notify(&format!("MAINPID={pid}\nREADY=1"));
-                            match successor.promote() {
+                            match promote(successor, &workers, notifier).await {
                                 Ok(released) => {
                                     if let Some(asker) = asker {
                                         let status = format!("handed over to process {pid}");
@@ -336,7 +335,7 @@ pub(crate) fn serve(
                                     }
                                     break Some((pid, released));
                                 }
-                                Err(e) => format!("it went away as it took over: {e}"),
+                                Err(reason) => reason,
                             }
                         }
                         Err(reason) => reason,
@@ -484,6 +483,63 @@ async fn hand_over(
         handover::READY_TIMEOUT,
     )
     .await
+}
+
+/// Makes `successor`, which is ready, the main process. Returns this process's end of the
+/// handover pipe, or why the successor did not take over.
+///
+/// Every core stops accepting first, and says so. Only then is the service manager told that
+/// the reload is over, and the successor that it is the main process: the byte it waits for.
+/// So no connection that arrives after the reload is reported done is taken by this process;
+/// one that arrives before the successor accepts waits in its socket's queue, which never
+/// closes, since both processes hold the socket.
+///
+/// A successor that died meanwhile is no main process (systemd refuses a process that is
+/// gone, and treats one that goes as the service failing): the cores accept again, the queued
+/// connections first, and this process goes on serving.
+async fn promote(
+    successor: handover::Successor,
+    workers: &[Worker],
+    notifier: &Notifier,
+) -> Result<Arc<std::os::fd::OwnedFd>, String> {
+    let pid = successor.pid;
+    pause(workers).await;
+    notifier.notify(&format!("MAINPID={pid}\nREADY=1"));
+    match successor.promote() {
+        Ok(released) => Ok(released),
+        Err(e) => {
+            log_bind_failures(&resume(workers).await);
+            Err(format!("it went away as it took over: {e}"))
+        }
+    }
+}
+
+/// Makes every core stop taking new connections, each keeping its sockets, and waits until
+/// each has.
+async fn pause(workers: &[Worker]) {
+    let mut pending = Vec::with_capacity(workers.len());
+    for w in workers {
+        let (done, paused) = tokio::sync::oneshot::channel();
+        if w.tx.send(ToCore::Pause(done)).is_ok() {
+            pending.push(paused);
+        }
+    }
+    for paused in pending {
+        let _ = paused.await;
+    }
+}
+
+/// Makes every core take new connections again after [`pause`]. Returns the listeners that
+/// could not, once per address.
+async fn resume(workers: &[Worker]) -> Vec<BindFailure> {
+    let mut pending = Vec::with_capacity(workers.len());
+    for w in workers {
+        let (done, report) = tokio::sync::oneshot::channel();
+        if w.tx.send(ToCore::Resume(done)).is_ok() {
+            pending.push(report);
+        }
+    }
+    collect(pending).await
 }
 
 /// The end of a process that handed over: every core drains, without a word to systemd, whose
@@ -1281,6 +1337,140 @@ mod tests {
             Err("kubernetes:shop/web:8080".to_owned()),
             "a source that only reports its API server unreachable has not synced"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    mod promotion {
+        use super::*;
+        use crate::runtime::handover::stand_in::{READ, shell};
+
+        /// Whether `pid` still runs (a process that exited and awaits its parent does not).
+        fn runs(pid: libc::pid_t) -> bool {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|stat| !stat.rsplit(')').next().unwrap_or("").starts_with(" Z"))
+        }
+
+        fn eventually(what: &str, condition: impl Fn() -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !condition() {
+                assert!(Instant::now() < deadline, "never happened: {what}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        fn runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        }
+
+        /// Whether a notification waits to be read.
+        fn notified(sock: &UnixDatagram) -> bool {
+            let mut readable = libc::pollfd {
+                fd: sock.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one descriptor to look at, and no wait.
+            unsafe { libc::poll(&mut readable, 1, 0) == 1 }
+        }
+
+        #[test]
+        fn a_successor_is_promoted_once_every_core_said_it_accepts_nothing() {
+            let (dir, path, notifications) = listen_notify();
+            let promoted = dir.path().join("promoted");
+            let script = format!(
+                r#"{READ}
+                echo ready > "/proc/self/fd/$ready"
+                head -c 1 "/proc/self/fd/$control" > {promoted}.part
+                mv {promoted}.part {promoted}
+                cat "/proc/self/fd/$control" > /dev/null"#,
+                promoted = promoted.display()
+            );
+            // Two cores played by this test: each says it paused when the test lets it.
+            let (first, mut to_first) = tokio::sync::mpsc::unbounded_channel();
+            let (second, mut to_second) = tokio::sync::mpsc::unbounded_channel();
+            let workers = [first, second].map(|tx| Worker {
+                thread: std::thread::spawn(|| {}),
+                tx,
+                cpu: 0,
+            });
+            let notifier = Notifier::to_path(path);
+            runtime().block_on(async {
+                let patience = Duration::from_secs(10);
+                let successor = handover::offer(&shell(&script), Vec::new(), None, None, patience)
+                    .await
+                    .unwrap();
+                let pid = successor.pid;
+                let promotion = promote(successor, &workers, &notifier);
+                tokio::pin!(promotion);
+                let mut waits = async |why: &str| {
+                    let early = tokio::time::timeout(Duration::from_millis(100), &mut promotion);
+                    assert!(early.await.is_err(), "{why}");
+                    assert!(!promoted.exists(), "the successor is not promoted: {why}");
+                    assert!(
+                        !notified(&notifications),
+                        "the reload is not reported: {why}"
+                    );
+                };
+                waits("no core has answered").await;
+                let Some(ToCore::Pause(paused)) = to_first.recv().await else {
+                    panic!("the first core is told to pause");
+                };
+                paused.send(()).unwrap();
+                waits("one core still accepts").await;
+                let Some(ToCore::Pause(paused)) = to_second.recv().await else {
+                    panic!("the second core is told to pause");
+                };
+                paused.send(()).unwrap();
+
+                let released = promotion.await.expect("the successor takes over");
+                assert_eq!(recv(&notifications), format!("MAINPID={pid}\nREADY=1"));
+                eventually("the successor read the promotion", || promoted.exists());
+                assert_eq!(std::fs::read_to_string(&promoted).unwrap(), "M");
+                assert!(
+                    to_first.try_recv().is_err() && to_second.try_recv().is_err(),
+                    "a core that handed over is not told to accept again"
+                );
+                drop(released);
+            });
+        }
+
+        #[test]
+        fn a_successor_that_is_gone_when_promoted_leaves_the_cores_accepting() {
+            let (_dir, path, notifications) = listen_notify();
+            let addr = free_addr();
+            let cpu = crate::runtime::allowed_cpus()[0];
+            let workers = crate::runtime::spawn_workers(
+                &[cpu],
+                crate::runtime::testing::generation(1, &[addr]),
+            )
+            .unwrap();
+            let notifier = Notifier::to_path(path);
+            let script = format!(r#"{READ}; echo ready > "/proc/self/fd/$ready""#);
+            let refused = runtime().block_on(async {
+                let patience = Duration::from_secs(10);
+                let successor = handover::offer(&shell(&script), Vec::new(), None, None, patience)
+                    .await
+                    .unwrap();
+                let pid = successor.pid;
+                eventually("the successor exited", || !runs(pid));
+                promote(successor, &workers, &notifier).await.err()
+            });
+            let refused = refused.expect("nothing reads the pipe");
+            assert!(
+                refused.starts_with("it went away as it took over: "),
+                "{refused}"
+            );
+            assert!(recv(&notifications).starts_with("MAINPID="));
+            assert_eq!(
+                get(&mut connect(addr)).unwrap(),
+                1,
+                "a new connection is answered by the process that stays"
+            );
+            crate::runtime::stop(workers, Instant::now());
+        }
     }
 
     #[test]
