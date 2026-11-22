@@ -284,7 +284,8 @@ fn dechunk(mut rest: &[u8]) -> Result<Vec<u8>, String> {
         if size == 0 {
             return Ok(body);
         }
-        if rest.len() < size + 2 {
+        // The size is the server's: compared without adding to it, so no size overflows.
+        if rest.len().saturating_sub(2) < size {
             return Err(truncated());
         }
         body.extend_from_slice(&rest[..size]);
@@ -401,6 +402,16 @@ mod tests {
 
         let close = parse_response(b"HTTP/1.1 200 OK\r\n\r\nto the end", false).unwrap();
         assert_eq!(close.body, b"to the end");
+    }
+
+    #[test]
+    fn a_chunk_larger_than_any_body_is_a_truncated_one() {
+        for size in ["ffffffffffffffff", "fffffffffffffffe", "10000000000000000"] {
+            let bytes =
+                format!("HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n{size}\r\nab");
+            let parsed = parse_response(bytes.as_bytes(), false);
+            assert!(parsed.is_err(), "{size}: {parsed:?}");
+        }
     }
 
     #[test]
