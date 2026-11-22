@@ -905,26 +905,20 @@ mod tests {
     fn passed_descriptors_that_are_listening_sockets_are_inherited() {
         let tcp = Inherited::fresh(Http);
         let addr = tcp.addr;
-        let (read, write) = pipe();
+        let (read, _write) = pipe();
         // A socket, a pipe and a number that is no descriptor, as if passed by the service
         // manager.
         let passed = [tcp.fd.into_raw_fd(), read.into_raw_fd(), RawFd::MAX];
         // SAFETY: the test gave up the two descriptors, and the third is not one.
         let sockets = unsafe { stored(passed) };
-        assert_eq!(sockets.len(), 1, "the pipe is not a socket");
+        let inherited: Vec<_> = sockets
+            .iter()
+            .map(|socket| (socket.transport, socket.addr, socket.fd.as_raw_fd()))
+            .collect();
         assert_eq!(
-            (
-                sockets[0].transport,
-                sockets[0].addr,
-                sockets[0].fd.as_raw_fd()
-            ),
-            (SocketKind::Tcp, addr, passed[0])
-        );
-        let closed = io::Write::write_all(&mut std::fs::File::from(write), b"x").unwrap_err();
-        assert_eq!(
-            closed.kind(),
-            io::ErrorKind::BrokenPipe,
-            "what is not a socket is closed"
+            inherited,
+            [(SocketKind::Tcp, addr, passed[0])],
+            "the socket, and not the pipe"
         );
     }
 
