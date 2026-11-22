@@ -5,7 +5,7 @@
 
 a reverse proxy and static file server that does the boring parts of caddy, configured with nix options or one small toml file.
 
-it terminates tls, speaks http/1.1, http/2 and http/3, proxies to your apps and serves static files. it runs one thread per cpu, each with its own sockets and connection pools, so nothing is locked on the way through a request. it reloads on `SIGHUP` without dropping a connection, and a config that fails to compile leaves the running one alone.
+it terminates tls, speaks http/1.1, http/2 and http/3, proxies to your apps and serves static files. it runs one thread per cpu, each with its own sockets and connection pools, so nothing is locked on the way through a request. it reloads on `SIGHUP` without dropping a connection, and a config that fails to compile leaves the running one alone. on linux the same signal upgrades it: a new binary at the old path takes the listening sockets over, so no connection is refused and no request fails.
 
 ## what it does
 
@@ -58,6 +58,8 @@ services.upstreamer.virtualHosts."app.example.com" = {
   proxy = "http://127.0.0.1:8080";
 };
 ```
+
+a switch that changes the config or the package reloads the unit and nothing is dropped: the proxy reads the new config, or hands its sockets to the new package's binary, which is why the unit starts it from `/etc/upstreamer/upstreamer`. a switch that changes the unit itself restarts it, with the listening sockets parked in systemd's file descriptor store, so connections made in between wait instead of being refused. [the config reference](docs/config.md#upgrading-without-a-restart-linux) says what an upgrade keeps and what it does not.
 
 `metrics.enable` adds a site on `127.0.0.1:9100`. its port reaches `check` but not the firewall, because metrics are for a scraper on the same machine until you say `metrics.openFirewall`. `kubernetes.enable` picks the package built with kubernetes support and `kubernetes.kubeconfig` hands the kubeconfig to the unit as a systemd credential. `trustedProxies` takes the cidrs of whatever sits in front of you, or `cloudflare`.
 
