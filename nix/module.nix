@@ -859,7 +859,9 @@
           domain = lib.mkDefault c;
           extraDomainNames = subtractLists [ c ] (unique (hostsOfCert c));
           group = lib.mkDefault cfg.acme.group;
-          reloadServices = [ "upstreamer.service" ];
+          # Not `reloadServices`, which reloads without waiting: a renewal whose certificate
+          # the proxy did not take fails here, with the reason in the proxy's journal.
+          postRun = "${config.systemd.package}/bin/systemctl try-reload-or-restart upstreamer.service";
         });
 
         users.groups = mkIf (any (c: config.security.acme.certs.${c}.group == cfg.acme.group) certNames) {
@@ -884,8 +886,9 @@
           # A switch that changes the config or the package reloads. On a reload the proxy reads
           # the config again, unless the program file at the path it was started from is another
           # one: then a process of that file takes the listening sockets over, and no connection
-          # is refused or cut either way. A switch that changes anything else in the unit
-          # restarts it.
+          # is refused or cut either way. A reload that fails (a config that does not load, a
+          # program that cannot take over) fails the switch, and the running proxy serves on.
+          # A switch that changes anything else in the unit restarts it.
           reloadTriggers = [
             cfg.configFile
             cfg.package
@@ -897,7 +900,19 @@
           unitConfig.StartLimitIntervalSec = 0;
           serviceConfig = {
             Type = "notify-reload";
-            ExecStart = "/etc/upstreamer/upstreamer run --config /etc/upstreamer/config.json";
+            ExecStart = "/etc/upstreamer/upstreamer run --config /etc/upstreamer/config.json --reload-socket %t/upstreamer/reload";
+            # Asks the running proxy to reload, waits until it has, and fails when the reload
+            # did, which a signal cannot tell. The proxy reports the reload to systemd while
+            # the command runs, so systemd sends no signal of its own after it. The command is
+            # the program at the same path as the proxy's: after a switch to another package,
+            # the new one.
+            ExecReload = "/etc/upstreamer/upstreamer reload --reload-socket %t/upstreamer/reload";
+            # The reload socket, for the unit's user alone.
+            RuntimeDirectory = "upstreamer";
+            RuntimeDirectoryMode = "0700";
+            # Also the limit of a reload, which waits up to 30 s for a new program to take
+            # over and gives up by itself after 75 s.
+            TimeoutStartSec = 90;
             Restart = "on-failure";
             RestartSec = "1s";
             # The drain, then a margin for the process to exit.

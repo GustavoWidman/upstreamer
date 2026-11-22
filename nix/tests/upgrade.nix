@@ -5,7 +5,11 @@
 # - `config` changes nothing but the config, so the proxy reloads in its process;
 # - `unit` changes the unit, so systemd restarts it, with the listening sockets kept in its
 #   file descriptor store;
-# - `broken` has a package that cannot run, so the handover fails and the running proxy stays.
+# - `broken` has a package that cannot serve, `stuck` one that never gets ready, `speechless`
+#   one that cannot even ask for the reload, and `unreadable` a config that does not load: the
+#   reload fails, the switch fails with it, and the running proxy stays;
+# - `mute` has a package whose reload command asks nothing and succeeds, as that of a version
+#   that cannot talk to the running one does: systemd then signals the reload itself.
 #
 # With `seamless = false` only the package switch runs and nothing about it is asserted: the
 # numbers it prints are what a switch costs with a module that restarts the proxy instead.
@@ -40,12 +44,29 @@ in
           install -D ${lib.getExe package} "$out/bin/upstreamer"
           printf next >> "$out/bin/upstreamer"
         '';
-        # Checks a config, as the module needs at build time, and cannot serve one.
-        broken = pkgs.writeShellScriptBin "upstreamer" ''
-          case "$1" in check) exec ${lib.getExe package} "$@" ;; esac
+        # A program that passes `passed` on to the real one and runs `otherwise` for the rest.
+        # Each checks a config, as the module needs at build time.
+        partial =
+          passed: otherwise:
+          pkgs.writeShellScriptBin "upstreamer" ''
+            case "$1" in ${passed}) exec ${lib.getExe package} "$@" ;; esac
+            ${otherwise}
+          '';
+        cannotRun = ''
           echo "this build cannot run" >&2
           exit 1
         '';
+        # Asks for a reload, as the unit's reload command does, and cannot serve.
+        broken = partial "check | reload" cannotRun;
+        # Asks, and never reports that it is ready to serve.
+        stuck = partial "check | reload" "exec sleep 600";
+        # Cannot even ask.
+        speechless = partial "check" cannotRun;
+        # Serves, and its reload command succeeds without asking.
+        mute = partial "check | run" "exit 0";
+        # Not a config. The module checks the one it generates when it builds it, so this one
+        # is put in its place, with the trigger that makes the switch reload.
+        unreadable = pkgs.writeText "config.json" "{ not a config";
       in
       {
         imports = [ module ];
@@ -85,6 +106,13 @@ in
           };
           unit.configuration.systemd.services.upstreamer.environment.UPSTREAMER_TEST = "1";
           broken.configuration.services.upstreamer.package = broken;
+          stuck.configuration.services.upstreamer.package = stuck;
+          speechless.configuration.services.upstreamer.package = speechless;
+          mute.configuration.services.upstreamer.package = mute;
+          unreadable.configuration = {
+            environment.etc."upstreamer/config.json".source = lib.mkForce unreadable;
+            systemd.services.upstreamer.reloadTriggers = [ unreadable ];
+          };
         };
 
         systemd.services.backend = {
@@ -163,6 +191,27 @@ in
       def switch(specialisation=None):
           system = f"{base}/specialisation/{specialisation}" if specialisation else base
           server.succeed(f"{system}/bin/switch-to-configuration test >&2")
+
+      def failed_switch(specialisation):
+          """Switches to a system whose reload of the proxy fails: the switch fails and says
+          that the proxy's unit did. Returns what the unit logged meanwhile."""
+          since = server.succeed("date +%s").strip()
+          system = f"{base}/specialisation/{specialisation}"
+          status, output = server.execute(f"{system}/bin/switch-to-configuration test 2>&1")
+          print(f"switch-to-configuration exited {status}:\n{output}")
+          assert status != 0, f"the switch to {specialisation} succeeded"
+          assert "Failed to reload upstreamer.service" in output, output
+          return server.succeed(
+              "journalctl --sync && "
+              f"journalctl -u upstreamer.service --no-pager -o cat --since @{since}"
+          )
+
+      def generation():
+          """The generation the unit's status says the proxy serves."""
+          status = unit("StatusText")
+          served = re.fullmatch(r"serving generation (\d+)", status)
+          assert served, status
+          return int(served[1])
 
       def program_of(pid):
           return server.succeed(f"readlink /proc/{pid}/exe").strip()
@@ -310,6 +359,10 @@ in
               print(journal)
               assert f"handed over to process {new}" in journal, journal
               assert "not our child" not in journal, journal
+              # The reload command's exit ended the reload: systemd sent no signal after it,
+              # which the new process would have answered with a second generation.
+              assert unit("StatusText") == "serving generation 1", unit("StatusText")
+              assert "serving generation 2" not in journal, journal
           client.wait_until_succeeds("test -s /tmp/idle.json", timeout=60)
           late = json.loads(client.succeed("cat /tmp/idle.json"))
           print(f"package: a connection idle between requests: {late}")
@@ -349,10 +402,12 @@ in
               print(f"file descriptor store: {kept}")
               assert "tcp_0.0.0.0_443" in kept and "udp_0.0.0.0_443" in kept, kept
               client.fail(f"curl -sf --cacert {ca} {url}/extra | grep -x extra")
+              before = generation()
               switch("config")
               assert (unit("MainPID"), unit("InvocationID")) == (pid, invocation)
               assert processes() == [pid], processes()
               assert curl(f"{url}/extra") == "extra"
+              assert generation() == before + 1, "one reload, by the command alone"
               server.succeed("curl -sf http://127.0.0.1:9100/metrics > /dev/null")
               time.sleep(1)
               assert "tcp_127.0.0.1_9100" in stored(), stored()
@@ -362,6 +417,15 @@ in
               assert stored() == kept, "a listener the reload removed leaves the store"
               code, _ = server.execute("curl -s -o /dev/null --max-time 5 http://127.0.0.1:9100/")
               assert code == 7, f"its port is closed, not held: curl exit {code}"
+
+          with subtest("a SIGHUP sent by hand reloads"):
+              before = generation()
+              server.succeed(f"kill -HUP {pid}")
+              server.wait_until_succeeds(
+                  "systemctl show upstreamer.service -P StatusText"
+                  f" | grep -x 'serving generation {before + 1}'"
+              )
+              assert unit("ActiveState") == "active" and unit("MainPID") == pid
 
           with subtest("a switch that changes the unit restarts it, with nothing refused"):
               start_load("unit")
@@ -400,16 +464,27 @@ in
               switch()
               server.wait_for_open_port(443)
 
-          with subtest("a package that cannot run leaves the running one serving"):
+          def serving_as_before(pid, invocation):
+              assert (unit("MainPID"), unit("InvocationID")) == (pid, invocation)
+              assert unit("ActiveState") == "active", unit("ActiveState")
+              assert unit("NRestarts") == restarts, "the unit was not restarted"
+              assert processes() == [pid], processes()
+              assert curl(f"{url}/local") == "local"
+
+          restarts = unit("NRestarts")
+          with subtest("a package that cannot serve fails the switch and leaves the running one serving"):
               pid, invocation = unit("MainPID"), unit("InvocationID")
+              serving = generation()
               before = start_load("broken", 15)
               time.sleep(5)
-              switch("broken")
-              status = unit("StatusText")
-              assert status.startswith("reload failed, still serving generation 1: "), status
-              assert "cannot hand over to /etc/upstreamer/upstreamer" in status, status
-              assert (unit("MainPID"), unit("InvocationID")) == (pid, invocation)
-              assert processes() == [pid], processes()
+              said = failed_switch("broken")
+              reason = (
+                  f"reload failed, still serving generation {serving}:"
+                  " cannot hand over to /etc/upstreamer/upstreamer: it exited before it was ready"
+              )
+              assert f"upstreamer: {reason}" in said, "the reload command says why"
+              assert unit("StatusText") == reason, unit("StatusText")
+              serving_as_before(pid, invocation)
               seen, states = finish_load("broken", before)
               assert_nothing_failed(seen, states)
               for name in QUIC:
@@ -419,9 +494,63 @@ in
                       if k not in ("200", "succeeded", "2xx", "answered by the proxy")
                   }
                   assert not any(bad.values()), f"{name}: {seen[name]}"
+              server.fail("systemctl reload upstreamer.service")
+              serving_as_before(pid, invocation)
               switch()
               assert unit("MainPID") == pid
-              assert unit("StatusText").startswith("serving generation"), unit("StatusText")
+              assert generation() > serving, "the next reload goes through"
+
+          with subtest("a config that does not load fails the switch the same way"):
+              serving = generation()
+              start_load("unreadable")
+              time.sleep(4)
+              said = failed_switch("unreadable")
+              reason = f"reload failed, still serving generation {serving}: "
+              assert f"upstreamer: {reason}" in said, said
+              assert unit("StatusText").startswith(reason), unit("StatusText")
+              serving_as_before(pid, invocation)
+              time.sleep(2)
+              seen, states = finish_load("unreadable", None)
+              assert_nothing_failed(seen, states)
+              switch()
+              assert unit("MainPID") == pid
+              assert generation() > serving, "the next reload goes through"
+
+          with subtest("a package that cannot ask for the reload fails the switch"):
+              serving = generation()
+              said = failed_switch("speechless")
+              assert "this build cannot run" in said, said
+              assert unit("StatusText") == f"serving generation {serving}", "nothing was tried"
+              serving_as_before(pid, invocation)
+              switch()
+
+          with subtest("a package that never gets ready fails the switch before systemd gives up on the reload"):
+              serving = generation()
+              began = time.monotonic()
+              said = failed_switch("stuck")
+              took = time.monotonic() - began
+              reason = (
+                  f"reload failed, still serving generation {serving}:"
+                  " cannot hand over to /etc/upstreamer/upstreamer: not ready after 30 s"
+              )
+              assert f"upstreamer: {reason}" in said, said
+              assert "timed out" not in said, "the proxy gave up, not systemd"
+              assert 30 <= took < 60, f"the switch waited {took:.0f} s"
+              assert unit("TimeoutStartUSec") == "1min 30s", unit("TimeoutStartUSec")
+              serving_as_before(pid, invocation)
+              switch()
+
+          with subtest("a reload command that asks nothing leaves the reload to systemd's signal"):
+              switch("mute")
+              signalled = unit("MainPID")
+              assert signalled != pid and unit("InvocationID") == invocation
+              server.wait_until_fails(f"test -e /proc/{pid}", timeout=30)
+              assert unit("ActiveState") == "active" and unit("NRestarts") == restarts
+              assert curl(f"{url}/local") == "local"
+              journal = server.succeed("journalctl -b -u upstreamer.service --no-pager -o cat")
+              assert f"handed over to process {signalled}" in journal, journal
+              switch()
+              assert unit("ActiveState") == "active"
               assert curl(f"{url}/local") == "local"
     '';
 }

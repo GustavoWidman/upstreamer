@@ -69,9 +69,20 @@ let
         inherit (cert) domain group;
         extraDomainNames = sorted cert.extraDomainNames;
         reloadServices = sorted cert.reloadServices;
+        # The renewal reloads the proxy itself and waits for it, so it fails when the proxy
+        # did not take the certificate.
+        reloadsProxy = lib.hasSuffix "/bin/systemctl try-reload-or-restart upstreamer.service\n" cert.postRun;
       }) c.security.acme.certs;
       unit = {
-        inherit (u.serviceConfig) Type ExecStart TimeoutStopSec;
+        inherit (u.serviceConfig)
+          Type
+          ExecStart
+          ExecReload
+          RuntimeDirectory
+          RuntimeDirectoryMode
+          TimeoutStartSec
+          TimeoutStopSec
+          ;
         # The program the start path links to, and what a switch to another package or
         # another config does to the unit.
         program = "${c.environment.etc."upstreamer/upstreamer".source}";
@@ -122,6 +133,7 @@ let
     rotation = null;
   };
 
+  # `reloadServices` are the other services that read the certificate.
   cert = domain: extraDomainNames: group: reloadServices: {
     inherit
       domain
@@ -129,14 +141,21 @@ let
       group
       reloadServices
       ;
+    reloadsProxy = true;
   };
-  own = domain: cert domain [ ] "upstreamer-certs" [ "upstreamer.service" ];
+  own = domain: cert domain [ ] "upstreamer-certs" [ ];
   # Every host runs the same package, so the unit differs between hosts only where a field
   # below is derived from the host: `reloadTriggers` holds the host's own config file.
   unit' = timeoutStopSec: groups: certs: host: {
     Type = "notify-reload";
     # A path that stays when the package changes, linked to the package's program.
-    ExecStart = "/etc/upstreamer/upstreamer run --config /etc/upstreamer/config.json";
+    ExecStart = "/etc/upstreamer/upstreamer run --config /etc/upstreamer/config.json --reload-socket %t/upstreamer/reload";
+    # The command a reload runs: it fails when the reload did. A reload may take as long as
+    # a start.
+    ExecReload = "/etc/upstreamer/upstreamer reload --reload-socket %t/upstreamer/reload";
+    RuntimeDirectory = "upstreamer";
+    RuntimeDirectoryMode = "0700";
+    TimeoutStartSec = 90;
     program = lib.getExe host.services.upstreamer.package;
     reloadTriggers = sorted [
       "${host.services.upstreamer.configFile}"
@@ -188,14 +207,9 @@ let
     apps = {
       failedAssertions = [ ];
       certs = lib.genAttrs [ "files.example.net" "play.example.net" "relay.example.net" ] own // {
-        "dns.example.net" = cert "dns.example.net" [ ] "dns-certs" [
-          "dns-server.service"
-          "upstreamer.service"
-        ];
-        "mail.example.net" = cert "mail.example.net" [ ] "mail-certs" [ "upstreamer.service" ];
-        "example.org" = cert "example.org" [ "blog.example.org" "www.example.org" ] "upstreamer-certs" [
-          "upstreamer.service"
-        ];
+        "dns.example.net" = cert "dns.example.net" [ ] "dns-certs" [ "dns-server.service" ];
+        "mail.example.net" = cert "mail.example.net" [ ] "mail-certs" [ ];
+        "example.org" = cert "example.org" [ "blog.example.org" "www.example.org" ] "upstreamer-certs" [ ];
       };
       unit =
         unit
@@ -236,9 +250,7 @@ let
       failedAssertions = [ ];
       certs = {
         "admin.example.com" = own "admin.example.com";
-        "preview.example.com" = cert "preview.example.com" [ "*.preview.example.com" ] "upstreamer-certs" [
-          "upstreamer.service"
-        ];
+        "preview.example.com" = cert "preview.example.com" [ "*.preview.example.com" ] "upstreamer-certs" [ ];
       };
       # A 30s drain.
       unit = unit' 35 [ "upstreamer-certs" ] [
