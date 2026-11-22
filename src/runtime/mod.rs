@@ -1274,9 +1274,12 @@ pub(crate) mod testing {
             if let Some(i) = memchr::memmem::find(&bytes, b"\r\n\r\n") {
                 break i + 4;
             }
-            match conn.read(&mut chunk)? {
-                0 => return Err(io::ErrorKind::UnexpectedEof.into()),
-                n => bytes.extend_from_slice(&chunk[..n]),
+            match conn.read(&mut chunk) {
+                // A signal a test raised was handled on this thread.
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+                Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+                Ok(n) => bytes.extend_from_slice(&chunk[..n]),
             }
         };
         let mut body = bytes.split_off(head_len);
