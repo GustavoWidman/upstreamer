@@ -606,6 +606,69 @@ compile is logged and leaves the running one in place. A request in flight finis
 config it started with, and connections are not dropped. Health, rate-limit buckets of an
 unchanged step, and metric counts continue across a reload.
 
+### Upgrading without a restart (Linux)
+
+A SIGHUP also looks at the program file: when the file at the path the proxy was started from
+is no longer the file it runs (another device or inode), the proxy starts that file and hands
+it the listening sockets, instead of reloading. The new process reads the config, takes the
+sockets with whatever is queued on them, and becomes the service's main process; the old one
+finishes its requests in flight for at most `timeouts.shutdown` and exits. No connection is
+refused and no request fails:
+
+- A request on an HTTP/1.1 connection kept from before the upgrade is answered by the old
+  process, with `Connection: close`. A connection that stays idle is closed after half of
+  `timeouts.shutdown`.
+- An HTTP/2 or HTTP/3 connection gets GOAWAY and its open streams finish. A tunnel (WebSocket)
+  still open at the deadline is cut, as at a stop.
+- HTTP/3: the old process keeps the UDP sockets until its last QUIC connection has ended, and
+  the new one answers QUIC from then on. A QUIC handshake begun in between is not answered
+  until then; the client's retransmission completes it (about a second later with common
+  clients), and a client that races TCP uses HTTP/2 meanwhile.
+
+So replacing the binary at its path (a rename over it, or a changed link) and
+`systemctl reload upstreamer` upgrade the proxy. On NixOS a switch to a new package does
+exactly that. The program is started with the arguments and the environment of the running
+one, inside the same unit, so anything of the unit itself (its user and groups, its sandbox,
+its environment) changes only at a restart.
+
+If the new program exits, rejects the config, cannot sync a discovery source within 10 s or is
+not ready within 30 s, it is stopped before it took a connection and the reload fails like a
+reload of an invalid config: the running
+process keeps serving and the unit's status says
+`reload failed, still serving generation N: cannot hand over to <path>: <reason>`. Every later
+reload tries again while the file at the path is still another one.
+
+The new process starts fresh, apart from the sockets and the TLS session ticket keys (a
+session of the old process resumes on the new one). What a reload keeps and an upgrade does
+not: rate-limit buckets start full, origins start in rotation with no failures counted and no
+probe results, upstream connections are opened anew, and the metric counters restart from zero
+(`process_start_time_seconds` changes with them, as at a restart). Discovered origins are
+looked up again, before the new process takes over: it waits until every discovery source has
+synced.
+
+Two versions of the program agree on the handover through a small versioned document. A
+version that cannot read the running one's document refuses it, which fails the reload as
+above; `systemctl restart` upgrades then, with the gap of a restart.
+
+On other systems than Linux, SIGHUP always reloads the config.
+
+Two upgrades in a row are fine: a process that hands over while the one before it still has
+QUIC connections passes the wait on, and the last process answers QUIC once all before it
+have let go.
+
+### Restarts and crashes under systemd
+
+With `FileDescriptorStoreMax=` in its unit, the proxy keeps its listening sockets in systemd's
+file descriptor store. systemd holds them while the unit restarts (`systemctl restart`, a
+restart after a crash with `Restart=`) and passes them to the next process, which serves what
+queued on them. A connection made while no process ran therefore waits for the next one
+instead of being refused. It can wait as long as the stop takes: requests in flight get
+`timeouts.shutdown` to finish before the next process starts. A restart still closes the
+connections kept open from before it, which an upgrade does not.
+
+`systemctl stop` releases the store and with it the ports. A listener a reload removes leaves
+the store too.
+
 A unit for a host without NixOS (the NixOS module generates a hardened one from its options):
 
 ```ini
@@ -622,10 +685,14 @@ StateDirectory=upstreamer
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 LimitNOFILE=1048576
+FileDescriptorStoreMax=4096
 ```
 
 Without `DynamicUser`, give the service a user that can read the config and certificates and
 write the state directory. Binding ports 80 and 443 needs `CAP_NET_BIND_SERVICE`.
+`Type=notify-reload` makes `systemctl reload` send the SIGHUP and wait for its result, for a
+config reload and for an upgrade alike; the default `NotifyAccess=main` and
+`KillMode=control-group` are what the upgrade expects.
 
 On NixOS, the module's options write this config for you: [the README](../README.md#nixos) shows
 the common ones, and `services.upstreamer.settings` takes any top-level key of this page.

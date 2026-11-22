@@ -96,6 +96,7 @@ command line.
 | `src/net/buf.rs` | per-core buffer pools |
 | `src/runtime/mod.rs` | cores, generations, snapshots |
 | `src/runtime/control.rs` | startup, reload, discovery and ACME publishes, shutdown, systemd notification |
+| `src/runtime/handover.rs` | replacing the running program: the document between the two processes, starting the successor, following the predecessor |
 | `src/access.rs` | access log line format, the files of a generation, and each core's buffered writer |
 | `src/log.rs` | logging to stderr with journald priority prefixes |
 
@@ -155,6 +156,90 @@ The control thread is the main thread. It compiles plans, loads certificates and
 a reload applies to the next request of each connection, and a request in flight finishes
 under the plan it started with. A reload whose config fails to parse or compile keeps the
 running generation.
+
+## Replacing the running program
+
+A SIGHUP reloads the config unless the file at the path the process was started from is
+another file than the one it runs (`handover::Launch::replaced`, by device and inode). Then the
+process, the predecessor, hands over to a process of that file, the successor
+(`src/runtime/handover.rs`):
+
+1. The predecessor asks every core for a second descriptor of each of its listening sockets
+   and starts the file with its own arguments. The successor inherits those descriptors, the
+   read end of a pipe holding a JSON document that names them (`UPSTREAMER_HANDOVER` holds
+   that pipe's number) and one end each of a `ready` pipe and a `control` pipe. The document
+   also carries the session ticket keys. It is versioned: a field may be added and is ignored
+   by a version that does not know it, and a successor refuses a version it does not know.
+2. The successor checks that each descriptor is the socket the document says, loads the
+   config and starts its cores with every listener held (`runtime::Hold::All`): it binds
+   nothing and accepts nothing. It waits until its discovery sources have synced, since the
+   predecessor serves their last endpoints and a fresh process has none. It writes `ready`
+   to its pipe, or `failed <reason>`.
+3. On `ready` the predecessor sends systemd `MAINPID=<successor>` with `READY=1`, writes one
+   byte to the control pipe and drains (`runtime::Drain`). On a failure, an exit or 30 s
+   without a word it kills the successor, which never touched a connection, and ends the
+   reload with `READY=1` and a status that says why. A successor that is gone when the byte
+   is written leaves the predecessor serving too.
+4. On the byte the successor serves the TCP listeners on the inherited sockets and reports
+   `READY=1` itself. Its QUIC listeners stay held until the control pipe closes.
+
+Inheriting the sockets, rather than binding new ones next to them, is what makes this exact:
+the kernel's queues of connections never close, so no connection is refused or reset whatever
+`net.ipv4.tcp_migrate_req` says, and the group of `SO_REUSEPORT` sockets of an address does
+not change, so the kernel keeps sending each client's packets to the same socket. A successor
+with more cores than the predecessor binds the missing sockets; one with fewer closes the
+extra ones.
+
+QUIC is why the successor waits for the control pipe to close. Every datagram on a UDP socket
+goes to one reader, and the predecessor's QUIC connections live in its memory, so while it has
+one it must be the only reader. Each of its cores holds a copy of the pipe's write end and
+drops it once its endpoints are idle and quinn has let go of the sockets (`Drain::released`);
+the last copy, or the predecessor's exit, closes the pipe. In between, no process answers a
+new QUIC connection: the predecessor's endpoints answer an Initial packet with a stateless
+reset, which a client ignores, and the client's retransmission reaches the successor.
+
+Towards systemd the unit is `Type=notify-reload` with the default `NotifyAccess=main`:
+
+- Only the main process is heard, so `MAINPID=` comes from the predecessor, in the same
+  datagram as the `READY=1` that ends the reload. The successor notifies only after the byte
+  that tells it so. The predecessor says nothing afterwards, `STOPPING=1` included.
+- systemd accepts as main process only a process of the unit's control group, and supervises
+  it fully only if it is its own child. The successor is in the group by birth, and the
+  predecessor starts it through a child that exits at once, so its parent is systemd.
+- The predecessor drains as an ordinary process of the unit. A stop signals the whole group,
+  so it reaches both processes; each drains with its own deadline, and the unit's stop timeout
+  covers the later one.
+
+A drain that follows a handover differs from a stop in one way: nothing waits for the process
+to exit, so idle HTTP/1.1 keep-alive connections are closed after half the shutdown deadline
+instead of at once (`Drain::idle_close`). A request that arrives on one before that is
+answered with `Connection: close`, where a stop would have closed the connection under it.
+
+A process that hands over while it still holds the UDP sockets for its own predecessor hands
+those on as well, and keeps its end of the control pipe open until that predecessor let go, so
+the wait passes down a chain of handovers.
+
+The NixOS module starts the proxy from `/etc/upstreamer/upstreamer`, a link to the package's
+program, and lists the package among the unit's reload triggers. A switch to another package
+changes the link and the triggers and nothing else in the unit, so
+`switch-to-configuration` reloads the unit (it restarts a unit when anything but its reload
+triggers changed) after its activation script has updated `/etc`. Two packages whose programs
+are one file in an optimised store are the same program, and the reload reloads the config.
+
+## Restarts
+
+A restart cannot hand over: systemd stops the process before it starts the next. What bridges
+the gap is systemd's file descriptor store. The control thread stores a descriptor of every
+listening socket (`control::Stored`: `FDSTORE=1` with one `FDNAME=` per address) after
+startup, after a reload and after taking sockets over, and removes the names no listener has
+any more. The next process is passed the stored sockets (`LISTEN_FDS`) and serves its
+listeners on them exactly as on sockets handed over by a predecessor, so the connections made
+while no process ran are in their queues.
+
+systemd keeps the store while a restart job runs or an automatic restart is pending, and
+releases it when the unit is stopped. The NixOS module sets `FileDescriptorStoreMax` and
+`stopIfChanged = false`, which makes a switch restart the unit in one job after activation
+instead of stopping it before and starting it after.
 
 ## Access logs
 
@@ -254,6 +339,10 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 nix flake check --no-build
 ```
+
+`tests/e2e_upgrade.rs` (Linux) replaces the program file of a running proxy under load of
+every protocol. `checks.<system>.vm-upgrade` does the same through a NixOS switch to another
+package, with systemd in charge, and prints what the clients saw.
 
 `tests/check.rs` runs `check` on the example configs and on the generated fragments in
 `tests/fixtures/site/upstreamer`, where `@out@` stands for the site package's store path. It
