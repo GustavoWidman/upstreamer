@@ -910,9 +910,7 @@ pub mod harness {
         let mut head = RequestHead::new();
         let mut rest = input;
         while let Ok(Parsed::Complete {
-            head_len,
-            framing,
-            extra,
+            head_len, framing, ..
         }) = parse_request(rest, &limits, &mut head)
         {
             methods.push(head.method);
@@ -922,9 +920,11 @@ pub mod harness {
                 Framing::Chunked => scan_chunked(rest),
                 Framing::None | Framing::UntilClose => Some(0),
             };
+            // A request that asks for an upgrade gets one only from an origin, and the
+            // check ends at its 101; until then the connection goes on.
             match body {
-                Some(n) if !extra.upgrade => rest = &rest[n..],
-                _ => break,
+                Some(n) => rest = &rest[n..],
+                None => break,
             }
         }
 
