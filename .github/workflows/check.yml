@@ -134,8 +134,12 @@ jobs:
           nix_conf: |
             substituters = https://cache.nixos.org/ https://cache.r3dlust.com
             trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= cache.r3dlust.com-1:Wdkf9mes2ued0P7C7CL3Jax1b4KPuJwQpM3h4G/Z+yI=
-      - name: Run every test in the dev shell, with Caddy, h2load, an HTTP/3 curl, pebble, promtool and h2spec
+      - name: Run every test in the dev shell, with Caddy, h2load, an HTTP/3 curl, pebble, promtool, h2spec and Python's h2
         run: |
+          # httpx over Python's h2, from the flake's nixpkgs, for the HTTP/2 drain test.
+          python=$(nix build --no-link --print-out-paths --impure --expr \
+            "(builtins.getFlake \"$PWD\").inputs.nixpkgs.legacyPackages.\${builtins.currentSystem}.python3.withPackages (ps: [ ps.httpx ps.h2 ])")
+          export UPSTREAMER_PYTHON=$python/bin/python3
           nix shell --inputs-from . nixpkgs#caddy nixpkgs#nghttp2 nixpkgs#curl nixpkgs#pebble nixpkgs#prometheus.cli nixpkgs#h2spec --command \
             nix develop --command bash -euo pipefail -c '
               # A missing tool makes its tests skip rather than fail.
@@ -143,7 +147,7 @@ jobs:
               h2load --version
               curl --version | grep -qw HTTP3 || { echo "::error::curl is built without HTTP/3"; exit 1; }
               command -v pebble pebble-challtestsrv promtool h2spec
-              UPSTREAMER_REQUIRE_PROMTOOL=1 UPSTREAMER_REQUIRE_H2SPEC=1 cargo test --locked
+              UPSTREAMER_REQUIRE_PROMTOOL=1 UPSTREAMER_REQUIRE_H2SPEC=1 UPSTREAMER_REQUIRE_PYTHON_H2=1 cargo test --locked
             '
 
   # The default build compiles none of the Kubernetes client, so the checks above never see it.
