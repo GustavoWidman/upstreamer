@@ -32,6 +32,7 @@ impl Program {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("upstreamer");
         std::fs::copy(env!("CARGO_BIN_EXE_upstreamer"), &path).unwrap();
+        settle(&path);
         Program { path, _dir: dir }
     }
 
@@ -39,6 +40,7 @@ impl Program {
     fn replace(&self) {
         let next = self.path.with_extension("next");
         std::fs::copy(env!("CARGO_BIN_EXE_upstreamer"), &next).unwrap();
+        settle(&next);
         std::fs::rename(next, &self.path).unwrap();
     }
 
@@ -47,7 +49,30 @@ impl Program {
         let next = self.path.with_extension("next");
         std::fs::write(&next, content).unwrap();
         std::fs::set_permissions(&next, std::fs::Permissions::from_mode(mode)).unwrap();
+        settle(&next);
         std::fs::rename(next, &self.path).unwrap();
+    }
+}
+
+/// Waits until the file this process just wrote at `path` can be executed. The kernel refuses
+/// to run a file that is open for writing, and a child another test forked while the file was
+/// written holds it open until that child runs its own program.
+fn settle(path: &std::path::Path) {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let run = std::process::Command::new(path)
+            .arg("--help")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match run {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                assert!(Instant::now() < deadline, "{} stays busy", path.display());
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            _ => return,
+        }
     }
 }
 
