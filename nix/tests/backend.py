@@ -1,6 +1,7 @@
 """Upstream for the proxy tests: /ws echoes WebSocket text messages, every other path answers
-"backend <method> <path>"."""
+"backend <method> <path>", after as many seconds as a `wait` in its query says."""
 
+import asyncio
 import sys
 
 from aiohttp import WSMsgType, web
@@ -16,6 +17,10 @@ async def echo(request):
 
 
 async def answer(request):
+    wait = float(request.query.get("wait", 0))
+    if wait:
+        print(f"holding {request.path} for {wait:g} s", flush=True)
+        await asyncio.sleep(wait)
     return web.Response(text=f"backend {request.method} {request.path_qs}")
 
 

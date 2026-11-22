@@ -387,15 +387,17 @@ in
       if seamless:
           with subtest("stopping the unit during a handover stops both processes"):
               old = unit("MainPID")
-              # A request that never ends keeps the old process draining.
+              # A request the backend holds back keeps the old process draining until its
+              # deadline, ten seconds after the handover.
               client.succeed(
-                  "(exec 3<>/dev/tcp/${host}/80; printf 'GET / HTTP/1.1\\r\\n' >&3; sleep 60)"
-                  " > /dev/null 2>&1 &"
+                  f"curl -s --cacert {ca} --max-time 60 '{url}/held?wait=60' > /dev/null 2>&1 &"
               )
-              time.sleep(1)
-              switch()
+              server.wait_until_succeeds("journalctl -u backend.service -o cat | grep -F 'holding /held'")
+              # Read as the switch returns, on the server: well inside those ten seconds.
+              procs = "/sys/fs/cgroup/system.slice/upstreamer.service/cgroup.procs"
+              during = server.succeed(f"{base}/bin/switch-to-configuration test >&2 && cat {procs}")
               new = unit("MainPID")
-              assert new != old and {old, new} <= set(processes()), processes()
+              assert new != old and {old, new} <= set(during.split()), during
               server.succeed("systemctl stop upstreamer.service")
               server.fail(f"test -e /proc/{old}")
               server.fail(f"test -e /proc/{new}")
