@@ -2,8 +2,9 @@
 # serves. They need KVM; build one with `nix build .#checks.x86_64-linux.vm-<name>`.
 #
 # - vm-acme: certificates from a test ACME server (pebble, DNS-01): the answer before the first
-#   issuance, the switch to the issued chain, renewal under a live keep-alive connection, and a
-#   failed issuance next to a working one.
+#   issuance, the switch to the issued chain, renewal under a live keep-alive connection, a
+#   failed issuance next to a working one, and a renewal that fails because the proxy could
+#   not reload.
 # - vm-acme-inprocess: certificates the proxy orders itself (`tls.acme`) from pebble over HTTP-01
 #   and TLS-ALPN-01: the retry after an unreachable CA, the issued chains served without a
 #   restart, private state files, renewal in the same process, and a restart from stored files.
@@ -13,8 +14,9 @@
 #   a stub API.
 # - vm-upgrade: a switch to another package under h1, h2 and h3 load (the new program takes the
 #   sockets over: nothing refused, no request failed, the unit active with a new main process),
-#   a stop during the handover, a config-only switch, a unit change, and a package that cannot
-#   run.
+#   a stop during the handover, a config-only switch, a unit change, and switches whose reload
+#   fails (a package that cannot serve, a config that does not load), which fail and leave the
+#   running proxy serving.
 { self, ... }:
 {
   perSystem =

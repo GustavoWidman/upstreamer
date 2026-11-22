@@ -225,5 +225,30 @@ in
         server.fail("systemctl is-failed upstreamer.service")
         assert unit("MainPID") == first_pid
         assert unit("NRestarts") == "0"
+
+    with subtest("a renewal whose certificate the proxy does not take fails"):
+        # A config that does not load, in place of the link to the system's.
+        server.succeed("rm /etc/upstreamer/config.json && echo '{' > /etc/upstreamer/config.json")
+        server.fail("systemctl start acme-order-renew-good.example.test.service")
+        unserved = on_disk("good.example.test")
+        assert unserved != renewed, "the certificate was renewed"
+        result = server.succeed(
+            "systemctl show acme-order-renew-good.example.test.service -P Result"
+        ).strip()
+        assert result == "exit-code", f"the renewal failed: {result}"
+        journal = server.succeed(
+            "journalctl --sync && journalctl -u upstreamer.service --no-pager -o cat"
+        )
+        assert "upstreamer: reload failed, still serving generation" in journal, journal
+        assert served("good.example.test", "fingerprint -sha256") == renewed, (
+            "the proxy serves the certificate it had"
+        )
+        assert unit("ActiveState") == "active" and unit("MainPID") == first_pid
+
+        server.succeed("ln -sfn /etc/static/upstreamer/config.json /etc/upstreamer/config.json")
+        server.succeed("systemctl reload upstreamer.service")
+        wait_served("good.example.test", lambda f: f == unserved, "the renewed certificate")
+        assert unit("MainPID") == first_pid
+        assert unit("NRestarts") == "0"
   '';
 }
