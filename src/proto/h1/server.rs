@@ -925,6 +925,65 @@ mod tests {
     }
 
     #[test]
+    fn a_request_cut_short_by_the_connection_ending_is_dropped_in_its_block() {
+        use crate::exchange::{Proto, Scheme};
+        use crate::plan::{ListenerKey, ListenerKind};
+        use crate::runtime::Generation;
+        use crate::runtime::testing::{core, plan};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listen = "127.0.0.1:8080".parse().unwrap();
+        let generation = Generation::standalone(plan(1, &[listen]), None, Default::default());
+        let info = ConnInfo {
+            remote: "192.0.2.1:5000".parse().unwrap(),
+            local_port: listen.port(),
+            scheme: Scheme::Http,
+            proto: Proto::H1,
+            listener: ListenerKey {
+                addr: listen,
+                kind: ListenerKind::Http,
+            },
+        };
+        let core = core(&generation);
+        let snapshot = core.snapshot();
+        let held = || Rc::strong_count(&snapshot) - 2;
+        block_on(async {
+            let (io, client) = pair();
+            client.set_nonblocking(true).unwrap();
+            let mut client = tokio::net::UnixStream::from_std(client).unwrap();
+            let serving = serve(core.clone(), io, info);
+            tokio::pin!(serving);
+            for _ in 0..2 {
+                client
+                    .write_all(b"GET / HTTP/1.1\r\nHost: a\r\n\r\n")
+                    .await
+                    .unwrap();
+                let mut got = Vec::new();
+                tokio::select! {
+                    () = &mut serving => panic!("the connection ended"),
+                    () = async {
+                        while !got.ends_with(b"gen=000001\n") {
+                            assert_ne!(client.read_buf(&mut got).await.unwrap(), 0);
+                        }
+                    } => {}
+                }
+                assert!(got.starts_with(b"HTTP/1.1 200"));
+            }
+            client.write_all(b"GET / HTTP/1.1\r\nHo").await.unwrap();
+            tokio::select! {
+                () = &mut serving => panic!("the connection ended"),
+                () = async {
+                    while held() == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                } => {}
+            }
+            assert_eq!(held(), 1, "the request waits for the rest of its head");
+        });
+        assert_eq!(held(), 0, "dropping the connection dropped the request");
+    }
+
+    #[test]
     fn an_unread_body_is_classified_by_what_is_still_to_come() {
         let unread = |framing, expect, buffered: &[u8]| {
             let mut state = BodyState::new(framing, expect);
