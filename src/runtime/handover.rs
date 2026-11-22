@@ -6,8 +6,9 @@
 //!
 //! 1. The predecessor starts the file with its own arguments, as a child of its own parent
 //!    (the service manager), and hands it a descriptor of every listening socket of every
-//!    core, its session ticket keys, and two pipes. The [`Document`] that says which
-//!    descriptor is what travels on a third pipe, whose number is in [`ENV`].
+//!    core, the socket it is asked to reload on ([`super::reload`]), its session ticket keys,
+//!    and two pipes. The [`Document`] that says which descriptor is what travels on a third
+//!    pipe, whose number is in [`ENV`].
 //! 2. The successor loads the config and starts its cores with every listener held: it accepts
 //!    nothing and binds nothing. It then writes `ready` to the first pipe. A successor that
 //!    cannot start writes `failed <reason>`, or just exits.
@@ -40,8 +41,9 @@ pub(crate) const ENV: &str = "UPSTREAMER_HANDOVER";
 
 const VERSION: u32 = 1;
 
-/// How long a successor has to report that it is ready. systemd gives a reload
-/// `TimeoutStartSec` (90 s by default) before it calls it failed.
+/// How long a successor has to report that it is ready. Whoever waits for the reload waits
+/// longer: [`super::reload::PATIENCE`] for a client of the reload socket, `TimeoutStartSec`
+/// (90 s by default) for systemd.
 pub(crate) const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a successor waits to be made the main process after it reported ready.
@@ -61,6 +63,10 @@ pub(crate) struct Document {
     /// The pipe the predecessor answers on: [`PROMOTED`], then its end.
     control: RawFd,
     listeners: Vec<Sockets>,
+    /// The listening socket the predecessor is asked to reload on, when it has one: the
+    /// successor accepts on it once it is the main process.
+    #[serde(default)]
+    reload_socket: Option<RawFd>,
     #[serde(default)]
     tickets: Option<Tickets>,
 }
@@ -148,12 +154,13 @@ fn unhex<const N: usize>(text: &str) -> Option<[u8; N]> {
 }
 
 impl Document {
-    /// Describes `sockets` (each core's, in core order) and the two pipe ends by their
-    /// descriptor numbers, which are the same in a process forked from this one.
+    /// Describes `sockets` (each core's, in core order), the reload socket and the two pipe
+    /// ends by their descriptor numbers, which are the same in a process forked from this one.
     fn describe(
         ready: RawFd,
         control: RawFd,
         sockets: &[Inherited],
+        reload_socket: Option<RawFd>,
         tickets: Option<Tickets>,
     ) -> Document {
         let mut listeners: Vec<Sockets> = Vec::new();
@@ -176,6 +183,7 @@ impl Document {
             ready,
             control,
             listeners,
+            reload_socket,
             tickets,
         }
     }
@@ -216,7 +224,10 @@ impl Document {
     /// Every descriptor the document names.
     fn fds(&self) -> impl Iterator<Item = RawFd> {
         let sockets = self.listeners.iter().flat_map(|l| l.fds.iter().copied());
-        [self.ready, self.control].into_iter().chain(sockets)
+        [self.ready, self.control]
+            .into_iter()
+            .chain(self.reload_socket)
+            .chain(sockets)
     }
 
     /// Takes the descriptors the document names: each must be open, and each socket must be
@@ -234,6 +245,7 @@ impl Document {
         // SAFETY: open, distinct (`parse`), and nothing else owns them (the caller).
         let own = |fd: RawFd| unsafe { OwnedFd::from_raw_fd(fd) };
         let (ready, control) = (own(self.ready), own(self.control));
+        let reload = self.reload_socket.map(own);
         // Owned before any is checked, so an error closes them all.
         let owned: Vec<(SocketKind, SocketAddr, OwnedFd)> = self
             .listeners
@@ -261,6 +273,7 @@ impl Document {
             launch: None,
             sockets,
             tickets,
+            reload: reload.map(super::reload::Source::Inherited),
             predecessor: Some(Predecessor {
                 ready: Some(ready),
                 control: Some(control),
@@ -292,6 +305,8 @@ pub(crate) struct Start {
     pub sockets: Vec<Inherited>,
     /// Session ticket keys to start with, and the age of the current one.
     pub tickets: Option<(TicketKeys, Duration)>,
+    /// Where this process is asked to reload.
+    pub reload: Option<super::reload::Source>,
     /// The process this one takes over from.
     pub predecessor: Option<Predecessor>,
 }
@@ -526,6 +541,7 @@ mod predecessor {
     pub(crate) async fn offer(
         _launch: &Launch,
         _sockets: Vec<Inherited>,
+        _reload_socket: Option<OwnedFd>,
         _tickets: Option<Tickets>,
         _patience: Duration,
     ) -> Result<Successor, String> {
@@ -603,16 +619,18 @@ mod predecessor {
         }
     }
 
-    /// Starts the program at `launch` as a successor that inherits `sockets`, and waits until
-    /// it is ready. An error says why it is not; the successor is dead by then.
+    /// Starts the program at `launch` as a successor that inherits `sockets` and
+    /// `reload_socket`, and waits until it is ready. An error says why it is not; the
+    /// successor is dead by then.
     pub(crate) async fn offer(
         launch: &Launch,
         sockets: Vec<Inherited>,
+        reload_socket: Option<OwnedFd>,
         tickets: Option<Tickets>,
         patience: Duration,
     ) -> Result<Successor, String> {
-        let (successor, ready) =
-            start(launch, sockets, tickets).map_err(|e| format!("cannot start it: {e}"))?;
+        let (successor, ready) = start(launch, sockets, reload_socket, tickets)
+            .map_err(|e| format!("cannot start it: {e}"))?;
         let ready = tokio::net::unix::pipe::Receiver::from_owned_fd(ready)
             .map_err(|e| format!("the handover pipe: {e}"))?;
         let mut line = String::new();
@@ -632,6 +650,7 @@ mod predecessor {
     fn start(
         launch: &Launch,
         sockets: Vec<Inherited>,
+        reload_socket: Option<OwnedFd>,
         tickets: Option<Tickets>,
     ) -> io::Result<(Successor, OwnedFd)> {
         let (document_r, document_w) = pipe()?;
@@ -642,6 +661,7 @@ mod predecessor {
             ready_w.as_raw_fd(),
             control_r.as_raw_fd(),
             &sockets,
+            reload_socket.as_ref().map(AsRawFd::as_raw_fd),
             tickets,
         );
         write_document(document_w, &document)?;
@@ -684,7 +704,14 @@ mod predecessor {
         // process wrote the pid.
         let mut middle = command.spawn()?;
         let _ = middle.wait();
-        drop((pid_w, document_r, ready_w, control_r, sockets));
+        drop((
+            pid_w,
+            document_r,
+            ready_w,
+            control_r,
+            sockets,
+            reload_socket,
+        ));
         let mut pid = [0u8; size_of::<libc::pid_t>()];
         io::Read::read_exact(&mut std::fs::File::from(pid_r), &mut pid)?;
         let pid = libc::pid_t::from_ne_bytes(pid);
@@ -740,8 +767,13 @@ mod tests {
     ) -> (Document, OwnedFd, OwnedFd, OwnedFd, OwnedFd) {
         let (ready_r, ready_w) = pipe();
         let (control_r, control_w) = pipe();
-        let document =
-            Document::describe(ready_w.as_raw_fd(), control_r.as_raw_fd(), sockets, tickets);
+        let document = Document::describe(
+            ready_w.as_raw_fd(),
+            control_r.as_raw_fd(),
+            sockets,
+            None,
+            tickets,
+        );
         (document, ready_r, ready_w, control_r, control_w)
     }
 
@@ -807,6 +839,7 @@ mod tests {
                 addr,
                 fds: vec![11, 12],
             }],
+            reload_socket: Some(13),
             tickets: Some(Tickets {
                 lifetime_secs: 43_200,
                 age_secs: 60,
@@ -822,6 +855,7 @@ mod tests {
             "ready": 7,
             "control": 9,
             "listeners": [{ "transport": "udp", "addr": "[::]:443", "fds": [11, 12] }],
+            "reloadSocket": 13,
             "tickets": {
                 "lifetimeSecs": 43_200,
                 "ageSecs": 60,
@@ -840,7 +874,7 @@ mod tests {
         });
         let document = Document::parse(&known.to_string()).unwrap();
         assert_eq!((document.ready, document.control), (7, 9));
-        assert_eq!(document.tickets, None);
+        assert_eq!((document.reload_socket, document.tickets), (None, None));
 
         let newer = serde_json::json!({ "version": 2, "sockets": "elsewhere" });
         let refused = Document::parse(&newer.to_string()).unwrap_err();
@@ -994,6 +1028,29 @@ mod tests {
     }
 
     #[test]
+    fn claiming_a_document_yields_the_reload_socket_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reload");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let (mut document, _ready_r, ready_w, control_r, _control_w) = described(&[], None);
+        let number = OwnedFd::from(listener).into_raw_fd();
+        document.reload_socket = Some(number);
+        assert!(document.fds().any(|fd| fd == number));
+        hand_down(ready_w, control_r, Vec::new());
+
+        // SAFETY: `hand_down` and `into_raw_fd` gave up every descriptor the document names.
+        let start = unsafe { document.claim() }.unwrap();
+        let Some(crate::runtime::reload::Source::Inherited(fd)) = start.reload else {
+            panic!("the successor listens on the socket it was handed");
+        };
+        assert_eq!(fd.as_raw_fd(), number);
+        let listener = std::os::unix::net::UnixListener::from(fd);
+        let client = std::os::unix::net::UnixStream::connect(&path).unwrap();
+        let (_accepted, _) = listener.accept().unwrap();
+        drop(client);
+    }
+
+    #[test]
     fn a_socket_that_is_not_what_the_document_says_fails_the_claim() {
         let sockets = vec![Inherited::fresh(Http)];
         let a = sockets[0].addr;
@@ -1126,7 +1183,7 @@ mod tests {
                 .enable_all()
                 .build()
                 .unwrap();
-            runtime.block_on(offer(&shell(script), Vec::new(), None, patience))
+            runtime.block_on(offer(&shell(script), Vec::new(), None, None, patience))
         }
 
         /// Whether `pid` still runs (a process that exited and awaits its parent does not).
@@ -1237,7 +1294,7 @@ mod tests {
                 .enable_all()
                 .build()
                 .unwrap();
-            let offer = offer(&launch, Vec::new(), None, Duration::from_secs(10));
+            let offer = offer(&launch, Vec::new(), None, None, Duration::from_secs(10));
             let error = runtime.block_on(offer).err().unwrap();
             assert!(error.starts_with("cannot start it: "), "{error}");
         }

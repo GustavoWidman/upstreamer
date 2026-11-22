@@ -32,8 +32,8 @@
 //!
 //! # Public surface
 //!
-//! [`run`], [`check`] and [`convert`]. Everything else is crate-private, so no caller can reach into the
-//! hot path's internals.
+//! [`run`], [`reload`], [`check`] and [`convert`]. Everything else is crate-private, so no
+//! caller can reach into the hot path's internals.
 
 // Modules whose bodies are still `todo!()` leave parameters and items unused.
 #![allow(dead_code, unused_variables, unused_macros)]
@@ -68,6 +68,7 @@ use std::path::PathBuf;
 
 pub use plan::Diagnostic;
 pub use plan::load::Costs;
+pub use runtime::reload::ReloadError;
 
 /// Codec entry points for the fuzz targets and benchmarks; not part of the API.
 #[cfg(feature = "internals")]
@@ -117,6 +118,9 @@ pub struct RunOptions {
     /// Worker count override; `None` takes the config's `workers`, else one per CPU in the
     /// process's affinity mask (which honours systemd `CPUAffinity=`/cgroup cpusets).
     pub workers: Option<u16>,
+    /// Where to listen for [`reload`]: the path of a Unix socket, made for the process's user
+    /// alone. `None`: the process reloads on SIGHUP only.
+    pub reload_socket: Option<PathBuf>,
 }
 
 /// Why the process could not start. Every variant is fatal at startup only; the same failures
@@ -149,14 +153,28 @@ impl fmt::Display for StartError {
     }
 }
 
-/// Runs the proxy until SIGTERM/SIGINT, reloading on SIGHUP. Blocks the calling thread, which
-/// becomes the control thread.
+/// Runs the proxy until SIGTERM/SIGINT, reloading on SIGHUP and when asked to by [`reload`].
+/// Blocks the calling thread, which becomes the control thread.
 ///
-/// On Linux a SIGHUP that finds another program file at the path this process was started from
-/// starts that file and hands it the listening sockets instead; `run` then returns once the
-/// requests in flight have finished.
+/// On Linux a reload that finds another program file at the path this process was started
+/// from starts that file and hands it the listening sockets instead; `run` then returns once
+/// the requests in flight have finished.
 pub fn run(opts: RunOptions) -> Result<(), StartError> {
     runtime::control::run(opts)
+}
+
+/// Options of `upstreamer reload`.
+pub struct ReloadOptions {
+    /// The socket the running process listens on: its [`RunOptions::reload_socket`].
+    pub socket: PathBuf,
+}
+
+/// Asks the running process to reload and waits until it has: the config applied, or the
+/// process of a replaced program file serving in its place. `Ok` is the status line of the
+/// process that serves then. A reload that changed nothing is an error that says why, where a
+/// SIGHUP leaves its sender without a word.
+pub fn reload(opts: ReloadOptions) -> Result<String, ReloadError> {
+    runtime::reload::ask(&opts.socket, runtime::reload::PATIENCE)
 }
 
 /// What `upstreamer check` validates.

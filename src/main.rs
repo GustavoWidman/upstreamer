@@ -1,4 +1,5 @@
-//! `upstreamer run [--config] <file> [--workers N]`
+//! `upstreamer run [--config] <file> [--workers N] [--reload-socket <path>]`
+//! `upstreamer reload --reload-socket <path>`
 //! `upstreamer check [--config] <file> [--expect-tcp P,..] [--expect-udp P,..]`
 //! `upstreamer check --fragment <file>`
 //! `upstreamer example [name | --list]`
@@ -8,24 +9,30 @@
 //!
 //! Exit codes: 0 ok, 1 invalid config (diagnostics on stderr, one per line, each with the JSON
 //! pointer of the offending value, the site/step name and, for TOML, the line and column), 2
-//! usage, 3 runtime failure.
+//! usage, 3 runtime failure. `reload` exits 1 when the running process kept what it served, and
+//! 3 when it could not be asked.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use upstreamer::{CheckInput, CheckReport, ExpectedPorts, RunOptions, StartError};
+use upstreamer::{
+    CheckInput, CheckReport, ExpectedPorts, ReloadError, ReloadOptions, RunOptions, StartError,
+};
 
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const USAGE: &str = "usage:
-  upstreamer run [--config] <file> [--workers N]
+  upstreamer run [--config] <file> [--workers N] [--reload-socket PATH]
+  upstreamer reload --reload-socket PATH
   upstreamer check [--config] <file> [--expect-tcp PORT,..] [--expect-udp PORT,..]
   upstreamer check --fragment <file>
   upstreamer example [NAME | --list]
   upstreamer convert <file>
 
 A config is JSON, or TOML when its name ends in .toml.
+`reload` asks the process that runs with the same --reload-socket to reload, waits until it
+has, and fails when the reload did.
 `example` prints a commented config to start from; `convert` prints a JSON file as TOML, or
 a TOML file as JSON.";
 
@@ -70,6 +77,7 @@ const EXAMPLES: &[(&str, &str, &str)] = &[
 
 enum Command {
     Run(RunOptions),
+    Reload(ReloadOptions),
     Check(CheckInput),
     Example(Option<String>),
     Convert(PathBuf),
@@ -94,6 +102,17 @@ fn main() -> ExitCode {
                 ExitCode::from(3)
             }
         },
+        Ok(Command::Reload(opts)) => {
+            let outcome = upstreamer::reload(opts);
+            let done = outcome.is_ok();
+            let (text, code) = reloaded(outcome, under_service_manager());
+            if done {
+                println!("{text}");
+            } else {
+                eprintln!("upstreamer: {text}");
+            }
+            ExitCode::from(code)
+        }
         Ok(Command::Check(input)) => match upstreamer::check(input) {
             Ok(report) => {
                 for warning in &report.warnings {
@@ -115,6 +134,36 @@ fn main() -> ExitCode {
             eprintln!("upstreamer: {message}\n{USAGE}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// Whether a service manager runs this process as the command that reloads a service:
+/// systemd gives such a command the service's main process in `MAINPID`.
+fn under_service_manager() -> bool {
+    std::env::var_os("MAINPID").is_some()
+}
+
+/// What `reload` prints, and its exit code.
+///
+/// A running process that speaks no protocol version this program speaks was not asked. As
+/// the reload command of a `Type=notify-reload` unit, exiting with success leaves the reload
+/// to the signal systemd sends next, which reloads but cannot say that it failed; anywhere
+/// else nothing would follow, so it is a failure.
+fn reloaded(outcome: Result<String, ReloadError>, under_service_manager: bool) -> (String, u8) {
+    match outcome {
+        Ok(status) => (status, 0),
+        Err(e @ ReloadError::Failed(_)) => (e.to_string(), 1),
+        Err(e @ ReloadError::Incompatible { .. }) if under_service_manager => (
+            format!(
+                "{e}; leaving the reload to the service manager's signal, after which only the \
+                 service's status says whether it failed"
+            ),
+            0,
+        ),
+        Err(e @ ReloadError::Incompatible { .. }) => {
+            (format!("{e}; send it SIGHUP to reload it"), 3)
+        }
+        Err(e @ ReloadError::Unreachable(_)) => (e.to_string(), 3),
     }
 }
 
@@ -220,6 +269,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
     let mut file: Option<PathBuf> = None;
     let mut fragment: Option<PathBuf> = None;
     let mut workers: Option<u16> = None;
+    let mut reload_socket: Option<PathBuf> = None;
     let mut expect: Option<ExpectedPorts> = None;
     let mut rest = rest.iter();
     while let Some(arg) = rest.next() {
@@ -250,6 +300,12 @@ fn parse(args: &[String]) -> Result<Command, String> {
                     .ok_or_else(|| format!("--workers: not a positive number: {n:?}"))?;
                 workers = Some(n);
             }
+            ("run" | "reload", "--reload-socket") => set_once(
+                &mut reload_socket,
+                value("--reload-socket")?.into(),
+                "a reload socket",
+            )?,
+            ("reload", other) => return Err(format!("unexpected {other:?}")),
             ("check", "--fragment") => set_once(
                 &mut fragment,
                 value("--fragment")?.into(),
@@ -279,6 +335,10 @@ fn parse(args: &[String]) -> Result<Command, String> {
         "run" => Ok(Command::Run(RunOptions {
             config: file.ok_or("run needs a config file")?,
             workers,
+            reload_socket,
+        })),
+        "reload" => Ok(Command::Reload(ReloadOptions {
+            socket: reload_socket.ok_or("reload needs --reload-socket <path>")?,
         })),
         "check" => match (file, fragment) {
             (Some(path), None) => Ok(Command::Check(CheckInput::Config { path, expect })),
@@ -323,6 +383,60 @@ mod tests {
             warnings: Vec::new(),
             costs,
         }
+    }
+
+    #[test]
+    fn reload_exits_with_what_came_of_the_reload() {
+        let failed = || {
+            Err(ReloadError::Failed(
+                "still serving generation 2: broken".into(),
+            ))
+        };
+        let unreachable = || Err(ReloadError::Unreachable("no process listens at /x".into()));
+        let incompatible = || {
+            Err(ReloadError::Incompatible {
+                ours: vec![1],
+                theirs: vec![2],
+            })
+        };
+        for under_service_manager in [false, true] {
+            assert_eq!(
+                reloaded(Ok("serving generation 3".into()), under_service_manager),
+                ("serving generation 3".to_owned(), 0)
+            );
+            assert_eq!(
+                reloaded(failed(), under_service_manager),
+                (
+                    "reload failed, still serving generation 2: broken".to_owned(),
+                    1
+                )
+            );
+            assert_eq!(
+                reloaded(unreachable(), under_service_manager),
+                ("no process listens at /x".to_owned(), 3)
+            );
+        }
+        assert_eq!(
+            reloaded(incompatible(), true),
+            (
+                "the running process speaks reload protocol version 2, this program 1; leaving \
+                 the reload to the service manager's signal, after which only the service's \
+                 status says whether it failed"
+                    .to_owned(),
+                0
+            ),
+            "the manager's signal reloads a process this program cannot ask"
+        );
+        assert_eq!(
+            reloaded(incompatible(), false),
+            (
+                "the running process speaks reload protocol version 2, this program 1; send it \
+                 SIGHUP to reload it"
+                    .to_owned(),
+                3
+            ),
+            "and without a manager nothing would"
+        );
     }
 
     #[test]

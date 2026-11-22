@@ -1,21 +1,26 @@
 //! The control thread: startup, reload, shutdown, systemd notification.
 //!
 //! systemd: `Type=notify-reload`. Startup sends `READY=1` after every core bound its
-//! listeners. SIGHUP (sent by `systemctl reload`, by the NixOS switch when the config file
-//! changed, and by ACME renewals through `reloadServices`) sends `RELOADING=1` +
-//! `MONOTONIC_USEC`, rebuilds, publishes, waits until every core installed the generation, then
-//! sends `READY=1`. SIGTERM and SIGINT drain.
+//! listeners. A reload sends `RELOADING=1` + `MONOTONIC_USEC`, rebuilds, publishes, waits until
+//! every core installed the generation, then sends `READY=1`. SIGTERM and SIGINT drain.
+//!
+//! A reload is asked for by SIGHUP, or by a client of the reload socket ([`reload`]), who is
+//! told what came of it: `upstreamer reload`, which the unit runs as `ExecReload=`, so that
+//! `systemctl reload`, the NixOS switch and an ACME renewal's `reloadServices` fail when the
+//! reload does. The answer is written after the `READY=1` that ends the reload: systemd reads
+//! its notifications before it sees the client exit, and so knows the reload is over, and
+//! sends no signal of its own, when the client's exit status tells it how the reload went.
 //!
 //! Reload is idempotent and never makes things worse: an unparsable or invalid config keeps
-//! the running generation (logged, `STATUS=` set); certificate problems keep the previous
-//! certificate per name. Running reload twice with the same inputs publishes an equivalent
-//! generation.
+//! the running generation (logged, `STATUS=` set, the asking client told); certificate
+//! problems keep the previous certificate per name. Running reload twice with the same inputs
+//! publishes an equivalent generation.
 //!
-//! A SIGHUP that finds another program file at the path this one was started from hands over
-//! to it instead ([`handover`]): a process of the new file takes the listening sockets, and
-//! `MAINPID=` with `READY=1` moves the service's main process to it and ends the reload. This
-//! process then drains like a stopping one, without a word to systemd, whose main process it
-//! no longer is. A handover that fails is a failed reload: the running generation stays.
+//! A reload that finds another program file at the path this process was started from hands
+//! over to it instead ([`handover`]): a process of the new file takes the listening sockets,
+//! and `MAINPID=` with `READY=1` moves the service's main process to it and ends the reload.
+//! This process then drains like a stopping one, without a word to systemd, whose main process
+//! it no longer is. A handover that fails is a failed reload: the running generation stays.
 //!
 //! Where systemd keeps a file descriptor store for the unit (`FileDescriptorStoreMax=`), the
 //! listening sockets are kept in it ([`Stored`]): after a restart or a crash the next process
@@ -28,6 +33,7 @@
 //! ticket rotation, a discovery change or a certificate issued in process.
 
 use super::handover::{self, Start};
+use super::reload as asked;
 use super::{BindFailure, Drain, Generation, Hold, START, TlsState, ToCore, Worker};
 use crate::access::{self, OpenFailure};
 use crate::acme;
@@ -59,7 +65,11 @@ pub(crate) type LoadPlan<'a> =
 pub(crate) fn run(opts: RunOptions) -> Result<(), StartError> {
     crate::log::init();
     let path = opts.config;
-    let start = Start::from_env().map_err(|e| StartError::Runtime(std::io::Error::other(e)))?;
+    let mut start = Start::from_env().map_err(|e| StartError::Runtime(std::io::Error::other(e)))?;
+    // A process that takes over listens on the socket of the one before it.
+    if start.reload.is_none() {
+        start.reload = opts.reload_socket.map(asked::Source::Bind);
+    }
     serve(
         &mut |generation| crate::plan::load(&path, generation),
         opts.workers,
@@ -110,6 +120,7 @@ pub(crate) fn serve(
         launch,
         sockets,
         tickets,
+        reload: reload_socket,
         mut predecessor,
     } = start;
     let mut stored = Stored::from_env(&sockets);
@@ -122,6 +133,19 @@ pub(crate) fn serve(
         let mut hangup = signal(SignalKind::hangup()).map_err(StartError::Runtime)?;
         let mut terminate = signal(SignalKind::terminate()).map_err(StartError::Runtime)?;
         let mut interrupt = signal(SignalKind::interrupt()).map_err(StartError::Runtime)?;
+
+        // Nobody is accepted before this process serves: a client waits in the socket's queue.
+        let mut reload_socket = reload_socket
+            .map(|source| {
+                let at = match &source {
+                    asked::Source::Bind(path) => path.display().to_string(),
+                    asked::Source::Inherited(_) => "the inherited one".to_owned(),
+                };
+                asked::Listener::open(source).map_err(|e| {
+                    StartError::Runtime(std::io::Error::other(format!("reload socket {at}: {e}")))
+                })
+            })
+            .transpose()?;
 
         START.get_or_init(Instant::now);
         let mut generation = 1;
@@ -189,7 +213,16 @@ pub(crate) fn serve(
             workers.len(),
             current.plan.listeners.len()
         );
-        notifier.notify(&format!("READY=1\nSTATUS={}", status_line(&current, &live)));
+        // A process that took over is the main process of a service that is ready already.
+        // Its `READY=1` could reach systemd while the command that asked for the handover
+        // still runs, and would there undo the one that ended the reload: systemd would
+        // signal a reload of its own once the command exits.
+        let ready = if predecessor.is_some() {
+            ""
+        } else {
+            "READY=1\n"
+        };
+        notifier.notify(&format!("{ready}STATUS={}", status_line(&current, &live)));
         stored.sync(&workers, notifier).await;
 
         let next_rotation = (rotated + TICKET_ROTATION).max(Instant::now());
@@ -198,56 +231,10 @@ pub(crate) fn serve(
             TICKET_ROTATION,
         );
         let handed_over = loop {
-            tokio::select! {
-                _ = hangup.recv() => {
-                    generation += 1;
-                    if let Some(launch) = launch.as_ref().filter(|launch| launch.replaced()) {
-                        notifier.notify(&format!(
-                            "RELOADING=1\nMONOTONIC_USEC={}",
-                            monotonic_usec()
-                        ));
-                        let tickets = current
-                            .tls
-                            .as_ref()
-                            .map(|tls| handover::Tickets::of(&tls.tickets, rotated.elapsed()));
-                        let offered = tokio::select! {
-                            offered = hand_over(launch, &workers, tickets) => offered,
-                            // The offer is dropped, and its process killed with it.
-                            _ = terminate.recv() => break None,
-                            _ = interrupt.recv() => break None,
-                        };
-                        // The successor is the main process from this notification on, and
-                        // the byte it waits for tells it so. A successor that died meanwhile
-                        // is no main process (systemd refuses a process that is gone, and
-                        // treats one that goes as the service failing), and this process goes
-                        // on serving.
-                        let refused = match offered {
-                            Ok(successor) => {
-                                let pid = successor.pid;
-                                notifier.notify(&format!("MAINPID={pid}\nREADY=1"));
-                                match successor.promote() {
-                                    Ok(released) => break Some((pid, released)),
-                                    Err(e) => format!("it went away as it took over: {e}"),
-                                }
-                            }
-                            Err(reason) => reason,
-                        };
-                        live.hub.control().reloads_rejected += 1;
-                        let reason = format!(
-                            "cannot hand over to {}: {}",
-                            launch.path().display(),
-                            refused.replace('\n', " ")
-                        );
-                        error!("reload rejected: {reason}");
-                        notifier.notify(&format!(
-                            "READY=1\nSTATUS=reload failed, still serving generation {}: {reason}",
-                            current.plan.generation
-                        ));
-                        continue;
-                    }
-                    reload(load, &mut current, generation, &workers, notifier, &mut live).await;
-                    stored.sync(&workers, notifier).await;
-                }
+            // Who asked for the reload, when it was a client of the reload socket.
+            let asker = tokio::select! {
+                _ = hangup.recv() => None,
+                asker = next_asker(&mut reload_socket) => Some(asker),
                 _ = rotate.tick() => {
                     rotated = Instant::now();
                     if let Some(tls) = &current.tls {
@@ -261,21 +248,26 @@ pub(crate) fn serve(
                         log_bind_failures(&publish(&workers, next.clone()).await);
                         current = next;
                     }
+                    continue;
                 }
                 found = live.discovery.recv() => {
                     discovered(found, &mut current, &workers, &mut live.registry).await;
                     crate::discover::publish(&live.registry, &live.hub);
                     notifier.notify(&format!("STATUS={}", status_line(&current, &live)));
+                    continue;
                 }
-                event = live.acme.recv() => match event {
-                    acme::Event::Issued => {
-                        if let Some(next) = reload_certificates(&current) {
-                            let next = Arc::new(next);
-                            log_bind_failures(&publish(&workers, next.clone()).await);
-                            current = next;
+                event = live.acme.recv() => {
+                    match event {
+                        acme::Event::Issued => {
+                            if let Some(next) = reload_certificates(&current) {
+                                let next = Arc::new(next);
+                                log_bind_failures(&publish(&workers, next.clone()).await);
+                                current = next;
+                            }
                         }
                     }
-                },
+                    continue;
+                }
                 () = released(&mut predecessor) => {
                     predecessor = None;
                     log_bind_failures(&release(&workers, Hold::Nothing).await);
@@ -287,11 +279,87 @@ pub(crate) fn serve(
                         );
                     }
                     stored.sync(&workers, notifier).await;
+                    continue;
                 }
                 _ = terminate.recv() => break None,
                 _ = interrupt.recv() => break None,
+            };
+
+            generation += 1;
+            let outcome = match launch.as_ref().filter(|launch| launch.replaced()) {
+                None => {
+                    let outcome = reload(
+                        load,
+                        &mut current,
+                        generation,
+                        &workers,
+                        notifier,
+                        &mut live,
+                    )
+                    .await;
+                    stored.sync(&workers, notifier).await;
+                    outcome
+                }
+                Some(launch) => {
+                    notifier.notify(&format!("RELOADING=1\nMONOTONIC_USEC={}", monotonic_usec()));
+                    let tickets = current
+                        .tls
+                        .as_ref()
+                        .map(|tls| handover::Tickets::of(&tls.tickets, rotated.elapsed()));
+                    let offer = hand_over(launch, &workers, reload_socket.as_ref(), tickets);
+                    let offered = tokio::select! {
+                        offered = offer => Some(offered),
+                        // The offer is dropped, and its process killed with it.
+                        _ = terminate.recv() => None,
+                        _ = interrupt.recv() => None,
+                    };
+                    let Some(offered) = offered else {
+                        if let Some(asker) = asker {
+                            let stopping = kept(&current, "the process is stopping");
+                            asker.answer(&Err(stopping)).await;
+                        }
+                        break None;
+                    };
+                    // The successor is the main process from this notification on, and the
+                    // byte it waits for tells it so. A successor that died meanwhile is no
+                    // main process (systemd refuses a process that is gone, and treats one
+                    // that goes as the service failing), and this process goes on serving.
+                    let refused = match offered {
+                        Ok(successor) => {
+                            let pid = successor.pid;
+                            notifier.notify(&format!("MAINPID={pid}\nREADY=1"));
+                            match successor.promote() {
+                                Ok(released) => {
+                                    if let Some(asker) = asker {
+                                        let status = format!("handed over to process {pid}");
+                                        asker.answer(&Ok(status)).await;
+                                    }
+                                    break Some((pid, released));
+                                }
+                                Err(e) => format!("it went away as it took over: {e}"),
+                            }
+                        }
+                        Err(reason) => reason,
+                    };
+                    live.hub.control().reloads_rejected += 1;
+                    let cause = format!(
+                        "cannot hand over to {}: {}",
+                        launch.path().display(),
+                        refused.replace('\n', " ")
+                    );
+                    error!("reload rejected: {cause}");
+                    let reason = kept(&current, &cause);
+                    notifier.notify(&format!("READY=1\nSTATUS=reload failed, {reason}"));
+                    Err(reason)
+                }
+            };
+            if let Some(asker) = asker {
+                asker.answer(&outcome).await;
             }
         };
+        // A process that handed over accepts nobody: who waits in the socket's queue is the
+        // successor's to answer.
+        drop(reload_socket);
         let grace = current.plan.server.shutdown;
         match handed_over {
             None => shutdown(workers, grace, notifier),
@@ -377,15 +445,45 @@ async fn released(predecessor: &mut Option<handover::Predecessor>) {
     }
 }
 
-/// Starts the program at `launch` with every core's listening sockets and waits until it is
-/// ready to serve them.
+/// The next client of the reload socket that asks for a reload. Pending forever without such
+/// a socket.
+async fn next_asker(socket: &mut Option<asked::Listener>) -> asked::Asker {
+    match socket {
+        Some(socket) => socket.next().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Why a reload changed nothing, as the status line, the log and the client that asked say
+/// it.
+fn kept(current: &Generation, reason: &str) -> String {
+    format!(
+        "still serving generation {}: {reason}",
+        current.plan.generation
+    )
+}
+
+/// Starts the program at `launch` with every core's listening sockets and the reload socket,
+/// and waits until it is ready to serve them.
 async fn hand_over(
     launch: &handover::Launch,
     workers: &[Worker],
+    reload_socket: Option<&asked::Listener>,
     tickets: Option<handover::Tickets>,
 ) -> Result<handover::Successor, String> {
+    let reload_socket = reload_socket
+        .map(asked::Listener::share)
+        .transpose()
+        .map_err(|e| format!("the reload socket: {e}"))?;
     let sockets = sockets(workers).await;
-    handover::offer(launch, sockets, tickets, handover::READY_TIMEOUT).await
+    handover::offer(
+        launch,
+        sockets,
+        reload_socket,
+        tickets,
+        handover::READY_TIMEOUT,
+    )
+    .await
 }
 
 /// The end of a process that handed over: every core drains, without a word to systemd, whose
@@ -522,6 +620,9 @@ async fn release(workers: &[Worker], hold: Hold) -> Vec<BindFailure> {
     collect(pending).await
 }
 
+/// Reloads the config. `Ok` is the status line of the generation that serves now, with what
+/// it serves without (a listener that cannot be bound, an access log that cannot be opened);
+/// `Err` says why the running generation was kept.
 async fn reload(
     load: &mut LoadPlan<'_>,
     current: &mut Arc<Generation>,
@@ -529,9 +630,9 @@ async fn reload(
     workers: &[Worker],
     notifier: &Notifier,
     live: &mut Live,
-) {
+) -> Result<String, String> {
     notifier.notify(&format!("RELOADING=1\nMONOTONIC_USEC={}", monotonic_usec()));
-    let status = match rebuild(load, Some(current), generation, live) {
+    let outcome = match rebuild(load, Some(current), generation, live) {
         Ok((next, warnings, problems)) => {
             report(&warnings, &problems);
             let next = Arc::new(next);
@@ -560,7 +661,7 @@ async fn reload(
                     f.error
                 ));
             }
-            status
+            Ok(status)
         }
         Err(diagnostics) => {
             live.hub.control().reloads_rejected += 1;
@@ -572,13 +673,15 @@ async fn reload(
                 .find(|d| d.is_error())
                 .or(diagnostics.first());
             let reason = first.map_or_else(String::new, |d| d.to_string().replace('\n', " "));
-            format!(
-                "reload failed, still serving generation {}: {reason}",
-                current.plan.generation
-            )
+            Err(kept(current, &reason))
         }
     };
+    let status = match &outcome {
+        Ok(status) => status.clone(),
+        Err(reason) => format!("reload failed, {reason}"),
+    };
     notifier.notify(&format!("READY=1\nSTATUS={status}"));
+    outcome
 }
 
 /// What a generation was built with although part of it failed: certificates kept from the
@@ -1204,17 +1307,18 @@ mod tests {
     fn lifecycle_under_signals() {
         const RELOADS: u64 = 100;
         let _signals = disruptive_section();
-        let (_dir, path, notifications) = listen_notify();
+        let (dir, path, notifications) = listen_notify();
+        let reload_socket = dir.path().join("reload");
         let (a, b) = (free_addr(), free_addr());
-        // Generations up to RELOADS listen on a and b; later ones on b alone. Generation
-        // RELOADS + 2 fails to compile.
+        // Generations up to RELOADS listen on a and b; later ones on b alone. Generations
+        // RELOADS + 2 and RELOADS + 4 fail to compile.
         let attempts = Arc::new(Mutex::new(Vec::new()));
         let control = std::thread::spawn({
-            let attempts = attempts.clone();
+            let (attempts, reload_socket) = (attempts.clone(), reload_socket.clone());
             move || {
                 let mut load = |generation: u64| {
                     attempts.lock().unwrap().push(generation);
-                    if generation == RELOADS + 2 {
+                    if generation == RELOADS + 2 || generation == RELOADS + 4 {
                         return Err(vec![Diagnostic::error(None, "/sites/0", "broken")]);
                     }
                     let addrs: &[_] = if generation <= RELOADS { &[a, b] } else { &[b] };
@@ -1224,7 +1328,10 @@ mod tests {
                     &mut load,
                     Some(2),
                     &Notifier::to_path(path),
-                    Start::default(),
+                    Start {
+                        reload: Some(asked::Source::Bind(reload_socket)),
+                        ..Start::default()
+                    },
                 )
             }
         });
@@ -1303,6 +1410,37 @@ mod tests {
         );
         assert_eq!(get(&mut connect(b)).unwrap(), RELOADS + 1);
 
+        let ask = || asked::ask(&reload_socket, Duration::from_secs(10));
+        assert_eq!(
+            ask(),
+            Ok(format!("serving generation {}", RELOADS + 3)),
+            "who asks on the reload socket is told the status of the generation that serves"
+        );
+        assert!(recv(&notifications).starts_with("RELOADING=1"));
+        assert_eq!(
+            recv(&notifications),
+            format!("READY=1\nSTATUS=serving generation {}", RELOADS + 3),
+            "and systemd is told as for a SIGHUP"
+        );
+        assert_eq!(get(&mut connect(b)).unwrap(), RELOADS + 3);
+        assert_eq!(
+            ask(),
+            Err(crate::ReloadError::Failed(format!(
+                "still serving generation {}: /sites/0: broken",
+                RELOADS + 3
+            ))),
+            "or why the one before still does"
+        );
+        assert!(recv(&notifications).starts_with("RELOADING=1"));
+        assert_eq!(
+            recv(&notifications),
+            format!(
+                "READY=1\nSTATUS=reload failed, still serving generation {}: /sites/0: broken",
+                RELOADS + 3
+            )
+        );
+        assert_eq!(get(&mut connect(b)).unwrap(), RELOADS + 3);
+
         stop.store(true, Ordering::Relaxed);
         for hammer in hammers {
             hammer.join().expect("a hammering client saw an error");
@@ -1310,11 +1448,11 @@ mod tests {
         println!(
             "{} keep-alive requests on 4 connections across {} reloads, 0 errors",
             hammered.load(Ordering::Relaxed),
-            RELOADS + 1
+            RELOADS + 3
         );
 
         let mut idle = connect(b);
-        assert_eq!(get(&mut idle).unwrap(), RELOADS + 1);
+        assert_eq!(get(&mut idle).unwrap(), RELOADS + 3);
         signal(libc::SIGTERM);
         assert_eq!(recv(&notifications), "STOPPING=1");
         control.join().unwrap().unwrap();
@@ -1330,7 +1468,7 @@ mod tests {
         );
         assert_eq!(
             *attempts.lock().unwrap(),
-            (1..=RELOADS + 2).collect::<Vec<_>>()
+            (1..=RELOADS + 4).collect::<Vec<_>>()
         );
     }
 }

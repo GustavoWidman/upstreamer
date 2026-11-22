@@ -27,6 +27,8 @@ pub struct Proxy {
     /// The notification that said the proxy was ready.
     pub ready: String,
     config: PathBuf,
+    /// The socket the proxy is asked to reload on (`upstreamer reload --reload-socket`).
+    pub reload_socket: PathBuf,
     notify: UnixDatagram,
     _port: Reserved,
     _dir: tempfile::TempDir,
@@ -56,6 +58,7 @@ impl Proxy {
         let addr = port.addr;
         let config = dir.path().join("config.json");
         std::fs::write(&config, document(addr, sites, top).to_string()).unwrap();
+        let reload_socket = dir.path().join("reload");
         let notify_path = dir.path().join("notify");
         let notify = UnixDatagram::bind(&notify_path).unwrap();
         notify
@@ -74,6 +77,8 @@ impl Proxy {
             .args(words)
             .arg("run")
             .arg(&config)
+            .arg("--reload-socket")
+            .arg(&reload_socket)
             .env("NOTIFY_SOCKET", &notify_path)
             .stdin(Stdio::null())
             .process_group(0)
@@ -97,6 +102,7 @@ impl Proxy {
             addr,
             ready,
             config,
+            reload_socket,
             notify,
             _port: port,
             _dir: dir,
