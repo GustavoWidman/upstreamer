@@ -11,6 +11,10 @@
 #   WebSocket, a config switch that reloads under load, and the unit's sandbox.
 # - vm-heimdall: heimdall's virtual host (its NixOS module's routes) over a fixture web build and
 #   a stub API.
+# - vm-upgrade: a switch to another package under h1, h2 and h3 load (the new program takes the
+#   sockets over: nothing refused, no request failed, the unit active with a new main process),
+#   a stop during the handover, a config-only switch, a unit change, and a package that cannot
+#   run.
 { self, ... }:
 {
   perSystem =
@@ -29,6 +33,7 @@
         vm-acme-inprocess = test ./acme-inprocess.nix;
         vm-proxy = test ./proxy.nix;
         vm-heimdall = test ./heimdall.nix;
+        vm-upgrade = test ./upgrade.nix;
       };
     };
 }
