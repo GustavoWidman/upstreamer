@@ -844,9 +844,10 @@ impl RequestHead {
 
     /// `stripPrefix`: cuts a literal prefix at a segment boundary from the clean path (what is
     /// left starts with `/`, or is `/`). The raw target is cut too when its bytes start with the
-    /// same prefix at a boundary, so the forwarded target stays byte-identical past the prefix;
-    /// otherwise the target is marked rebuilt. `false` (and no change) when the path does not
-    /// start with the prefix.
+    /// same prefix at a boundary and what is left of them cleans to the path that is left, so
+    /// the forwarded target stays byte-identical past the prefix and names the path the routes
+    /// saw; otherwise the target is marked rebuilt. `false` (and no change) when the path does
+    /// not start with the prefix.
     pub fn strip_prefix(&mut self, prefix: &[u8]) -> bool {
         let prefix = prefix.strip_suffix(b"/").unwrap_or(prefix);
         if prefix.is_empty() {
@@ -859,9 +860,17 @@ impl RequestHead {
         }
         if self.target == Target::Original {
             let raw = self.raw_target.get(&self.fields.buf);
-            match strip_prefix_ignore_case(raw, prefix) {
-                Some([b'/', ..]) => self.raw_target.start += prefix.len() as u32,
-                _ => self.target = Target::Rebuilt,
+            // `/a/../a/x` cleans to `/a/x`, but its bytes past `/a` are `/../a/x`: an origin
+            // would read another path than `/x`, or none.
+            let keep = match strip_prefix_ignore_case(raw, prefix) {
+                Some(rest @ [b'/', ..]) => {
+                    cleans_to(split_query(rest).0, self.path.get(&self.fields.buf))
+                }
+                _ => false,
+            };
+            match keep {
+                true => self.raw_target.start += prefix.len() as u32,
+                false => self.target = Target::Rebuilt,
             }
         }
         true
@@ -1009,6 +1018,18 @@ impl ResponseHead {
 }
 
 /// Path prefixes compare ASCII case-insensitively, like the `path` matcher that selects them.
+/// Whether the raw path `raw` cleans to `clean`. Allocation-free once the thread's scratch
+/// buffer has grown to the longest path seen.
+fn cleans_to(raw: &[u8], clean: &[u8]) -> bool {
+    thread_local! {
+        static SCRATCH: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    SCRATCH.with_borrow_mut(|scratch| {
+        scratch.clear();
+        clean_path(raw, scratch).is_some_and(|span| span.get(scratch) == clean)
+    })
+}
+
 fn strip_prefix_ignore_case<'a>(s: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
     (s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix))
         .then(|| &s[prefix.len()..])
@@ -1221,6 +1242,35 @@ mod tests {
             Target::Rebuilt,
             "raw bytes differ from the decoded prefix"
         );
+    }
+
+    #[test]
+    fn strip_prefix_forwards_the_path_the_routes_saw() {
+        for (raw, path, upstream) in [
+            ("/dir/../dir/..QQYQlrtat", "/..QQYQlrtat", "/..QQYQlrtat"),
+            ("/dir/../dir/x?q=1", "/x", "/x?q=1"),
+            ("/dir/%2e%2e/dir/x", "/x", "/x"),
+        ] {
+            let mut h = head("GET", raw, "a");
+            assert!(h.strip_prefix(b"/dir"), "{raw}");
+            assert_eq!(h.path().as_bytes(), path.as_bytes(), "{raw}");
+            assert_eq!(h.target(), Target::Rebuilt, "{raw}");
+            let mut out = Vec::new();
+            h.write_upstream_target(&mut out);
+            assert_eq!(out, upstream.as_bytes(), "{raw}");
+        }
+        // Bytes past the prefix that clean to the same path are kept as the client sent them.
+        for (raw, upstream) in [
+            ("/dir//a%2Bb?sig=x%2F", "//a%2Bb?sig=x%2F"),
+            ("/dir/./x", "/./x"),
+        ] {
+            let mut h = head("GET", raw, "a");
+            assert!(h.strip_prefix(b"/dir"));
+            assert_eq!(h.target(), Target::Original, "{raw}");
+            let mut out = Vec::new();
+            h.write_upstream_target(&mut out);
+            assert_eq!(out, upstream.as_bytes(), "{raw}");
+        }
     }
 
     #[test]
