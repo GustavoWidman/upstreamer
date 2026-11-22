@@ -890,6 +890,10 @@
             cfg.configFile
             cfg.package
           ];
+          # Such a switch restarts the unit in one job, after activation, instead of stopping
+          # it before and starting it after: the gap is shorter, and systemd keeps the unit's
+          # file descriptor store through a restart job, not through a stop.
+          stopIfChanged = false;
           unitConfig.StartLimitIntervalSec = 0;
           serviceConfig = {
             Type = "notify-reload";
@@ -904,6 +908,11 @@
             AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
             CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
             LimitNOFILE = 1048576;
+            # The proxy keeps its listening sockets in systemd's file descriptor store. Through
+            # a restart or after a crash the next process is given them back, so connections
+            # made meanwhile wait in the sockets' queues instead of being refused. A stop
+            # releases the store, and the ports with it.
+            FileDescriptorStoreMax = 4096;
 
             DevicePolicy = "closed";
             LockPersonality = true;
