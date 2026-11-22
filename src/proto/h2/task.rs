@@ -186,6 +186,132 @@ mod tests {
     }
 
     #[test]
+    fn work_that_runs_and_drops_other_work_shares_the_free_list() {
+        let done = Cell::new(0);
+        let mut cx = Context::from_waker(Waker::noop());
+        drop(Task::new(work(&done, [0; 512], 0)));
+        let mut outer = Task::new(async {
+            let mut inner = Task::new(work(&done, [1; 512], 1));
+            assert!(
+                inner
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            drop(Task::new(work(&done, [0; 512], 0)));
+            std::future::pending::<()>().await;
+            drop(inner);
+        });
+        assert!(outer.poll(&mut cx).is_pending());
+        drop(outer);
+        let before = thread_allocations();
+        let mut two = [
+            Task::new(work(&done, [0; 512], 0)),
+            Task::new(work(&done, [0; 512], 0)),
+        ];
+        for task in &mut two {
+            assert!(task.poll(&mut cx).is_ready());
+        }
+        assert_eq!(
+            thread_allocations(),
+            before,
+            "the inner work's block and the one it ran came back"
+        );
+        assert_eq!(done.get(), 2, "the inner work was dropped unfinished");
+    }
+
+    #[test]
+    fn blocks_past_the_kept_number_go_back_to_the_allocator() {
+        let done = Cell::new(0);
+        let burst: Vec<_> = (0..=KEEP)
+            .map(|_| Task::new(work(&done, [0; 512], 1)))
+            .collect();
+        drop(burst);
+        let mut kept = Vec::with_capacity(KEEP);
+        let before = thread_allocations();
+        kept.extend((0..KEEP).map(|_| Task::new(work(&done, [0; 512], 1))));
+        assert_eq!(thread_allocations(), before, "{KEEP} blocks were kept");
+        let past = Task::new(work(&done, [0; 512], 1));
+        assert_eq!(thread_allocations(), before + 1, "and no more");
+        drop((kept, past));
+        assert_eq!(done.get(), 0);
+    }
+
+    #[test]
+    fn work_that_outlives_its_threads_free_list_is_dropped_and_freed() {
+        thread_local! {
+            static HELD: RefCell<Vec<Task<'static>>> = const { RefCell::new(Vec::new()) };
+        }
+        let dropped = std::sync::Arc::new(());
+        let pending = |held: std::sync::Arc<()>| async move {
+            std::future::pending::<()>().await;
+            drop(held);
+        };
+        for held_first in [true, false] {
+            let dropped = dropped.clone();
+            std::thread::spawn(move || {
+                if held_first {
+                    HELD.with(|_| ());
+                }
+                let mut task = Task::new(pending(dropped));
+                assert!(
+                    task.poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
+                HELD.with(|held| held.borrow_mut().push(task));
+            })
+            .join()
+            .unwrap();
+        }
+        assert_eq!(
+            std::sync::Arc::strong_count(&dropped),
+            1,
+            "both threads dropped their work on exit"
+        );
+    }
+
+    #[test]
+    fn work_that_panicked_is_dropped_in_place() {
+        let held = Rc::new(());
+        let mut task = Task::new({
+            let held = held.clone();
+            async move {
+                let _held = held;
+                std::future::ready(()).await;
+                panic!("work failed");
+            }
+        });
+        let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            task.poll(&mut Context::from_waker(Waker::noop()))
+        }));
+        assert!(polled.is_err());
+        assert_eq!(
+            Rc::strong_count(&held),
+            1,
+            "unwinding dropped the work's state"
+        );
+        drop(task);
+    }
+
+    #[test]
+    fn over_aligned_work_gets_aligned_blocks() {
+        #[repr(align(256))]
+        struct Aligned([u8; 256]);
+        let done = Cell::new(0);
+        let mut cx = Context::from_waker(Waker::noop());
+        drop(Task::new(work(&done, [0; 512], 0)));
+        for _ in 0..3 {
+            let mut task = Task::new(async {
+                let state = Aligned([1; 256]);
+                std::future::ready(()).await;
+                assert_eq!((&raw const state).addr() % 256, 0);
+                done.set(done.get() + u32::from(state.0[255]));
+            });
+            assert!(task.poll(&mut cx).is_ready());
+        }
+        assert_eq!(done.get(), 3);
+    }
+
+    #[test]
     fn work_of_another_size_gets_its_own_block() {
         let done = Cell::new(0);
         let mut cx = Context::from_waker(Waker::noop());

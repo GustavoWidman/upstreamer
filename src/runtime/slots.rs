@@ -162,6 +162,108 @@ mod tests {
     }
 
     #[test]
+    fn a_future_dropped_before_its_first_poll_releases_what_it_holds() {
+        let slots = Slots::default();
+        let held = Rc::new(());
+        let running = slots.run({
+            let held = held.clone();
+            async move { drop(held) }
+        });
+        assert_eq!(Rc::strong_count(&held), 2);
+        drop(running);
+        assert_eq!(Rc::strong_count(&held), 1);
+    }
+
+    #[test]
+    fn a_future_that_runs_others_in_the_same_slots_gives_every_block_back() {
+        let slots = Slots::default();
+        block_on(async {
+            slots.run(request(0, [0; 512])).await;
+            let outer = slots.run(async {
+                let a = slots.run(request(1, [0; 512]));
+                let b = slots.run(request(2, [0; 512]));
+                tokio::task::yield_now().await;
+                a.await + b.await
+            });
+            assert_eq!(outer.await, 1027);
+            let before = thread_allocations();
+            let a = slots.run(request(3, [0; 512]));
+            let b = slots.run(request(4, [0; 512]));
+            assert_eq!(a.await + b.await, 1031);
+            assert_eq!(
+                thread_allocations(),
+                before,
+                "the inner runs' blocks were kept"
+            );
+        });
+    }
+
+    #[test]
+    fn blocks_past_the_kept_number_go_back_to_the_allocator() {
+        let slots = Slots::default();
+        let burst: Vec<_> = (0..=KEEP)
+            .map(|n| slots.run(request(n as u64, [0; 512])))
+            .collect();
+        drop(burst);
+        let mut kept = Vec::with_capacity(KEEP);
+        let before = thread_allocations();
+        kept.extend((0..KEEP).map(|n| slots.run(request(n as u64, [0; 512]))));
+        assert_eq!(thread_allocations(), before, "{KEEP} blocks were kept");
+        let past = slots.run(request(0, [0; 512]));
+        assert_eq!(thread_allocations(), before + 1, "and no more");
+        drop((kept, past));
+    }
+
+    #[test]
+    fn a_future_of_another_layout_runs_in_a_block_of_its_own() {
+        #[repr(align(256))]
+        struct Aligned([u8; 256]);
+        let slots = Slots::default();
+        block_on(async {
+            assert_eq!(slots.run(request(1, [0; 512])).await, 513);
+            let aligned = slots.run(async {
+                let state = Aligned([7; 256]);
+                tokio::task::yield_now().await;
+                assert_eq!((&raw const state).addr() % 256, 0);
+                state.0[255]
+            });
+            assert_eq!(aligned.await, 7);
+            let before = thread_allocations();
+            assert_eq!(slots.run(request(2, [0; 512])).await, 514);
+            assert_eq!(
+                thread_allocations(),
+                before,
+                "the kept block is still there"
+            );
+        });
+    }
+
+    #[test]
+    fn a_future_that_panicked_is_dropped_in_place() {
+        let slots = Slots::default();
+        let held = Rc::new(());
+        let mut running = Box::pin(slots.run({
+            let held = held.clone();
+            async move {
+                let _held = held;
+                std::future::ready(()).await;
+                panic!("request failed");
+            }
+        }));
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            running.as_mut().poll(&mut cx)
+        }));
+        assert!(polled.is_err());
+        assert_eq!(
+            Rc::strong_count(&held),
+            1,
+            "unwinding dropped the future's state"
+        );
+        drop(running);
+    }
+
+    #[test]
     fn concurrent_runs_get_distinct_blocks_and_all_come_back() {
         let slots = Slots::default();
         block_on(async {
