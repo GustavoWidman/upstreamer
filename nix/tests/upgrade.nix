@@ -128,6 +128,11 @@ in
       { nodes, ... }:
       {
         virtualisation.cores = 2;
+        # No firewall, so that this machine's kernel tracks no connection. A closed connection
+        # stays in the tracking table for two minutes, the probes close enough of them to fill
+        # it (7680 entries with this much memory), and the kernel then drops the machine's own
+        # packets: a connect times out and a QUIC send fails for packets that never left.
+        networking.firewall.enable = false;
         networking.hosts.${nodes.server.networking.primaryIPAddress} = [ host ];
         environment.systemPackages = [
           pkgs.curl
@@ -302,6 +307,11 @@ in
           for name, counts in seen.items():
               print(f"{tag}: {name}: {counts}")
           print(f"{tag}: unit states seen: {states}")
+          # A machine that dropped packets itself would pass for a proxy that left them
+          # unanswered.
+          for machine in [client, server]:
+              full = machine.succeed("dmesg | grep -c 'nf_conntrack: table full' || true")
+              assert full.strip() == "0", f"{machine.name} dropped packets: its connection table was full"
           return seen, states
 
       def assert_nothing_failed(seen, states, but=()):
