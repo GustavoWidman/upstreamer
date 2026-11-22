@@ -686,7 +686,7 @@ pub(crate) const CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
 
 /// Codec entry points for the fuzz targets and benchmarks (`internals` feature). The `check_*`
 /// functions panic when the codec breaks one of its own invariants on the given input.
-#[cfg(feature = "internals")]
+#[cfg(any(test, feature = "internals"))]
 pub mod harness {
     use super::*;
     use crate::plan::ServerParams;
@@ -892,6 +892,84 @@ pub mod harness {
                 assert_eq!(extra2.keep_alive, extra.keep_alive);
             }
             assert!(end_to_end(&self.head.fields).eq(end_to_end(&self.again.fields)));
+        }
+    }
+
+    /// Checks what a server wrote on a connection (`output`) against what the client sent
+    /// (`input`): responses, each a head that parses and a body whole by its framing (the
+    /// last may be cut, by a failed upstream or a closed connection), in order, at most one
+    /// for each request sent and one more for bytes that were none, nothing after a
+    /// response that closes the connection, and nothing to read as a response after a
+    /// `101`.
+    pub(crate) fn check_conversation(input: &[u8], output: &[u8]) {
+        let limits = Limits {
+            max_head_bytes: u32::MAX,
+            max_header_fields: FIELD_SLOTS as u16,
+        };
+        let mut methods = Vec::new();
+        let mut head = RequestHead::new();
+        let mut rest = input;
+        while let Ok(Parsed::Complete {
+            head_len,
+            framing,
+            extra,
+        }) = parse_request(rest, &limits, &mut head)
+        {
+            methods.push(head.method);
+            rest = &rest[head_len..];
+            let body = match framing {
+                Framing::Length(n) => usize::try_from(n).ok().filter(|&n| n <= rest.len()),
+                Framing::Chunked => scan_chunked(rest),
+                Framing::None | Framing::UntilClose => Some(0),
+            };
+            match body {
+                Some(n) if !extra.upgrade => rest = &rest[n..],
+                _ => break,
+            }
+        }
+
+        let mut out = output;
+        let mut answered = 0;
+        let mut response = ResponseHead::new(Status::OK);
+        while !out.is_empty() {
+            let method = methods.get(answered).copied().unwrap_or(Method::Get);
+            let parsed = parse_response(out, &limits, method, &mut response);
+            let Ok(Parsed::Complete {
+                head_len,
+                framing,
+                extra,
+            }) = parsed
+            else {
+                panic!("{parsed:?}: {:?}", String::from_utf8_lossy(out));
+            };
+            out = &out[head_len..];
+            let status = response.status;
+            if status == Status::SWITCHING_PROTOCOLS {
+                return;
+            }
+            if status.code() < 200 {
+                continue;
+            }
+            answered += 1;
+            assert!(
+                answered <= methods.len() + 1,
+                "{answered} responses to {methods:?}"
+            );
+            let body = match framing {
+                Framing::Length(n) => usize::try_from(n).ok().filter(|&n| n <= out.len()),
+                Framing::Chunked => scan_chunked(out),
+                Framing::None => Some(0),
+                Framing::UntilClose => return,
+            };
+            let Some(body) = body else {
+                return;
+            };
+            out = &out[body..];
+            assert!(
+                extra.keep_alive || out.is_empty(),
+                "bytes after a response that closes: {:?}",
+                String::from_utf8_lossy(out)
+            );
         }
     }
 
