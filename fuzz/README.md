@@ -23,6 +23,7 @@ The targets call into the crate through its `internals` feature (`upstreamer::co
 | `route` | a request through the fleet's configs and `tests/fixtures/fuzz/route.json` | a clean path, header fields without control bytes after every template edit, an upstream target that names the routed path, an upstream head that parses back whole, keys that hash consistently |
 | `acme` | a CA's response, read to close | bodies framed by length or by chunks read back the same, every URL the client would follow parses back to itself |
 | `kube` | an API server's list or watch response, cut into reads of any size | one byte at a time, any size or all at once give the same lines, endpoints and failure |
+| `tls` | a client's bytes after the TLS handshake: raw bytes, records sealed with its keys (any content type, length and padding), and sealed records with a byte changed, for each cipher suite | only the records the client sealed, unchanged, open, and each yields the bytes sealed in it |
 
 `h1_conn` and `h2_conn` serve one connection per input with the real drivers on one end of a
 Unix socket pair, behind routes that answer from memory, from files, with compression, by
@@ -30,7 +31,8 @@ redirect and error route, and through an origin running in the same process. Tok
 is paused, so every timeout passes at once, and a connection still open after an hour of
 that clock fails the input.
 
-`http.dict` and `h2.dict` are libFuzzer dictionaries for the HTTP/1.1 and HTTP/2 targets.
+`http.dict`, `h2.dict` and `tls.dict` are libFuzzer dictionaries for the HTTP/1.1, HTTP/2
+and TLS record targets.
 
 ## Running
 
