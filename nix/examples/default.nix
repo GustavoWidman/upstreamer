@@ -76,6 +76,8 @@ let
         # another config does to the unit.
         program = "${c.environment.etc."upstreamer/upstreamer".source}";
         reloadTriggers = sorted (map toString u.reloadTriggers);
+        inherit (u) stopIfChanged;
+        storesSockets = u.serviceConfig.FileDescriptorStoreMax > 0;
         SupplementaryGroups = sorted u.serviceConfig.SupplementaryGroups;
         wants = sorted u.wants;
       };
@@ -140,6 +142,8 @@ let
       "${host.services.upstreamer.configFile}"
       "${host.services.upstreamer.package}"
     ];
+    stopIfChanged = false;
+    storesSockets = true;
     # The default 10s drain, plus 5s to exit.
     TimeoutStopSec = timeoutStopSec;
     SupplementaryGroups = groups;
