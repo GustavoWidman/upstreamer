@@ -59,7 +59,7 @@ services.upstreamer.virtualHosts."app.example.com" = {
 };
 ```
 
-a switch that changes the config or the package reloads the unit and nothing is dropped: the proxy reads the new config, or hands its sockets to the new package's binary, which is why the unit starts it from `/etc/upstreamer/upstreamer`. a switch that changes the unit itself restarts it, with the listening sockets parked in systemd's file descriptor store, so connections made in between wait instead of being refused. [the config reference](docs/config.md#upgrading-without-a-restart-linux) says what an upgrade keeps and what it does not.
+a switch that changes the config or the package reloads the unit and nothing is dropped: the proxy reads the new config, or hands its sockets to the new package's binary, which is why the unit starts it from `/etc/upstreamer/upstreamer`. the reload is `upstreamer reload`, which waits for the proxy and fails when the reload did, so a switch the proxy did not take fails instead of looking fine, and the old proxy keeps serving. a switch that changes the unit itself restarts it, with the listening sockets parked in systemd's file descriptor store, so connections made in between wait instead of being refused. [the config reference](docs/config.md#upgrading-without-a-restart-linux) says what an upgrade keeps and what it does not.
 
 `metrics.enable` adds a site on `127.0.0.1:9100`. its port reaches `check` but not the firewall, because metrics are for a scraper on the same machine until you say `metrics.openFirewall`. `kubernetes.enable` picks the package built with kubernetes support and `kubernetes.kubeconfig` hands the kubeconfig to the unit as a systemd credential. `trustedProxies` takes the cidrs of whatever sits in front of you, or `cloudflare`.
 
@@ -79,6 +79,10 @@ upstreamer check --config upstreamer.toml
 
 # serve it, and `kill -HUP` to reload
 upstreamer run --config upstreamer.toml
+
+# or reload it and learn whether that worked
+upstreamer run --config upstreamer.toml --reload-socket /run/upstreamer.sock
+upstreamer reload --reload-socket /run/upstreamer.sock
 ```
 
 ```toml
@@ -98,7 +102,8 @@ routes = [{ proxy = "http://127.0.0.1:3000" }]
 ```sh
 upstreamer check <config> [--expect-tcp 80,443] [--expect-udp 443]
 upstreamer check --fragment <fragment>
-upstreamer run <config> [--workers N]
+upstreamer run <config> [--workers N] [--reload-socket <path>]
+upstreamer reload --reload-socket <path>
 upstreamer example [name | --list]
 upstreamer convert <file>
 ```

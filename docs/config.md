@@ -142,7 +142,7 @@ site's HTTPS redirect may not share a host either: `check` names both sites.
 A certificate file that is missing, unreadable or that does not match its key does not fail the
 config. The site's names keep the certificate they had, or get a self-signed one for each name,
 until a reload finds a usable pair. A new host therefore never stops the others from serving,
-and `SIGHUP` re-reads every pair, so replacing a file and reloading renews a certificate.
+and a reload re-reads every pair, so replacing a file and reloading renews a certificate.
 
 ### `accessLog`
 
@@ -152,7 +152,7 @@ upgraded connection once it closes: `ts` (UTC, RFC 3339, milliseconds), `remote_
 `referer`, `status`, `bytes`, `duration` (seconds), `upstream` (the `host:port` of the last
 `proxy` step that ran, or `null`). Sites naming one path share one file. Each worker buffers
 lines and appends them in batches, at the latest a second after the request ends, so a full
-disk drops lines (counted in the journal) and never slows a request. `SIGHUP` reopens the files,
+disk drops lines (counted in the journal) and never slows a request. A reload reopens the files,
 which is how log rotation starts a new one.
 
 ## Steps and matchers
@@ -516,7 +516,7 @@ available as `{peer_host}`. See [trusted-proxies.md](trusted-proxies.md).
 ## Certificates
 
 A TLS site's certificate comes from files (`tls.cert` and `tls.key`), from a tool that writes
-files (certbot, lego, the NixOS ACME module: `SIGHUP` re-reads them), or from upstreamer itself:
+files (certbot, lego, the NixOS ACME module: a reload re-reads them), or from upstreamer itself:
 
 ```toml
 acme.stateDirectory = "/var/lib/upstreamer"
@@ -571,7 +571,8 @@ anywhere else.
 ## Commands
 
 ```text
-upstreamer run [--config] <file> [--workers N]
+upstreamer run [--config] <file> [--workers N] [--reload-socket PATH]
+upstreamer reload --reload-socket PATH
 upstreamer check [--config] <file> [--expect-tcp PORT,..] [--expect-udp PORT,..]
 upstreamer check --fragment <file>
 upstreamer example [NAME | --list]
@@ -598,17 +599,57 @@ its firewall and its listeners from drifting.
 | 2 | usage error |
 | 3 | runtime failure (a port cannot be bound, a file cannot be read) |
 
+`reload` exits 0 once the running proxy has reloaded, 1 when it tried and kept what it was
+serving, and 3 when it could not be asked ([below](#reloading-and-knowing-that-it-worked)).
+
 ## Running it
 
-`upstreamer run` serves until SIGTERM or SIGINT, then drains for `timeouts.shutdown`. SIGHUP
-reloads: the config and every certificate file are read again, and a config that fails to
-compile is logged and leaves the running one in place. A request in flight finishes under the
+`upstreamer run` serves until SIGTERM or SIGINT, then drains for `timeouts.shutdown`. A reload
+reads the config and every certificate file again. A request in flight finishes under the
 config it started with, and connections are not dropped. Health, rate-limit buckets of an
 unchanged step, and metric counts continue across a reload.
 
+### Reloading, and knowing that it worked
+
+There are two ways to ask for a reload, and they do the same thing:
+
+- `SIGHUP` reloads and tells its sender nothing. What came of it is in the log and, under
+  systemd, in the unit's status.
+- `upstreamer reload --reload-socket PATH` asks the proxy that runs with the same
+  `--reload-socket PATH`, waits until the reload is done, prints the proxy's status line and
+  exits 0. When the proxy kept what it was serving, it prints why on stderr and exits 1:
+
+  ```text
+  $ upstreamer reload --reload-socket /run/upstreamer/reload
+  upstreamer: reload failed, still serving generation 4: /etc/upstreamer/config.json: key must be a string (line 1, column 3)
+  ```
+
+  It exits 3 when no proxy answers at the path, or when none answers within 75 s.
+
+The socket is a Unix socket the proxy creates for its own user alone (mode 0600); asking on it
+reloads and does nothing else, which a signal from the same user does too. A socket file left
+by a proxy that is gone is replaced at the next start.
+
+These outcomes fail a reload, and leave the running generation serving:
+
+- the config cannot be read, parsed or compiled (`upstreamer check` reports the same
+  diagnostics beforehand);
+- the program file was replaced and the new program does not take over
+  ([below](#upgrading-without-a-restart-linux)): it cannot be started, exits, rejects the
+  config, cannot sync a discovery source within 10 s, is not ready within 30 s, or is gone
+  when the proxy hands over to it.
+
+These do not. The reload succeeds, the proxy serves the new config without the part named,
+and the status line `reload` prints and the log say which:
+
+- a certificate or key file that is missing, unreadable or mismatched: its names keep the
+  certificate they had, or get a self-signed one;
+- an access log file that cannot be opened: its lines are dropped until a reload opens it;
+- a new listener whose address cannot be bound: the other listeners serve.
+
 ### Upgrading without a restart (Linux)
 
-A SIGHUP also looks at the program file: when the file at the path the proxy was started from
+A reload also looks at the program file: when the file at the path the proxy was started from
 is no longer the file it runs (another device or inode), the proxy starts that file and hands
 it the listening sockets, instead of reloading. The new process reads the config, takes the
 sockets with whatever is queued on them, and becomes the service's main process; the old one
@@ -633,10 +674,11 @@ its environment) changes only at a restart.
 
 If the new program exits, rejects the config, cannot sync a discovery source within 10 s or is
 not ready within 30 s, it is stopped before it took a connection and the reload fails like a
-reload of an invalid config: the running
-process keeps serving and the unit's status says
+reload of an invalid config: the running process keeps serving, and `upstreamer reload` and
+the unit's status say
 `reload failed, still serving generation N: cannot hand over to <path>: <reason>`. Every later
-reload tries again while the file at the path is still another one.
+reload tries again while the file at the path is still another one, so a reload for a renewed
+certificate or a rotated log fails too until the program is replaced by one that runs.
 
 The new process starts fresh, apart from the sockets and the TLS session ticket keys (a
 session of the old process resumes on the new one). What a reload keeps and an upgrade does
@@ -650,7 +692,13 @@ Two versions of the program agree on the handover through a small versioned docu
 version that cannot read the running one's document refuses it, which fails the reload as
 above; `systemctl restart` upgrades then, with the gap of a restart.
 
-On other systems than Linux, SIGHUP always reloads the config.
+`upstreamer reload` is the new program too, asking the old one. The proxy greets with the
+versions of the reload protocol it speaks and `reload` asks in the highest one both speak. When
+they share none, `reload` asks nothing and says so. Run by systemd as a unit's `ExecReload=`, it
+then exits 0, and systemd sends the SIGHUP of `Type=notify-reload` itself: the reload happens,
+and only the unit's status says whether it failed. Run by anything else, it exits 3.
+
+On other systems than Linux, a reload always reloads the config.
 
 Two upgrades in a row are fine: a process that hands over while the one before it still has
 QUIC connections passes the wait on, and the last process answers QUIC once all before it
@@ -678,9 +726,12 @@ After=network.target
 
 [Service]
 Type=notify-reload
-ExecStart=/usr/local/bin/upstreamer run --config /etc/upstreamer/config.toml
+ExecStart=/usr/local/bin/upstreamer run --config /etc/upstreamer/config.toml --reload-socket %t/upstreamer/reload
+ExecReload=/usr/local/bin/upstreamer reload --reload-socket %t/upstreamer/reload
 Restart=on-failure
 DynamicUser=yes
+RuntimeDirectory=upstreamer
+RuntimeDirectoryMode=0700
 StateDirectory=upstreamer
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
@@ -690,9 +741,24 @@ FileDescriptorStoreMax=4096
 
 Without `DynamicUser`, give the service a user that can read the config and certificates and
 write the state directory. Binding ports 80 and 443 needs `CAP_NET_BIND_SERVICE`.
-`Type=notify-reload` makes `systemctl reload` send the SIGHUP and wait for its result, for a
-config reload and for an upgrade alike; the default `NotifyAccess=main` and
+`ExecReload=` is what makes `systemctl reload upstreamer` fail when the reload did: systemd
+runs the command, the proxy tells systemd that it reloads and when it is done (`RELOADING=1`,
+`READY=1`, and `MAINPID=` when another process took over), and the command's exit status
+decides the reload job. The unit stays active either way. Everything that reloads through
+systemd gets that result: a deploy, a certificate renewal hook, logrotate's `postrotate`.
+With `Type=notify-reload` and no `ExecReload=`, systemd sends SIGHUP and waits for the same
+notifications, and a reload that failed counts as done. Keep the type with the command: it is
+what lets systemd reload a proxy the command cannot ask. systemd 259 and later run the command
+first and signal only a proxy that did not report a reload meanwhile; earlier ones signal as
+they start the command, so the proxy reloads twice, and the command's result still decides.
+The reload must fit in `TimeoutStartSec` (90 s by default), which the 30 s a new program gets
+and the 75 s the command waits do. The default `NotifyAccess=main` and
 `KillMode=control-group` are what the upgrade expects.
+
+The NixOS module's unit is this one, hardened. A switch whose reload fails therefore fails
+(`switch-to-configuration` names `upstreamer.service` among the failed units and exits
+non-zero) while the proxy that ran before serves on, and the module's certificate renewals
+fail the same way instead of leaving a renewed certificate unserved without a word.
 
 On NixOS, the module's options write this config for you: [the README](../README.md#nixos) shows
 the common ones, and `services.upstreamer.settings` takes any top-level key of this page.

@@ -97,6 +97,7 @@ command line.
 | `src/runtime/mod.rs` | cores, generations, snapshots |
 | `src/runtime/control.rs` | startup, reload, discovery and ACME publishes, shutdown, systemd notification |
 | `src/runtime/handover.rs` | replacing the running program: the document between the two processes, starting the successor, following the predecessor |
+| `src/runtime/reload.rs` | the reload socket: its protocol, the control thread's end, and the client behind `upstreamer reload` |
 | `src/access.rs` | access log line format, the files of a generation, and each core's buffered writer |
 | `src/log.rs` | logging to stderr with journald priority prefixes |
 
@@ -157,9 +158,21 @@ a reload applies to the next request of each connection, and a request in flight
 under the plan it started with. A reload whose config fails to parse or compile keeps the
 running generation.
 
+A reload is asked for by SIGHUP or on the reload socket (`src/runtime/reload.rs`), a Unix
+socket at the path of `run --reload-socket`. The control thread takes both in the same loop
+and runs the same reload; the socket's client is also told what came of it. One JSON object
+per line: the server greets with `{"versions":[1]}`, the client asks
+`{"version":1,"request":"reload"}`, and the answer is `{"result":"done","status":...}` once
+the reload is done, `{"result":"failed","reason":...}` when the running generation was kept,
+or `{"result":"refused","reason":...}` for a request the server does not act on. The greeting
+is the part every version shares, so two versions of the program find the highest protocol
+version both speak, or find that there is none before anything is asked. The control thread
+answers one client at a time and accepts the next after the reload; a client that connects
+meanwhile waits in the socket's queue.
+
 ## Replacing the running program
 
-A SIGHUP reloads the config unless the file at the path the process was started from is
+A reload reloads the config unless the file at the path the process was started from is
 another file than the one it runs (`handover::Launch::replaced`, by device and inode). Then the
 process, the predecessor, hands over to a process of that file, the successor
 (`src/runtime/handover.rs`):
@@ -167,9 +180,10 @@ process, the predecessor, hands over to a process of that file, the successor
 1. The predecessor asks every core for a second descriptor of each of its listening sockets
    and starts the file with its own arguments. The successor inherits those descriptors, the
    read end of a pipe holding a JSON document that names them (`UPSTREAMER_HANDOVER` holds
-   that pipe's number) and one end each of a `ready` pipe and a `control` pipe. The document
-   also carries the session ticket keys. It is versioned: a field may be added and is ignored
-   by a version that does not know it, and a successor refuses a version it does not know.
+   that pipe's number) and one end each of a `ready` pipe and a `control` pipe. It inherits
+   the reload socket the same way. The document also carries the session ticket keys. It is
+   versioned: a field may be added and is ignored by a version that does not know it, and a
+   successor refuses a version it does not know.
 2. The successor checks that each descriptor is the socket the document says, loads the
    config and starts its cores with every listener held (`runtime::Hold::All`): it binds
    nothing and accepts nothing. It waits until its discovery sources have synced, since the
@@ -177,11 +191,13 @@ process, the predecessor, hands over to a process of that file, the successor
    to its pipe, or `failed <reason>`.
 3. On `ready` the predecessor sends systemd `MAINPID=<successor>` with `READY=1`, writes one
    byte to the control pipe and drains (`runtime::Drain`). On a failure, an exit or 30 s
-   without a word it kills the successor, which never touched a connection, and ends the
-   reload with `READY=1` and a status that says why. A successor that is gone when the byte
-   is written leaves the predecessor serving too.
-4. On the byte the successor serves the TCP listeners on the inherited sockets and reports
-   `READY=1` itself. Its QUIC listeners stay held until the control pipe closes.
+   without a word it kills the successor, which never touched a connection, ends the
+   reload with `READY=1` and a status that says why, and answers the client that asked with
+   the same reason. A successor that is gone when the byte is written leaves the predecessor
+   serving too.
+4. On the byte the successor serves the TCP listeners on the inherited sockets, reports its
+   status, and accepts on the reload socket, whose queue holds whoever asked meanwhile. Its
+   QUIC listeners stay held until the control pipe closes.
 
 Inheriting the sockets, rather than binding new ones next to them, is what makes this exact:
 the kernel's queues of connections never close, so no connection is refused or reset whatever
@@ -198,11 +214,26 @@ the last copy, or the predecessor's exit, closes the pipe. In between, no proces
 new QUIC connection: the predecessor's endpoints answer an Initial packet with a stateless
 reset, which a client ignores, and the client's retransmission reaches the successor.
 
-Towards systemd the unit is `Type=notify-reload` with the default `NotifyAccess=main`:
+Towards systemd the unit is `Type=notify-reload` with `ExecReload=upstreamer reload` and the
+default `NotifyAccess=main`:
 
+- `systemctl reload` runs the command, which asks on the reload socket. The control thread
+  sends `RELOADING=1`, reloads, sends the `READY=1` that ends the reload, and only then
+  answers the command, whose exit status makes the reload job succeed or fail. systemd reads
+  its notification socket before it reaps a child, so by the time it sees the command exit it
+  has both notifications: it knows the reload is over and sends no SIGHUP of its own
+  (`service_enter_reload_signal` in systemd's `src/core/service.c`; systemd 259 and later).
+  A command that exits 0 without the proxy having notified, as `reload` does when the two
+  versions share no protocol version, makes systemd send the SIGHUP and wait for the same
+  two notifications.
+- A SIGHUP from anyone else runs the same reload, which systemd follows as a reload the
+  service began itself.
 - Only the main process is heard, so `MAINPID=` comes from the predecessor, in the same
   datagram as the `READY=1` that ends the reload. The successor notifies only after the byte
-  that tells it so. The predecessor says nothing afterwards, `STOPPING=1` included.
+  that tells it so, and sends its status without `READY=1`: while the command still runs,
+  systemd would take a second `READY=1` for the state of a service that never reloaded, and
+  signal the successor once the command exits. The predecessor says nothing afterwards,
+  `STOPPING=1` included.
 - systemd accepts as main process only a process of the unit's control group, and supervises
   it fully only if it is its own child. The successor is in the group by birth, and the
   predecessor starts it through a child that exits at once, so its parent is systemd.
@@ -341,8 +372,10 @@ nix flake check --no-build
 ```
 
 `tests/e2e_upgrade.rs` (Linux) replaces the program file of a running proxy under load of
-every protocol. `checks.<system>.vm-upgrade` does the same through a NixOS switch to another
-package, with systemd in charge, and prints what the clients saw.
+every protocol, and runs `upstreamer reload` against each way a reload ends.
+`checks.<system>.vm-upgrade` does the same through a NixOS switch to another package, with
+systemd in charge, prints what the clients saw, and checks that a switch whose reload fails
+fails while the running proxy serves on.
 
 `tests/check.rs` runs `check` on the example configs and on the generated fragments in
 `tests/fixtures/site/upstreamer`, where `@out@` stands for the site package's store path. It
