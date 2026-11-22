@@ -148,6 +148,7 @@ pub(crate) fn serve(
             }
             log_bind_failures(&release(&workers, Hold::Quic).await);
         }
+        let promoted = Instant::now();
         // Certificates are ordered by the main process alone: the validation requests of an
         // order reach whichever process accepts them.
         live.acme.set_plan(&current.plan);
@@ -248,6 +249,13 @@ pub(crate) fn serve(
                 () = released(&mut predecessor) => {
                     predecessor = None;
                     log_bind_failures(&release(&workers, Hold::Nothing).await);
+                    if current.plan.listeners.iter().any(|l| l.key.kind == ListenerKind::Quic) {
+                        info!(
+                            "serving QUIC: the previous process let go of the UDP sockets after \
+                             {} ms",
+                            promoted.elapsed().as_millis()
+                        );
+                    }
                 }
                 _ = terminate.recv() => break None,
                 _ = interrupt.recv() => break None,
@@ -259,7 +267,7 @@ pub(crate) fn serve(
             Some(successor) => {
                 // Discovery and certificate orders are the successor's from here on.
                 drop(live);
-                retire(workers, grace, notifier, successor);
+                retire(workers, grace, notifier, successor, &mut predecessor).await;
             }
         }
         Ok(())
@@ -294,11 +302,15 @@ async fn hand_over(
 /// and is told so, then every core drains. Idle keep-alive connections stay open for half the
 /// grace, since nothing waits for this process to exit and a request that arrives on one is
 /// then answered instead of meeting a closed connection.
-fn retire(
+///
+/// A process that hands over while its own predecessor still reads the UDP sockets passes
+/// that wait on: its successor may read them once both let go.
+async fn retire(
     workers: Vec<Worker>,
     grace: Duration,
     notifier: &Notifier,
     successor: handover::Successor,
+    predecessor: &mut Option<handover::Predecessor>,
 ) {
     let pid = successor.pid;
     info!(
@@ -314,9 +326,15 @@ fn retire(
     let drain = Drain {
         deadline: now + grace,
         idle_close: now + grace / 2,
-        released,
+        released: released.clone(),
     };
-    super::retire(workers, drain);
+    let deadline = tokio::time::Instant::from_std(drain.deadline);
+    super::start_drain(&workers, drain);
+    if let Some(predecessor) = predecessor {
+        let _ = tokio::time::timeout_at(deadline, predecessor.released()).await;
+    }
+    drop(released);
+    super::join(workers);
 }
 
 /// A descriptor of every listening socket, each core's in core order.
