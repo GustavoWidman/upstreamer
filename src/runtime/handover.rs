@@ -726,16 +726,7 @@ mod tests {
     use crate::plan::ListenerKind;
     use std::os::fd::IntoRawFd;
 
-    fn free_addr() -> SocketAddr {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-    }
-
-    fn socket(addr: SocketAddr, kind: ListenerKind) -> Inherited {
-        Inherited::identify(crate::net::listen::bind(addr, kind).unwrap()).unwrap()
-    }
+    use ListenerKind::{Http, Https, Quic};
 
     fn pipe() -> (OwnedFd, OwnedFd) {
         let (read, write) = std::io::pipe().unwrap();
@@ -766,15 +757,18 @@ mod tests {
 
     #[test]
     fn a_document_lists_each_address_once_with_its_sockets_in_core_order() {
-        let (a, b) = (free_addr(), free_addr());
-        let sockets = vec![
-            socket(a, ListenerKind::Http),
-            socket(b, ListenerKind::Https),
-            socket(b, ListenerKind::Quic),
-            socket(a, ListenerKind::Http),
-            socket(b, ListenerKind::Https),
-            socket(b, ListenerKind::Quic),
+        let first = [
+            Inherited::fresh(Http),
+            Inherited::fresh(Https),
+            Inherited::fresh(Quic),
         ];
+        let second = [
+            first[0].sibling(Http),
+            first[1].sibling(Https),
+            first[2].sibling(Quic),
+        ];
+        let sockets: Vec<Inherited> = first.into_iter().chain(second).collect();
+        let (a, b, c) = (sockets[0].addr, sockets[1].addr, sockets[2].addr);
         let fd = |i: usize| sockets[i].fd.as_raw_fd();
         let (document, ..) = described(&sockets, None);
         assert_eq!(
@@ -792,7 +786,7 @@ mod tests {
                 },
                 Sockets {
                     transport: SocketKind::Udp,
-                    addr: b,
+                    addr: c,
                     fds: vec![fd(2), fd(5)]
                 },
             ]
@@ -909,12 +903,12 @@ mod tests {
 
     #[test]
     fn passed_descriptors_that_are_listening_sockets_are_inherited() {
-        let addr = free_addr();
-        let tcp = crate::net::listen::bind(addr, ListenerKind::Http).unwrap();
+        let tcp = Inherited::fresh(Http);
+        let addr = tcp.addr;
         let (read, write) = pipe();
         // A socket, a pipe and a number that is no descriptor, as if passed by the service
         // manager.
-        let passed = [tcp.into_raw_fd(), read.into_raw_fd(), RawFd::MAX];
+        let passed = [tcp.fd.into_raw_fd(), read.into_raw_fd(), RawFd::MAX];
         // SAFETY: the test gave up the two descriptors, and the third is not one.
         let sockets = unsafe { stored(passed) };
         assert_eq!(sockets.len(), 1, "the pipe is not a socket");
@@ -972,12 +966,10 @@ mod tests {
 
     #[test]
     fn claiming_a_document_yields_the_sockets_it_describes() {
-        let (a, b) = (free_addr(), free_addr());
-        let sockets = vec![
-            socket(a, ListenerKind::Http),
-            socket(b, ListenerKind::Quic),
-            socket(a, ListenerKind::Http),
-        ];
+        let (tcp, udp) = (Inherited::fresh(Http), Inherited::fresh(Quic));
+        let (a, b) = (tcp.addr, udp.addr);
+        let other_core = tcp.sibling(Http);
+        let sockets = vec![tcp, udp, other_core];
         let numbers: Vec<RawFd> = sockets.iter().map(|s| s.fd.as_raw_fd()).collect();
         let keys = TicketKeys::generate(600);
         let tickets = Tickets::of(&keys, Duration::from_secs(5));
@@ -1009,9 +1001,9 @@ mod tests {
 
     #[test]
     fn a_socket_that_is_not_what_the_document_says_fails_the_claim() {
-        let (a, b) = (free_addr(), free_addr());
-
-        let sockets = vec![socket(a, ListenerKind::Http)];
+        let sockets = vec![Inherited::fresh(Http)];
+        let a = sockets[0].addr;
+        let b = SocketAddr::new(a.ip(), a.port().wrapping_add(1));
         let (mut document, _ready_r, ready_w, control_r, _control_w) = described(&sockets, None);
         document.listeners[0].addr = b;
         hand_down(ready_w, control_r, sockets);
@@ -1022,7 +1014,8 @@ mod tests {
             "{moved}"
         );
 
-        let sockets = vec![socket(a, ListenerKind::Quic)];
+        let sockets = vec![Inherited::fresh(Quic)];
+        let a = sockets[0].addr;
         let (mut document, _ready_r, ready_w, control_r, _control_w) = described(&sockets, None);
         document.listeners[0].transport = SocketKind::Tcp;
         hand_down(ready_w, control_r, sockets);
@@ -1052,7 +1045,7 @@ mod tests {
 
     #[test]
     fn a_descriptor_that_is_not_open_fails_the_claim_and_leaves_the_others_alone() {
-        let sockets = vec![socket(free_addr(), ListenerKind::Http)];
+        let sockets = vec![Inherited::fresh(Http)];
         let (mut document, _ready_r, ready_w, _control_r, _control_w) = described(&sockets, None);
         // No process has this many descriptors, so the number is never an open one.
         document.control = RawFd::MAX;

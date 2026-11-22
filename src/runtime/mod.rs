@@ -1618,9 +1618,8 @@ mod tests {
 
     #[test]
     fn a_held_listener_serves_nothing_until_released_then_what_queued_on_its_inherited_socket() {
-        let addr = free_addr();
-        let bound = listen::bind(addr, ListenerKind::Http).unwrap();
-        let inherited = Inherited::identify(bound).unwrap();
+        let inherited = Inherited::fresh(ListenerKind::Http);
+        let addr = inherited.addr;
         let workers =
             spawn_workers_with(&[0], generation(1, &[addr]), vec![inherited], Hold::All).unwrap();
         fn ask<T>(worker: &Worker, message: impl FnOnce(oneshot::Sender<T>) -> ToCore) -> T {
@@ -1663,13 +1662,20 @@ mod tests {
 
     #[test]
     fn inherited_sockets_are_dealt_one_per_core_and_address() {
-        let (a, b) = (free_addr(), free_addr());
-        let socket =
-            |addr| Inherited::identify(listen::bind(addr, ListenerKind::Http).unwrap()).unwrap();
-        let shares = deal(
-            vec![socket(a), socket(b), socket(a), socket(a), socket(b)],
-            2,
+        let (first_a, first_b) = (
+            Inherited::fresh(ListenerKind::Http),
+            Inherited::fresh(ListenerKind::Http),
         );
+        let (a, b) = (first_a.addr, first_b.addr);
+        let more = |of: &Inherited| of.sibling(ListenerKind::Http);
+        let sockets = vec![
+            more(&first_a),
+            more(&first_b),
+            more(&first_a),
+            first_a,
+            first_b,
+        ];
+        let shares = deal(sockets, 2);
         let addrs: Vec<Vec<SocketAddr>> = shares
             .iter()
             .map(|share| share.iter().map(|s| s.addr).collect())
@@ -1679,10 +1685,8 @@ mod tests {
             [vec![a, b], vec![a, b]],
             "each core gets one socket per address; the third socket of `a` has no core"
         );
-        assert!(
-            deal(vec![socket(a)], 2)[1].is_empty(),
-            "a core without one binds its own"
-        );
+        let alone = deal(vec![Inherited::fresh(ListenerKind::Http)], 2);
+        assert!(alone[1].is_empty(), "a core without one binds its own");
     }
 
     #[test]

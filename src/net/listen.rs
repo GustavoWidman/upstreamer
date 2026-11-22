@@ -153,6 +153,22 @@ impl Inherited {
     }
 }
 
+#[cfg(test)]
+impl Inherited {
+    /// A socket for a `kind` listener on a loopback port the kernel picks. The port is this
+    /// socket's from the start, where a port found free and bound afterwards can go to
+    /// another test in between.
+    pub fn fresh(kind: ListenerKind) -> Inherited {
+        let any = "127.0.0.1:0".parse().unwrap();
+        Inherited::identify(bind(any, kind).unwrap()).unwrap()
+    }
+
+    /// Another socket on this one's address, as another core's.
+    pub fn sibling(&self, kind: ListenerKind) -> Inherited {
+        Inherited::identify(bind(self.addr, kind).unwrap()).unwrap()
+    }
+}
+
 fn keepalive() -> TcpKeepalive {
     TcpKeepalive::new()
         .with_time(KEEPALIVE_IDLE)
@@ -344,23 +360,31 @@ mod tests {
 
     #[test]
     fn an_inherited_socket_is_identified_by_what_it_is_bound_to() {
-        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = free.local_addr().unwrap();
-        drop(free);
-        let tcp = Inherited::identify(bind(addr, ListenerKind::Https).unwrap()).unwrap();
+        let any: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let bound = bind(any, ListenerKind::Https).unwrap();
+        let addr = socket2::SockRef::from(&bound)
+            .local_addr()
+            .unwrap()
+            .as_socket()
+            .unwrap();
+        let tcp = Inherited::identify(bound).unwrap();
         assert_eq!((tcp.transport, tcp.addr), (SocketKind::Tcp, addr));
         let key = |kind| ListenerKey { addr, kind };
         assert!(tcp.serves(key(ListenerKind::Http)) && tcp.serves(key(ListenerKind::Https)));
         assert!(!tcp.serves(key(ListenerKind::Quic)));
-
-        let udp = Inherited::identify(bind(addr, ListenerKind::Quic).unwrap()).unwrap();
-        assert_eq!((udp.transport, udp.addr), (SocketKind::Udp, addr));
-        assert!(udp.serves(key(ListenerKind::Quic)) && !udp.serves(key(ListenerKind::Http)));
         let other = SocketAddr::new(addr.ip(), addr.port().wrapping_add(1));
-        assert!(!udp.serves(ListenerKey {
+        assert!(!tcp.serves(ListenerKey {
             addr: other,
-            kind: ListenerKind::Quic
+            kind: ListenerKind::Http
         }));
+
+        let udp = Inherited::identify(bind(any, ListenerKind::Quic).unwrap()).unwrap();
+        assert_eq!(udp.transport, SocketKind::Udp);
+        let key = |kind| ListenerKey {
+            addr: udp.addr,
+            kind,
+        };
+        assert!(udp.serves(key(ListenerKind::Quic)) && !udp.serves(key(ListenerKind::Http)));
     }
 
     #[test]
@@ -390,13 +414,11 @@ mod tests {
 
     #[test]
     fn an_adopted_listener_accepts_what_was_queued_before_it_changed_hands() {
-        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = free.local_addr().unwrap();
-        drop(free);
-        let first = bind(addr, ListenerKind::Http).unwrap();
+        let first = bind("127.0.0.1:0".parse().unwrap(), ListenerKind::Http).unwrap();
+        let handed = Inherited::identify(first.try_clone().unwrap()).unwrap();
+        let addr = handed.addr;
         let mut client = std::net::TcpStream::connect(addr).unwrap();
         client.write_all(b"G").unwrap();
-        let handed = Inherited::identify(first.try_clone().unwrap()).unwrap();
         drop(first);
         let fd = handed.adopt().unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
