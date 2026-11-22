@@ -338,3 +338,65 @@ pub fn h2_input(data: &[u8]) {
     crate::proto::h2::harness::check_conversation(&pieces[1..], &out);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
+        let mut out = (payload.len() as u32).to_be_bytes()[1..].to_vec();
+        out.extend_from_slice(&[kind, flags]);
+        out.extend_from_slice(&stream.to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// The frames of `out`, as (type, stream, payload).
+    fn frames(mut out: &[u8]) -> Vec<(u8, u32, Vec<u8>)> {
+        let mut frames = Vec::new();
+        while out.len() >= 9 {
+            let len = u32::from_be_bytes([0, out[0], out[1], out[2]]) as usize;
+            let stream = u32::from_be_bytes([out[5], out[6], out[7], out[8]]) & !(1 << 31);
+            frames.push((out[3], stream, out[9..9 + len].to_vec()));
+            out = &out[9 + len..];
+        }
+        assert!(out.is_empty(), "a whole frame");
+        frames
+    }
+
+    #[test]
+    fn a_stream_the_client_grants_no_window_is_reset_and_the_connection_ends() {
+        // The client's preface sets every stream window to 0, acknowledges the server's
+        // SETTINGS and asks for a response with a body; then it reads, keeps its side open,
+        // and grants nothing.
+        let mut block = Vec::new();
+        for (name, value) in [
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":path", "/a"),
+            (":authority", "a"),
+        ] {
+            block.push(0);
+            block.push(name.len() as u8);
+            block.extend_from_slice(name.as_bytes());
+            block.push(value.len() as u8);
+            block.extend_from_slice(value.as_bytes());
+        }
+        let mut preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
+        preface.extend(frame(4, 0, 0, &[0, 4, 0, 0, 0, 0]));
+        let pieces = [preface, frame(4, 1, 0, &[]), frame(1, 0x5, 1, &block)];
+        let pieces: Vec<&[u8]> = pieces.iter().map(Vec::as_slice).collect();
+        let out = SERVER.with(|s| s.serve(Proto::H2, &pieces, false));
+        let frames = frames(&out);
+        const RST_STREAM: u8 = 3;
+        const GOAWAY: u8 = 7;
+        const CANCEL: [u8; 4] = [0, 0, 0, 8];
+        assert!(
+            frames.contains(&(RST_STREAM, 1, CANCEL.to_vec())),
+            "stream 1 is reset: {frames:?}"
+        );
+        assert!(
+            frames.iter().any(|f| f.0 == GOAWAY),
+            "the connection ends with a GOAWAY"
+        );
+    }
+}

@@ -462,11 +462,13 @@ impl<'a> Driver<'a> {
     /// timeout, room to send within the same, the PING ACK of a shutdown.
     fn deadline(&self) -> Option<Instant> {
         let engine = self.conn.engine.borrow();
+        // The core's clock counts whole seconds, so a stalled stream is due a second past
+        // the keep-alive timeout. Once that has passed the deadline is now: the poll that
+        // computes it also finds it expired and resets the stream.
         let stalled = engine.stalled_since().map(|since| {
             let waited = (self.core.clock.unix.get() - since).max(0) as u64;
-            Instant::now() + self.keep_alive.saturating_sub(Duration::from_secs(waited))
-                // The core's clock counts whole seconds.
-                + Duration::from_secs(1)
+            let due = self.keep_alive + Duration::from_secs(1);
+            Instant::now() + due.saturating_sub(Duration::from_secs(waited))
         });
         [
             engine
