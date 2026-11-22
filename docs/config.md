@@ -92,7 +92,7 @@ to have an address.
 | key | default | meaning |
 |---|---|---|
 | `header` | `10s` | from the first byte of a request to the end of its head (the slowloris bound) |
-| `keepAlive` | `75s` | how long a connection with no request in flight stays open: between requests on HTTP/1.1, without streams on HTTP/2, without packets on HTTP/3 |
+| `keepAlive` | `75s` | how long a connection with no request in flight stays open: between requests on HTTP/1.1, without streams on HTTP/2, without packets on HTTP/3. Also how long a proxied request body may send nothing before the request fails with 502 |
 | `shutdown` | `10s` | after SIGTERM, how long requests in flight and open tunnels may run before they are cut |
 
 `limits`:

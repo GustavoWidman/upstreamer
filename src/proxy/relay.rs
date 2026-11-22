@@ -133,12 +133,13 @@ pub(crate) enum Sent {
 
 /// Request body, client -> origin. `head`, already serialised, goes out in one writev with
 /// the body bytes that arrived with the request. The error is the client's: its connection
-/// failed, closed mid-body, or sent broken chunk framing.
+/// failed, closed mid-body, sent broken chunk framing, or sent nothing for `idle`.
 pub(crate) async fn copy_request(
     core: &Core,
     head: &[u8],
     body: &mut H1Body<'_>,
     up: &mut UpstreamConn,
+    idle: Duration,
 ) -> io::Result<Sent> {
     let first = body.buffered()?;
     let n = first.len();
@@ -152,10 +153,12 @@ pub(crate) async fn copy_request(
     body.consume(n);
     loop {
         body.prefer_large(core);
+        // The timer is polled, and armed, only when the client's next bytes are not there.
         let chunk = tokio::select! {
             biased;
             chunk = body.raw() => chunk?,
             _ = up.io.read(&mut up.buf) => return Ok(Sent::Interrupted),
+            () = tokio::time::sleep(idle) => return Err(io::ErrorKind::TimedOut.into()),
         };
         let Some(chunk) = chunk else {
             return Ok(Sent::All);

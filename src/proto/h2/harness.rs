@@ -408,6 +408,19 @@ pub fn hpack_input(data: &[u8]) {
     });
 }
 
+/// The fields of a connection's first field block (one whose padding and priority are
+/// off), as a client decodes them.
+#[cfg(test)]
+pub(crate) fn decode(block: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut fields = Vec::new();
+    Decoder::new()
+        .decode(block, |name, value| {
+            fields.push((name.to_vec(), value.to_vec()))
+        })
+        .expect("a field block");
+    fields
+}
+
 /// Checks what a server wrote on a connection against what the client sent after its
 /// preface (`reads`). The server writes whole frames no larger than the default frame
 /// size; a field block decodes; HEADERS and DATA go only on streams the client opened, and
