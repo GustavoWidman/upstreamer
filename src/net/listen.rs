@@ -319,10 +319,7 @@ mod tests {
 
     #[test]
     fn accepted_sockets_inherit_listener_options() {
-        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = free.local_addr().unwrap();
-        drop(free);
-        let fd = bind(addr, ListenerKind::Http).unwrap();
+        let Inherited { addr, fd, .. } = Inherited::fresh(ListenerKind::Http);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -346,16 +343,10 @@ mod tests {
 
     #[test]
     fn two_sockets_bind_one_address() {
-        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = free.local_addr().unwrap();
-        drop(free);
-        let _a = bind(addr, ListenerKind::Http).unwrap();
-        let _b = bind(addr, ListenerKind::Http).unwrap();
-        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let addr = udp.local_addr().unwrap();
-        drop(udp);
-        let _c = bind(addr, ListenerKind::Quic).unwrap();
-        let _d = bind(addr, ListenerKind::Quic).unwrap();
+        let tcp = Inherited::fresh(ListenerKind::Http);
+        let _second = bind(tcp.addr, ListenerKind::Http).unwrap();
+        let udp = Inherited::fresh(ListenerKind::Quic);
+        let _second = bind(udp.addr, ListenerKind::Quic).unwrap();
     }
 
     #[test]
