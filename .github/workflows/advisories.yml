@@ -1,0 +1,26 @@
+name: advisories
+
+# Every crate in Cargo.lock, every feature included, against the RustSec advisory database. An
+# advisory can be published for a crate this repository already locks, so the check runs daily
+# as well as on the pull requests that change the dependencies.
+on:
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/advisories.yml
+  schedule:
+    - cron: "47 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: nixbuild/nix-quick-install-action@v34
+      - name: cargo deny check advisories
+        run: nix shell --inputs-from . nixpkgs#cargo-deny --command cargo deny --all-features check advisories
