@@ -9,7 +9,10 @@
 //!
 //! The runtime's clock is paused and moves only when nothing is ready, so every timeout
 //! (header, keep-alive, idle origin) passes at once and the same input is served the same
-//! way each time.
+//! way each time. Bytes to and from the origin cross the kernel's loopback, and a loaded
+//! host can take a moment to deliver them while the runtime sees nothing ready; each second
+//! of the paused clock therefore costs a little real time, so that moment is never an hour
+//! of the paused clock.
 
 use super::*;
 use crate::proto::h1::codec::{self, Chunked, Framing, Limits, Parsed, Scan};
@@ -20,6 +23,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Longer than every timeout of the plan: a connection still open after it never ends.
 const HANG: Duration = Duration::from_secs(3600);
+/// The real time each second of the paused clock takes at least: an hour of it, the bound
+/// on a connection, is at least 72 ms.
+const SECOND: Duration = Duration::from_micros(20);
 
 struct Server {
     rt: tokio::runtime::Runtime,
@@ -66,6 +72,7 @@ impl Server {
             "version": 1,
             "listen": { "http": ["127.0.0.1:1"], "https": [] },
             "limits": { "maxStreams": 8, "maxHeadBytes": 8192, "maxHeaderFields": 32 },
+            "timeouts": { "header": "3s", "keepAlive": "5s" },
             "sites": [{
                 "name": "fuzz",
                 "hosts": ["*"],
@@ -163,6 +170,7 @@ impl Server {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     let elapsed = start.elapsed().as_secs() as i64;
                     self.core.clock.unix.set(unix + elapsed);
+                    std::thread::sleep(SECOND);
                 }
             };
             tokio::select! {
