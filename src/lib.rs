@@ -89,6 +89,7 @@ pub mod fuzz {
     pub use crate::files::harness as files;
     pub use crate::route::harness as route;
     pub use crate::runtime::harness as conn;
+    pub use crate::tls::record::harness as tls;
     pub use crate::trust::harness as trust;
 }
 
