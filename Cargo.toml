@@ -1,6 +1,6 @@
 [package]
 name = "upstreamer"
-version = "0.3.3"
+version = "0.4.0"
 edition = "2024"
 description = "A reverse proxy and static file server for NixOS hosts"
 license = "MIT"
