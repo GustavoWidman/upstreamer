@@ -1,0 +1,13 @@
+# Record headers: application data, alert and handshake records of TLS 1.2 (3.3).
+"\x17\x03\x03"
+"\x15\x03\x03"
+"\x16\x03\x03"
+# Inner content types and the alerts and handshake message a client may send.
+"\x15\x01\x00"
+"\x15\x02\x28"
+"\x15\x01\x5a"
+"\x16\x18\x00\x00\x01\x00"
+"\x16\x18\x00\x00\x01\x01"
+# The largest plaintext and record lengths.
+"\x40\x00"
+"\x48\x00"

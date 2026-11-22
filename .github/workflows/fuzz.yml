@@ -41,6 +41,7 @@ jobs:
           - { target: route, dict: http.dict }
           - { target: acme, dict: http.dict }
           - { target: kube, dict: http.dict }
+          - { target: tls, dict: tls.dict }
     env:
       TARGET: ${{ matrix.target }}
       DICT: ${{ matrix.dict }}
