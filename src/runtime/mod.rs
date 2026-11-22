@@ -564,17 +564,29 @@ impl Core {
         self.hold.set(hold);
         self.sync_listeners(&self.snapshot()).await
     }
-    /// A descriptor of every listening socket of this core, for the process that takes over.
+    /// A descriptor of every listening socket of this core, for the process that takes over:
+    /// those it serves and those it still holds for a process it took over from itself.
     fn sockets(&self) -> Vec<Inherited> {
         let listeners = self.listeners.borrow();
-        let sockets = listeners.iter().filter_map(|bound| {
-            Some(Inherited {
-                transport: SocketKind::of(bound.key.kind),
-                addr: bound.key.addr,
-                fd: bound.socket.try_clone().ok()?,
-            })
+        let served = listeners.iter().map(|bound| {
+            (
+                SocketKind::of(bound.key.kind),
+                bound.key.addr,
+                &bound.socket,
+            )
         });
-        sockets.collect()
+        let inherited = self.inherited.borrow();
+        let held = inherited.iter().map(|s| (s.transport, s.addr, &s.fd));
+        served
+            .chain(held)
+            .filter_map(|(transport, addr, fd)| {
+                Some(Inherited {
+                    transport,
+                    addr,
+                    fd: fd.try_clone().ok()?,
+                })
+            })
+            .collect()
     }
     /// Resolves once draining has started: connections stop taking new work and finish
     /// what they have.
@@ -836,10 +848,19 @@ pub(crate) fn stop(workers: Vec<Worker>, deadline: Instant) {
 
 /// Drains every core as `drain` says and joins the threads.
 pub(crate) fn retire(workers: Vec<Worker>, drain: Drain) {
-    for w in &workers {
+    start_drain(&workers, drain);
+    join(workers);
+}
+
+/// Tells every core to drain.
+pub(crate) fn start_drain(workers: &[Worker], drain: Drain) {
+    for w in workers {
         let _ = w.tx.send(ToCore::Drain(drain.clone()));
     }
-    drop(drain);
+}
+
+/// Waits until every core has drained.
+pub(crate) fn join(workers: Vec<Worker>) {
     for w in workers {
         let _ = w.thread.join();
     }
@@ -1593,6 +1614,125 @@ mod tests {
         assert!(install(super::testing::generation(4, &[b, c, busy])).is_empty());
         assert_eq!(get(&mut connect(busy)).unwrap(), 4, "bound on retry");
         stop(workers, Instant::now());
+    }
+
+    #[test]
+    fn a_held_listener_serves_nothing_until_released_then_what_queued_on_its_inherited_socket() {
+        let addr = free_addr();
+        let bound = listen::bind(addr, ListenerKind::Http).unwrap();
+        let inherited = Inherited::identify(bound).unwrap();
+        let workers =
+            spawn_workers_with(&[0], generation(1, &[addr]), vec![inherited], Hold::All).unwrap();
+        fn ask<T>(worker: &Worker, message: impl FnOnce(oneshot::Sender<T>) -> ToCore) -> T {
+            let (done, answer) = oneshot::channel();
+            worker.tx.send(message(done)).ok().unwrap();
+            answer.blocking_recv().unwrap()
+        }
+        let sockets = ask(&workers[0], ToCore::Sockets);
+        assert_eq!(
+            sockets.iter().map(|s| s.addr).collect::<Vec<_>>(),
+            [addr],
+            "a held socket is still one to hand on"
+        );
+
+        let mut early = connect(addr);
+        std::io::Write::write_all(&mut early, b"GET / HTTP/1.1\r\nHost: test\r\n\r\n").unwrap();
+        early
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let unanswered = read_response(&mut early).unwrap_err();
+        assert!(
+            matches!(
+                unanswered.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ),
+            "the connection waits in the socket's queue: {unanswered}"
+        );
+
+        let failures = ask(&workers[0], |done| ToCore::Release(Hold::Nothing, done));
+        assert!(failures.is_empty(), "{failures:?}");
+        early
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let (head, body) = read_response(&mut early).unwrap();
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+        assert_eq!(body, b"gen=000001\n", "the queued request is answered");
+        assert_eq!(ask(&workers[0], ToCore::Sockets).len(), 1);
+        stop(workers, Instant::now());
+    }
+
+    #[test]
+    fn inherited_sockets_are_dealt_one_per_core_and_address() {
+        let (a, b) = (free_addr(), free_addr());
+        let socket =
+            |addr| Inherited::identify(listen::bind(addr, ListenerKind::Http).unwrap()).unwrap();
+        let shares = deal(
+            vec![socket(a), socket(b), socket(a), socket(a), socket(b)],
+            2,
+        );
+        let addrs: Vec<Vec<SocketAddr>> = shares
+            .iter()
+            .map(|share| share.iter().map(|s| s.addr).collect())
+            .collect();
+        assert_eq!(
+            addrs,
+            [vec![a, b], vec![a, b]],
+            "each core gets one socket per address; the third socket of `a` has no core"
+        );
+        assert!(
+            deal(vec![socket(a)], 2)[1].is_empty(),
+            "a core without one binds its own"
+        );
+    }
+
+    #[test]
+    fn an_idle_connection_outlives_the_start_of_a_drain_that_says_so() {
+        let addr = free_addr();
+        let workers = spawn_workers(&[0], generation(1, &[addr])).unwrap();
+        let mut idle = connect(addr);
+        get(&mut idle).unwrap();
+        let now = Instant::now();
+        let drain = Drain {
+            deadline: now + Duration::from_secs(10),
+            idle_close: now + Duration::from_millis(600),
+            released: None,
+        };
+        let stopping = std::thread::spawn(move || retire(workers, drain));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            std::net::TcpStream::connect(addr).is_err(),
+            "the listener is closed"
+        );
+        std::io::Write::write_all(&mut idle, b"GET / HTTP/1.1\r\nHost: test\r\n\r\n").unwrap();
+        let (head, body) = read_response(&mut idle).unwrap();
+        assert!(
+            head.starts_with("HTTP/1.1 200 OK\r\n") && head.contains("\r\nconnection: close\r\n"),
+            "a request on an idle connection is answered, and the connection closed: {head}"
+        );
+        assert_eq!(body, b"gen=000001\n");
+        stopping.join().unwrap();
+        assert!(
+            now.elapsed() < Duration::from_secs(5),
+            "the drain ends with its last connection"
+        );
+
+        let workers = spawn_workers(&[0], generation(1, &[addr])).unwrap();
+        let mut idle = connect(addr);
+        get(&mut idle).unwrap();
+        let now = Instant::now();
+        let drain = Drain {
+            deadline: now + Duration::from_secs(10),
+            idle_close: now + Duration::from_millis(300),
+            released: None,
+        };
+        retire(workers, drain);
+        let waited = now.elapsed();
+        assert!(
+            waited >= Duration::from_millis(250) && waited < Duration::from_secs(5),
+            "a connection that stays idle is closed at `idle_close`: {waited:?}"
+        );
+        let mut rest = Vec::new();
+        assert_eq!(std::io::Read::read_to_end(&mut idle, &mut rest).unwrap(), 0);
     }
 
     #[test]

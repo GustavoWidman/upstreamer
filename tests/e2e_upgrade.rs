@@ -656,6 +656,68 @@ fn requests_in_flight_finish_on_the_old_process_while_the_new_one_serves() {
 }
 
 #[test]
+fn a_second_handover_leaves_the_udp_sockets_with_the_first_process_until_it_lets_go() {
+    let reached = Arc::new(AtomicUsize::new(0));
+    let release = Gate::default();
+    let origin = slow_origin(reached.clone(), release.clone());
+    let program = Program::install();
+    let dir = tempfile::tempdir().unwrap();
+    let tls = reserve_udp();
+    let top = json!({ "timeouts": { "shutdown": "15s" } });
+    let mut proxy = Proxy::start_program(
+        &program.path,
+        sites(&dir, tls.addr, json!([{ "proxy": origin.url() }])),
+        top,
+    );
+    let (first, tls) = (proxy.pid(), tls.addr);
+    let rt = multi_thread_runtime();
+    let slow = rt.spawn(async move {
+        let mut h3 = H3::connect(tls, HOST).await?;
+        h3.get("/slow").await
+    });
+    support::eventually("the slow request reached the origin", || {
+        reached.load(Ordering::SeqCst) == 1
+    });
+
+    program.replace();
+    proxy.signal(libc::SIGHUP);
+    let second = handed_over(&proxy);
+    program.replace();
+    proxy.signal(libc::SIGHUP);
+    let third = handed_over(&proxy);
+    assert!(second != first && third != second && runs(third));
+    let reply = clients::h1_tls_get(tls, HOST, "/fast").unwrap();
+    assert_eq!((reply.status, reply.text().as_str()), (200, "/fast"));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        reads_udp(first, tls.port())
+            && !reads_udp(second, tls.port())
+            && !reads_udp(third, tls.port()),
+        "the process with the QUIC connection is the one reader, two handovers later"
+    );
+
+    release.open();
+    let reply = rt
+        .block_on(slow)
+        .unwrap()
+        .expect("the request in flight finishes");
+    assert_eq!((reply.status, reply.text().as_str()), (200, "finished"));
+    let status = proxy
+        .exit_within(PATIENCE)
+        .expect("the first process exits");
+    assert!(status.success(), "{status}");
+    support::eventually("the last process reads the UDP sockets", || {
+        reads_udp(third, tls.port())
+    });
+    support::eventually("the process in between is gone", || !runs(second));
+    let reply = rt
+        .block_on(async { H3::connect(tls, HOST).await?.get("/fast").await })
+        .expect("HTTP/3 on the last process");
+    assert_eq!((reply.status, reply.text().as_str()), (200, "/fast"));
+    stop_successor(&proxy, third);
+}
+
+#[test]
 fn a_program_that_cannot_take_over_leaves_the_running_one_serving() {
     let plain = |body: &str| json!([{ "name": "plain", "hosts": ["*"], "routes": [{ "respond": { "body": body } }] }]);
     let program = Program::install();
