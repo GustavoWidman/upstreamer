@@ -1426,21 +1426,35 @@ mod tests {
     fn each_core_thread_is_pinned_to_its_cpu() {
         let cpus = allowed_cpus().into_iter().rev().take(2).collect::<Vec<_>>();
         let workers = spawn_workers(&cpus, generation(1, &[free_addr()])).unwrap();
-        // Other tests start and stop core threads meanwhile, on the first CPUs only, so threads
-        // may vanish mid-scan and only this test's CPUs are checked.
-        let mut allowed_lists = Vec::new();
-        for task in std::fs::read_dir("/proc/self/task").unwrap() {
-            let dir = task.unwrap().path();
-            let read = |name| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
-            if read("comm").trim() == "upstreamer-core" {
-                let status = read("status");
-                if let Some(list) = status
-                    .lines()
-                    .find_map(|l| l.strip_prefix("Cpus_allowed_list:"))
-                {
-                    allowed_lists.push(list.trim().to_owned());
+        // The CPU lists of the core threads the process has. Other tests start and stop core
+        // threads meanwhile, on the first CPUs only: threads may vanish mid-scan, and a scan
+        // of a directory whose entries come and go can miss one that stays, so only this
+        // test's CPUs are checked, over as many scans as it takes to see them.
+        let scan = || {
+            let mut allowed_lists = Vec::new();
+            for task in std::fs::read_dir("/proc/self/task").unwrap().flatten() {
+                let dir = task.path();
+                let read = |name| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
+                if read("comm").trim() == "upstreamer-core" {
+                    let status = read("status");
+                    if let Some(list) = status
+                        .lines()
+                        .find_map(|l| l.strip_prefix("Cpus_allowed_list:"))
+                    {
+                        allowed_lists.push(list.trim().to_owned());
+                    }
                 }
             }
+            allowed_lists
+        };
+        let pinned = |lists: &[String]| cpus.iter().all(|cpu| lists.contains(&cpu.to_string()));
+        let mut allowed_lists = scan();
+        for _ in 0..50 {
+            if pinned(&allowed_lists) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            allowed_lists = scan();
         }
         stop(workers, Instant::now());
         for cpu in cpus {
