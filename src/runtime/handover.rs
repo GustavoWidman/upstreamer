@@ -14,7 +14,8 @@
 //! 3. On `ready` the predecessor tells the service manager that the successor is the main
 //!    process, writes one byte to the second pipe, and drains. On anything else (a failure, an
 //!    exit, [`READY_TIMEOUT`]) it kills the successor and keeps serving: no connection ever
-//!    reached the successor.
+//!    reached the successor. It also keeps serving when the byte cannot be written, which is
+//!    a successor that went away after it reported.
 //! 4. On that byte the successor serves the TCP listeners: the same sockets, so a connection
 //!    that arrived in between waited in their queues. The QUIC listeners stay held until the
 //!    second pipe closes, which the predecessor's cores do once they read no UDP socket any
@@ -550,7 +551,8 @@ mod predecessor {
 
     impl Successor {
         /// Tells the successor it is the main process. The returned descriptor is the
-        /// handover pipe: the successor serves QUIC once every copy of it is closed.
+        /// handover pipe: the successor serves QUIC once every copy of it is closed. An error
+        /// when the successor is gone: nothing reads the pipe.
         pub fn promote(mut self) -> io::Result<Arc<OwnedFd>> {
             let control = self.control.take().expect("promoted once");
             let mut pipe = std::fs::File::from(control);
@@ -1190,6 +1192,16 @@ mod tests {
             assert!(!released.exists(), "held while a copy of the pipe is open");
             drop(pipe);
             eventually("the pipe's end reached the successor", || released.exists());
+        }
+
+        #[test]
+        fn a_successor_that_went_away_after_it_reported_ready_cannot_be_promoted() {
+            let script = format!(r#"{READ}; echo ready > "/proc/self/fd/$ready""#);
+            let successor = offered(&script, Duration::from_secs(10)).unwrap();
+            let pid = successor.pid;
+            eventually("the successor exited", || !runs(pid));
+            let gone = successor.promote().expect_err("nothing reads the pipe");
+            assert_eq!(gone.kind(), io::ErrorKind::BrokenPipe, "{gone}");
         }
 
         #[test]
