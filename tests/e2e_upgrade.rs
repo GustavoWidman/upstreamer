@@ -325,14 +325,32 @@ fn h1_connect(addr: SocketAddr) -> Result<TcpStream, String> {
     Ok(conn)
 }
 
-/// What one kind of client saw: requests answered, and every request that was not.
+/// What one kind of client saw: requests answered, requests a GOAWAY left unprocessed, and
+/// every request that failed.
 #[derive(Default)]
 struct Tally {
     ok: AtomicUsize,
+    refused: AtomicUsize,
     failed: Mutex<Vec<String>>,
 }
 
+/// A stream that a graceful GOAWAY left above its last stream id: the server never
+/// processed it, and the client may send it again (RFC 9113 8.7). Rust's `h2` reports it
+/// instead of retrying it, which browsers, curl, Go and httpx do.
+fn refused(e: &h2::Error) -> bool {
+    e.is_go_away() && e.is_remote() && e.reason() == Some(h2::Reason::NO_ERROR)
+}
+
 impl Tally {
+    fn record_h2(&self, outcome: Result<Reply, h2::Error>) {
+        match outcome {
+            Err(e) if refused(&e) => {
+                self.refused.fetch_add(1, Ordering::Relaxed);
+            }
+            outcome => self.record(outcome.map_err(|e| e.to_string())),
+        }
+    }
+
     fn record(&self, outcome: Result<Reply, String>) {
         match outcome {
             Ok(reply) if reply.status == 200 && reply.text().starts_with('/') => {
@@ -362,7 +380,8 @@ const TCP_KINDS: std::ops::Range<usize> = 0..5;
 
 /// Clients of every kind that send requests one after another until stopped. A client on a
 /// kept connection follows what the server says about it: `Connection: close` and GOAWAY end
-/// the connection, and its next request goes on a new one. No client sends a request again.
+/// the connection, and its next request goes on a new one. No client sends a request again;
+/// an HTTP/2 request a GOAWAY left unprocessed is counted apart (see [`refused`]).
 struct Load {
     stop: Arc<AtomicBool>,
     tallies: Arc<Vec<Tally>>,
@@ -452,7 +471,7 @@ impl Load {
                     // replaced; the request was not sent on it.
                     if let Ok(response) = conn.start_get(path(n)).await {
                         n += 1;
-                        tallies[3].record(response.await.map_err(|e| e.to_string()));
+                        tallies[3].record_h2(response.await);
                         kept = Some(conn);
                     }
                 }
@@ -464,14 +483,10 @@ impl Load {
                 let mut n = 0;
                 while !stop.load(Ordering::Relaxed) {
                     n += 1;
-                    let outcome = async {
-                        let mut h2 = H2::connect(tls, HOST)
-                            .await
-                            .map_err(|e| format!("connect: {e}"))?;
-                        h2.get(path(n)).await.map_err(|e| e.to_string())
+                    match H2::connect(tls, HOST).await {
+                        Ok(mut h2) => tallies[4].record_h2(h2.get(path(n)).await),
+                        Err(e) => tallies[4].record(Err(format!("connect: {e}"))),
                     }
-                    .await;
-                    tallies[4].record(outcome);
                 }
             }));
         }
@@ -609,8 +624,9 @@ fn a_replaced_program_takes_over_under_load_without_failing_a_request() {
     for (kind, tally) in KINDS.iter().zip(tallies.iter()) {
         let failed = tally.failed.lock().unwrap();
         println!(
-            "{kind}: {} answered, {} failed {:?}",
+            "{kind}: {} answered, {} refused unprocessed, {} failed {:?}",
             tally.ok.load(Ordering::Relaxed),
+            tally.refused.load(Ordering::Relaxed),
             failed.len(),
             &failed[..failed.len().min(3)]
         );

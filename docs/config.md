@@ -660,7 +660,10 @@ refused and no request fails:
   process, with `Connection: close`. A connection that stays idle is closed after half of
   `timeouts.shutdown`.
 - An HTTP/2 or HTTP/3 connection gets GOAWAY and its open streams finish. A tunnel (WebSocket)
-  still open at the deadline is cut, as at a stop.
+  still open at the deadline is cut, as at a stop. An HTTP/2 request the client sends just as
+  the GOAWAY of an idle connection goes out is above the GOAWAY's last stream id: it was not
+  processed, and the client may send it again (RFC 9113, section 8.7). Browsers, curl, Go and
+  httpx do; Rust's `h2` (under hyper and reqwest) reports it to the application instead.
 - HTTP/3: the old process keeps the UDP sockets until its last QUIC connection has ended, and
   the new one answers QUIC from then on. A QUIC handshake begun in between is not answered
   until then; the client's retransmission completes it (about a second later with common
