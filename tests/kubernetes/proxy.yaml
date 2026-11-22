@@ -1,10 +1,10 @@
 # upstreamer as a pod of the cluster it discovers in (the in-cluster service account, with only
 # the Role of docs/kubernetes-rbac.yaml), proxying to Service `web`, and a client that sends
 # a request every 50 ms, once the proxy first answers, and prints each status. A pod that a
-# rollout stops can still be in the discovered set for the moment its EndpointSlice change takes
-# to arrive, and once its network is gone a dial to it hears nothing. While the watch lags, two
-# stopped pods can be listed at once; two retries with a 1 s dial timeout, generous inside a
-# cluster, reach a live pod within the client's 5 s.
+# rollout stops is marked terminating on its EndpointSlice and serves for 5 s more, so discovery
+# must drop it within that window for every request to succeed. Should a pod go sooner (a crash,
+# a node loss), a dial to it hears nothing once its network is gone; two retries with a 1 s dial
+# timeout, generous inside a cluster, reach a live pod within the client's 5 s.
 apiVersion: v1
 kind: ConfigMap
 metadata:
