@@ -20,6 +20,7 @@ pub(crate) mod control;
 pub(crate) mod handover;
 #[cfg(any(test, feature = "internals"))]
 pub mod harness;
+pub(crate) mod reload;
 pub(crate) mod slots;
 
 use crate::StartError;
