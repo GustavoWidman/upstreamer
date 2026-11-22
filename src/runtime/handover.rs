@@ -296,14 +296,28 @@ pub(crate) struct Start {
 }
 
 impl Start {
-    /// What this process was started with: as a successor when [`ENV`] says so.
+    /// What this process was started with: as a successor when [`ENV`] says so, else with the
+    /// sockets the service manager kept for it, if any.
     pub fn from_env() -> Result<Start, String> {
-        let mut start = match std::env::var(ENV) {
+        let var = |name: &str| std::env::var(name).ok();
+        let mut start = match var(ENV) {
             // SAFETY: the variable is set by the predecessor that started this process, for
             // the descriptors it left open in it, and this runs once, before anything else
             // opens a descriptor.
-            Ok(fd) => unsafe { Start::inherit(&fd) }.map_err(|e| format!("{ENV}: {e}"))?,
-            Err(_) => Start::default(),
+            Some(fd) => unsafe { Start::inherit(&fd) }.map_err(|e| format!("{ENV}: {e}"))?,
+            None => {
+                let passed = passed_fds(
+                    var("LISTEN_PID").as_deref(),
+                    var("LISTEN_FDS").as_deref(),
+                    std::process::id(),
+                );
+                Start {
+                    // SAFETY: the service manager passed these descriptors to this process,
+                    // and this runs once, before anything else opens a descriptor.
+                    sockets: unsafe { stored(passed) },
+                    ..Start::default()
+                }
+            }
         };
         start.launch = Launch::capture();
         Ok(start)
@@ -332,6 +346,36 @@ impl Start {
         // SAFETY: the caller's.
         unsafe { document.claim() }
     }
+}
+
+/// The descriptors the service manager passed to the process `own_pid`, from the two variables
+/// of its protocol (`sd_listen_fds`): `LISTEN_FDS` descriptors from number 3 on, meant for the
+/// process `LISTEN_PID` alone, which a child that inherited the environment is not.
+fn passed_fds(pid: Option<&str>, count: Option<&str>, own_pid: u32) -> std::ops::Range<RawFd> {
+    const FIRST: RawFd = 3;
+    let count = match (pid.map(str::parse::<u32>), count.map(str::parse::<RawFd>)) {
+        (Some(Ok(pid)), Some(Ok(count))) if pid == own_pid && count > 0 => count,
+        _ => 0,
+    };
+    FIRST..FIRST.saturating_add(count)
+}
+
+/// Takes the passed descriptors: those that are listening sockets become inherited ones, the
+/// others are closed.
+///
+/// # Safety
+///
+/// Nothing else in this process owns a descriptor in `passed`.
+unsafe fn stored(passed: impl IntoIterator<Item = RawFd>) -> Vec<Inherited> {
+    let mut sockets = Vec::new();
+    for fd in passed.into_iter().filter(|&fd| is_open(fd)) {
+        // SAFETY: open, and this process's alone (the caller).
+        match Inherited::identify(unsafe { OwnedFd::from_raw_fd(fd) }) {
+            Ok(socket) => sockets.push(socket),
+            Err(e) => crate::log::warning!("descriptor {fd} from the service manager: {e}"),
+        }
+    }
+    sockets
 }
 
 /// A successor's end of the handover.
@@ -844,6 +888,48 @@ mod tests {
 
         let garbage = Document::parse("ready").unwrap_err();
         assert!(garbage.starts_with("not a handover document"), "{garbage}");
+    }
+
+    #[test]
+    fn descriptors_are_passed_to_the_process_the_service_manager_named() {
+        assert_eq!(passed_fds(Some("41"), Some("3"), 41), 3..6);
+        assert_eq!(
+            passed_fds(Some("40"), Some("3"), 41),
+            3..3,
+            "meant for another process: this one inherited the variables"
+        );
+        assert_eq!(passed_fds(None, Some("3"), 41), 3..3);
+        assert_eq!(passed_fds(Some("41"), None, 41), 3..3);
+        assert_eq!(passed_fds(Some("41"), Some("0"), 41), 3..3);
+        assert_eq!(passed_fds(Some("41"), Some("-2"), 41), 3..3);
+        assert_eq!(passed_fds(Some("41"), Some("many"), 41), 3..3);
+    }
+
+    #[test]
+    fn passed_descriptors_that_are_listening_sockets_are_inherited() {
+        let addr = free_addr();
+        let tcp = crate::net::listen::bind(addr, ListenerKind::Http).unwrap();
+        let (read, write) = pipe();
+        // A socket, a pipe and a number that is no descriptor, as if passed by the service
+        // manager.
+        let passed = [tcp.into_raw_fd(), read.into_raw_fd(), RawFd::MAX];
+        // SAFETY: the test gave up the two descriptors, and the third is not one.
+        let sockets = unsafe { stored(passed) };
+        assert_eq!(sockets.len(), 1, "the pipe is not a socket");
+        assert_eq!(
+            (
+                sockets[0].transport,
+                sockets[0].addr,
+                sockets[0].fd.as_raw_fd()
+            ),
+            (SocketKind::Tcp, addr, passed[0])
+        );
+        let closed = io::Write::write_all(&mut std::fs::File::from(write), b"x").unwrap_err();
+        assert_eq!(
+            closed.kind(),
+            io::ErrorKind::BrokenPipe,
+            "what is not a socket is closed"
+        );
     }
 
     #[test]

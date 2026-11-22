@@ -17,6 +17,11 @@
 //! process then drains like a stopping one, without a word to systemd, whose main process it
 //! no longer is. A handover that fails is a failed reload: the running generation stays.
 //!
+//! Where systemd keeps a file descriptor store for the unit (`FileDescriptorStoreMax=`), the
+//! listening sockets are kept in it ([`Stored`]): after a restart or a crash the next process
+//! is given them back and serves what queued on them meanwhile, where it would otherwise bind
+//! new sockets after a gap in which connections were refused.
+//!
 //! The control thread also keeps what outlives generations ([`Live`]): the upstream registry
 //! (health cells, last discovered endpoints), the discovery feed, the metrics hub and the ACME
 //! client. A generation is published one way, [`publish`], whatever caused it: a reload, a
@@ -30,11 +35,12 @@ use crate::discover::Feed;
 use crate::limit::Limiters;
 use crate::log::{error, info, warning};
 use crate::metrics::{self, Hub};
-use crate::net::listen::Inherited;
+use crate::net::listen::{Inherited, SocketKind};
 use crate::plan::{Diagnostic, ListenerKind, Plan};
 use crate::tls::{self, CertProblem, TicketKeys};
 use crate::upstream::Registry;
 use crate::{RunOptions, StartError};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixDatagram;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -106,6 +112,7 @@ pub(crate) fn serve(
         tickets,
         mut predecessor,
     } = start;
+    let mut stored = Stored::from_env(&sockets);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -159,6 +166,7 @@ pub(crate) fn serve(
             current.plan.listeners.len()
         );
         notifier.notify(&format!("READY=1\nSTATUS={}", status_line(&current, &live)));
+        stored.sync(&workers, notifier).await;
 
         let next_rotation = (rotated + TICKET_ROTATION).max(Instant::now());
         let mut rotate = tokio::time::interval_at(
@@ -204,6 +212,7 @@ pub(crate) fn serve(
                         continue;
                     }
                     reload(load, &mut current, generation, &workers, notifier, &mut live).await;
+                    stored.sync(&workers, notifier).await;
                 }
                 _ = rotate.tick() => {
                     rotated = Instant::now();
@@ -256,6 +265,7 @@ pub(crate) fn serve(
                             promoted.elapsed().as_millis()
                         );
                     }
+                    stored.sync(&workers, notifier).await;
                 }
                 _ = terminate.recv() => break None,
                 _ = interrupt.recv() => break None,
@@ -351,6 +361,65 @@ async fn sockets(workers: &[Worker]) -> Vec<Inherited> {
         sockets.extend(report.await.unwrap_or_default());
     }
     sockets
+}
+
+/// The listening sockets in the service manager's file descriptor store, by name: one name
+/// per address, shared by the sockets of every core.
+struct Stored {
+    /// Whether the service manager keeps a store for this service (`$FDSTORE`).
+    enabled: bool,
+    /// The names that may be in the store.
+    names: Vec<String>,
+}
+
+impl Stored {
+    /// `inherited` are the sockets this process was given: the store held them, or the process
+    /// this one takes over from did, which stored them too.
+    fn from_env(inherited: &[Inherited]) -> Stored {
+        let mut names: Vec<String> = inherited.iter().map(Stored::name).collect();
+        names.sort();
+        names.dedup();
+        Stored {
+            enabled: std::env::var_os("FDSTORE").is_some(),
+            names,
+        }
+    }
+
+    /// `tcp_0.0.0.0_80`, `udp_[__]_443`: a name may not hold a colon.
+    fn name(socket: &Inherited) -> String {
+        let kind = match socket.transport {
+            SocketKind::Tcp => "tcp",
+            SocketKind::Udp => "udp",
+        };
+        format!("{kind}_{}", socket.addr).replace(':', "_")
+    }
+
+    /// Stores every listening socket the cores serve (the service manager keeps one of the
+    /// descriptors of a socket it already has) and removes the names no listener has any more:
+    /// a socket left in the store would keep its address taking connections nobody serves.
+    async fn sync(&mut self, workers: &[Worker], notifier: &Notifier) {
+        if !self.enabled {
+            return;
+        }
+        let sockets = sockets(workers).await;
+        let mut serving: Vec<String> = sockets.iter().map(Stored::name).collect();
+        serving.sort();
+        serving.dedup();
+        for name in &serving {
+            let fds: Vec<RawFd> = sockets
+                .iter()
+                .filter(|socket| &Stored::name(socket) == name)
+                .map(|socket| socket.fd.as_raw_fd())
+                .collect();
+            for fds in fds.chunks(Notifier::MAX_FDS) {
+                notifier.notify_with_fds(&format!("FDSTORE=1\nFDNAME={name}"), fds);
+            }
+        }
+        for name in self.names.iter().filter(|name| !serving.contains(name)) {
+            notifier.notify(&format!("FDSTOREREMOVE=1\nFDNAME={name}"));
+        }
+        self.names = serving;
+    }
 }
 
 /// Narrows every core's hold and waits until each serves what it no longer covers. Returns the
@@ -655,6 +724,60 @@ impl Notifier {
             warning!("sd_notify: {e}");
         }
     }
+
+    /// The most descriptors one notification carries: under the kernel's limit per message.
+    pub const MAX_FDS: usize = 128;
+
+    /// Sends one notification with descriptors attached (`SCM_RIGHTS`), at most
+    /// [`Notifier::MAX_FDS`] of them. The receiver gets descriptors of its own.
+    pub fn notify_with_fds(&self, state: &str, fds: &[RawFd]) {
+        let Some((sock, addr)) = &self.target else {
+            return;
+        };
+        let addr = match addr {
+            NotifyAddr::Path(path) => socket2::SockAddr::unix(path),
+            #[cfg(target_os = "linux")]
+            NotifyAddr::Abstract(addr) => {
+                use std::os::linux::net::SocketAddrExt;
+                use std::os::unix::ffi::OsStrExt;
+                // The address of an abstract socket is its name after a zero byte.
+                let mut name = vec![0u8];
+                name.extend_from_slice(addr.as_abstract_name().unwrap_or_default());
+                socket2::SockAddr::unix(std::ffi::OsStr::from_bytes(&name))
+            }
+        };
+        let sent = addr.and_then(|addr| {
+            let control = rights(fds);
+            let buffers = [std::io::IoSlice::new(state.as_bytes())];
+            let message = socket2::MsgHdr::new()
+                .with_addr(&addr)
+                .with_buffers(&buffers)
+                .with_control(&control);
+            socket2::SockRef::from(sock).sendmsg(&message, 0)
+        });
+        if let Err(e) = sent {
+            warning!("sd_notify: {e}");
+        }
+    }
+}
+
+/// The control message that passes `fds` over a Unix socket.
+fn rights(fds: &[RawFd]) -> Vec<u8> {
+    let bytes = size_of_val(fds);
+    // SAFETY: CMSG_SPACE and CMSG_LEN compute sizes from a length. The buffer is CMSG_SPACE
+    // bytes, which holds one header and `bytes` of data; the header is written unaligned, and
+    // CMSG_DATA of a header at the start of the buffer points `bytes` before its end.
+    unsafe {
+        let mut control = vec![0u8; libc::CMSG_SPACE(bytes as u32) as usize];
+        let header = control.as_mut_ptr().cast::<libc::cmsghdr>();
+        let mut filled: libc::cmsghdr = std::mem::zeroed();
+        filled.cmsg_level = libc::SOL_SOCKET;
+        filled.cmsg_type = libc::SCM_RIGHTS;
+        filled.cmsg_len = libc::CMSG_LEN(bytes as u32) as _;
+        header.write_unaligned(filled);
+        std::ptr::copy_nonoverlapping(fds.as_ptr().cast::<u8>(), libc::CMSG_DATA(header), bytes);
+        control
+    }
 }
 
 /// `CLOCK_MONOTONIC` in microseconds, the clock systemd compares `MONOTONIC_USEC` with.
@@ -703,6 +826,130 @@ mod tests {
         Notifier::to_path(path).notify("READY=1\nSTATUS=x");
         assert_eq!(recv(&sock), "READY=1\nSTATUS=x");
         Notifier { target: None }.notify("READY=1");
+    }
+
+    /// Receives one datagram with the descriptors attached to it.
+    fn recv_with_fds(sock: &UnixDatagram) -> (String, Vec<std::os::fd::OwnedFd>) {
+        use std::os::fd::FromRawFd;
+        let mut text = [0u8; 4096];
+        let mut control = [0u64; 128];
+        let mut iov = libc::iovec {
+            iov_base: text.as_mut_ptr().cast(),
+            iov_len: text.len(),
+        };
+        // SAFETY: the message header points at the two buffers above, with their sizes, for
+        // the duration of the call; every descriptor the kernel put into the control buffer
+        // is new and owned by nothing else.
+        unsafe {
+            let mut message: libc::msghdr = std::mem::zeroed();
+            message.msg_iov = &mut iov;
+            message.msg_iovlen = 1;
+            message.msg_control = control.as_mut_ptr().cast();
+            message.msg_controllen = size_of_val(&control) as _;
+            let n = libc::recvmsg(sock.as_raw_fd(), &mut message, 0);
+            assert!(n >= 0, "{}", std::io::Error::last_os_error());
+            let mut fds = Vec::new();
+            let mut header = libc::CMSG_FIRSTHDR(&message);
+            while !header.is_null() {
+                if (*header).cmsg_level == libc::SOL_SOCKET
+                    && (*header).cmsg_type == libc::SCM_RIGHTS
+                {
+                    let bytes = (*header).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
+                    let data = libc::CMSG_DATA(header).cast::<RawFd>();
+                    for i in 0..bytes / size_of::<RawFd>() {
+                        fds.push(std::os::fd::OwnedFd::from_raw_fd(
+                            data.add(i).read_unaligned(),
+                        ));
+                    }
+                }
+                header = libc::CMSG_NXTHDR(&message, header);
+            }
+            (String::from_utf8(text[..n as usize].to_vec()).unwrap(), fds)
+        }
+    }
+
+    #[test]
+    fn a_notification_carries_descriptors_to_the_receiver() {
+        let (_dir, path, sock) = listen_notify();
+        let a = crate::net::listen::bind(free_addr(), crate::plan::ListenerKind::Http).unwrap();
+        let b = crate::net::listen::bind(free_addr(), crate::plan::ListenerKind::Quic).unwrap();
+        Notifier::to_path(path)
+            .notify_with_fds("FDSTORE=1\nFDNAME=x", &[a.as_raw_fd(), b.as_raw_fd()]);
+        let (text, fds) = recv_with_fds(&sock);
+        assert_eq!(text, "FDSTORE=1\nFDNAME=x");
+        let received: Vec<_> = fds
+            .into_iter()
+            .map(|fd| Inherited::identify(fd).unwrap())
+            .map(|socket| (socket.transport, socket.addr))
+            .collect();
+        let sent: Vec<_> = [a, b]
+            .into_iter()
+            .map(|fd| Inherited::identify(fd).unwrap())
+            .map(|socket| (socket.transport, socket.addr))
+            .collect();
+        assert_eq!(received, sent, "the same sockets, in order");
+        Notifier { target: None }.notify_with_fds("FDSTORE=1", &[]);
+    }
+
+    #[test]
+    fn the_store_gets_every_listening_socket_and_loses_the_names_no_listener_has() {
+        let (_dir, path, sock) = listen_notify();
+        let notifier = Notifier::to_path(path);
+        let (a, b, gone) = (free_addr(), free_addr(), free_addr());
+        let left_over = Inherited::identify(
+            crate::net::listen::bind(gone, crate::plan::ListenerKind::Http).unwrap(),
+        )
+        .unwrap();
+        let cpus = &crate::runtime::allowed_cpus()[..1];
+        let cpus = [cpus[0], cpus[0]];
+        let workers =
+            crate::runtime::spawn_workers(&cpus, crate::runtime::testing::generation(1, &[a, b]))
+                .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let name = |addr: std::net::SocketAddr| format!("tcp_127.0.0.1_{}", addr.port());
+
+        let mut stored = Stored {
+            enabled: true,
+            names: Stored::from_env(&[left_over]).names,
+        };
+        assert_eq!(stored.names, [name(gone)]);
+        runtime.block_on(stored.sync(&workers, &notifier));
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let (text, fds) = recv_with_fds(&sock);
+            let addrs: Vec<_> = fds
+                .into_iter()
+                .map(|fd| Inherited::identify(fd).unwrap().addr)
+                .collect();
+            seen.push((text, addrs));
+        }
+        seen.sort();
+        let mut expected = vec![
+            (format!("FDSTORE=1\nFDNAME={}", name(a)), vec![a, a]),
+            (format!("FDSTORE=1\nFDNAME={}", name(b)), vec![b, b]),
+        ];
+        expected.sort();
+        assert_eq!(seen, expected, "one message per address, a socket per core");
+        assert_eq!(
+            recv(&sock),
+            format!("FDSTOREREMOVE=1\nFDNAME={}", name(gone)),
+            "an inherited socket no listener serves is taken out of the store"
+        );
+
+        let disabled = Stored {
+            enabled: false,
+            names: Vec::new(),
+        };
+        let mut disabled = disabled;
+        runtime.block_on(disabled.sync(&workers, &notifier));
+        sock.set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let mut buf = [0u8; 16];
+        assert!(sock.recv(&mut buf).is_err(), "nothing without a store");
+        crate::runtime::stop(workers, Instant::now());
     }
 
     #[test]
