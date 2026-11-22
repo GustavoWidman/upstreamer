@@ -7,10 +7,11 @@ mod support;
 use bytes::Bytes;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use serde_json::{Value, json};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, ready};
@@ -31,20 +32,10 @@ impl Tls {
         Tls::start_with(sites, json!({}))
     }
 
-    fn start_with(mut sites: Value, top: Value) -> Tls {
-        for site in sites.as_array_mut().unwrap() {
-            site["tls"] = json!({
-                "cert": "/nonexistent/fullchain.pem",
-                "key": "/nonexistent/key.pem",
-                "redirectHttp": false,
-                "http3": false,
-            });
-        }
+    fn start_with(sites: Value, top: Value) -> Tls {
         let port = Reserved::new();
-        let mut top = top;
-        top["listen"] = json!({ "http": [], "https": [port.addr] });
         Tls {
-            proxy: Proxy::start_with(sites, top),
+            proxy: https_proxy(sites, top, port.addr),
             addr: port.addr,
             _port: port,
         }
@@ -53,6 +44,21 @@ impl Tls {
     fn h2(&self, rt: &tokio::runtime::Runtime) -> H2 {
         rt.block_on(H2::connect(self.addr, "test.example"))
     }
+}
+
+/// The proxy with `sites` behind an HTTPS listener on `addr`, which another proxy may share
+/// (the listeners set SO_REUSEPORT).
+fn https_proxy(mut sites: Value, mut top: Value, addr: SocketAddr) -> Proxy {
+    for site in sites.as_array_mut().unwrap() {
+        site["tls"] = json!({
+            "cert": "/nonexistent/fullchain.pem",
+            "key": "/nonexistent/key.pem",
+            "redirectHttp": false,
+            "http3": false,
+        });
+    }
+    top["listen"] = json!({ "http": [], "https": [addr] });
+    Proxy::start_with(sites, top)
 }
 
 fn site(routes: Value) -> Value {
@@ -631,6 +637,98 @@ fn sigterm_sends_goaway_and_lets_open_streams_finish() {
         matches!(done, Ok(Ok(Ok(())))),
         "the connection closes cleanly: {done:?}"
     );
+}
+
+/// A Python interpreter that has httpx and h2: `UPSTREAMER_PYTHON`, or `python3`. Without
+/// one the test that needs it skips, unless `UPSTREAMER_REQUIRE_PYTHON_H2` is set.
+fn python_h2() -> Option<String> {
+    let python = std::env::var("UPSTREAMER_PYTHON").unwrap_or_else(|_| "python3".to_owned());
+    let found = Command::new(&python)
+        .args(["-c", "import httpx, h2"])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if found {
+        return Some(python);
+    }
+    assert!(
+        std::env::var_os("UPSTREAMER_REQUIRE_PYTHON_H2").is_none(),
+        "{python} with httpx and h2 is required and not found"
+    );
+    eprintln!("skipped: {python} with httpx and h2 is not found (set UPSTREAMER_PYTHON)");
+    None
+}
+
+/// Python's `h2` takes a connection as closed once it has read a GOAWAY, and httpx fails
+/// a request whose stream the GOAWAY admits. Across a drain handed over to another process
+/// on the same port, no request of such a client fails.
+#[test]
+fn a_python_h2_client_loses_no_request_across_a_drain() {
+    let Some(python) = python_h2() else {
+        return;
+    };
+    let release = Gate::default();
+    let reached = Gate::default();
+    let origin = Origin::start({
+        let (release, reached) = (release.clone(), reached.clone());
+        move |stream, _| {
+            let mut conn = Client::over(stream);
+            if conn.request().is_none() {
+                return;
+            }
+            reached.open();
+            release.wait();
+            let _ = conn.send(&ok("slow"));
+        }
+    });
+    let port = Reserved::new();
+    let mut old = https_proxy(
+        site(json!([
+            { "when": { "path": "/slow" }, "proxy": origin.url() },
+            { "respond": { "body": "old" } },
+        ])),
+        json!({ "timeouts": { "shutdown": "20s" } }),
+        port.addr,
+    );
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/python/httpx_drain.py");
+    let mut client = Command::new(&python)
+        .arg(script)
+        .arg(port.addr.port().to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("the client starts");
+    let mut stdin = client.stdin.take().unwrap();
+    let mut lines = io::BufReader::new(client.stdout.take().unwrap()).lines();
+    let mut answer = || match lines.next() {
+        Some(Ok(line)) => line,
+        end => panic!("the client stopped answering: {end:?}"),
+    };
+    assert_eq!([answer(), answer()], ["old", "old"]);
+    reached.wait();
+
+    let _new = https_proxy(
+        site(json!([{ "respond": { "body": "new" } }])),
+        json!({}),
+        port.addr,
+    );
+    old.signal(libc::SIGTERM);
+    assert_eq!(old.notification(), "STOPPING=1");
+    // The cores start to drain just after the notification.
+    std::thread::sleep(Duration::from_millis(200));
+    release.open();
+    writeln!(stdin).unwrap();
+    assert_eq!(
+        answer(),
+        "new",
+        "the idle connection's request is retried on a new connection"
+    );
+    assert_eq!(answer(), "slow", "the request in progress finishes");
+    assert_eq!(answer(), "new", "the next request goes to a new connection");
+    let status = client.wait().unwrap();
+    assert!(status.success(), "{status}");
+    let status = old.exit_within(PATIENCE).expect("the old proxy exits");
+    assert!(status.success(), "{status}");
 }
 
 #[test]
