@@ -372,20 +372,17 @@ async fn sockets(workers: &[Worker]) -> Vec<Inherited> {
 struct Stored {
     /// Whether the service manager keeps a store for this service (`$FDSTORE`).
     enabled: bool,
-    /// The names that may be in the store.
-    names: Vec<String>,
+    /// The names that may be in the store, each with how many sockets it may hold.
+    names: Vec<(String, usize)>,
 }
 
 impl Stored {
     /// `inherited` are the sockets this process was given: the store held them, or the process
     /// this one takes over from did, which stored them too.
     fn from_env(inherited: &[Inherited]) -> Stored {
-        let mut names: Vec<String> = inherited.iter().map(Stored::name).collect();
-        names.sort();
-        names.dedup();
         Stored {
             enabled: std::env::var_os("FDSTORE").is_some(),
-            names,
+            names: Stored::count(inherited),
         }
     }
 
@@ -398,18 +395,41 @@ impl Stored {
         format!("{kind}_{}", socket.addr).replace(':', "_")
     }
 
-    /// Stores every listening socket the cores serve (the service manager keeps one of the
-    /// descriptors of a socket it already has) and removes the names no listener has any more:
-    /// a socket left in the store would keep its address taking connections nobody serves.
+    /// The names of `sockets`, sorted, each with the number of its sockets.
+    fn count(sockets: &[Inherited]) -> Vec<(String, usize)> {
+        let mut names: Vec<(String, usize)> = Vec::new();
+        for name in sockets.iter().map(Stored::name) {
+            match names.iter_mut().find(|(known, _)| *known == name) {
+                Some((_, count)) => *count += 1,
+                None => names.push((name, 1)),
+            }
+        }
+        names.sort();
+        names
+    }
+
+    /// Makes the store hold the listening sockets of the cores, and no other: a socket left
+    /// in the store that no core accepts on would keep taking connections nobody serves.
+    /// Sockets are stored again each time (the service manager keeps one descriptor of a
+    /// socket it already has). A name is removed first when no listener has it any more, or
+    /// when it may hold more sockets than the cores have now, as after a start with fewer
+    /// cores than the process before.
     async fn sync(&mut self, workers: &[Worker], notifier: &Notifier) {
         if !self.enabled {
             return;
         }
         let sockets = sockets(workers).await;
-        let mut serving: Vec<String> = sockets.iter().map(Stored::name).collect();
-        serving.sort();
-        serving.dedup();
-        for name in &serving {
+        let serving = Stored::count(&sockets);
+        for (name, known) in &self.names {
+            let now = serving
+                .iter()
+                .find(|(n, _)| n == name)
+                .map_or(0, |(_, n)| *n);
+            if now < *known {
+                notifier.notify(&format!("FDSTOREREMOVE=1\nFDNAME={name}"));
+            }
+        }
+        for (name, _) in &serving {
             let fds: Vec<RawFd> = sockets
                 .iter()
                 .filter(|socket| &Stored::name(socket) == name)
@@ -418,9 +438,6 @@ impl Stored {
             for fds in fds.chunks(Notifier::MAX_FDS) {
                 notifier.notify_with_fds(&format!("FDSTORE=1\nFDNAME={name}"), fds);
             }
-        }
-        for name in self.names.iter().filter(|name| !serving.contains(name)) {
-            notifier.notify(&format!("FDSTOREREMOVE=1\nFDNAME={name}"));
         }
         self.names = serving;
     }
@@ -896,58 +913,85 @@ mod tests {
     }
 
     #[test]
-    fn the_store_gets_every_listening_socket_and_loses_the_names_no_listener_has() {
+    fn the_store_holds_the_listening_sockets_of_the_cores_and_no_other() {
         let (_dir, path, sock) = listen_notify();
         let notifier = Notifier::to_path(path);
         let (a, b, gone) = (free_addr(), free_addr(), free_addr());
-        let left_over = Inherited::identify(
-            crate::net::listen::bind(gone, crate::plan::ListenerKind::Http).unwrap(),
+        let inherited = |addr| {
+            let fd = crate::net::listen::bind(addr, crate::plan::ListenerKind::Http).unwrap();
+            Inherited::identify(fd).unwrap()
+        };
+        // What the process before left in the store: three sockets for `a` (it had three
+        // cores), two for `b`, and one for an address no listener has now.
+        let before = [
+            inherited(a),
+            inherited(a),
+            inherited(a),
+            inherited(b),
+            inherited(b),
+            inherited(gone),
+        ];
+        let cpu = crate::runtime::allowed_cpus()[0];
+        let workers = crate::runtime::spawn_workers(
+            &[cpu, cpu],
+            crate::runtime::testing::generation(1, &[a, b]),
         )
         .unwrap();
-        let cpus = &crate::runtime::allowed_cpus()[..1];
-        let cpus = [cpus[0], cpus[0]];
-        let workers =
-            crate::runtime::spawn_workers(&cpus, crate::runtime::testing::generation(1, &[a, b]))
-                .unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let name = |addr: std::net::SocketAddr| format!("tcp_127.0.0.1_{}", addr.port());
-
         let mut stored = Stored {
             enabled: true,
-            names: Stored::from_env(&[left_over]).names,
+            names: Stored::count(&before),
         };
-        assert_eq!(stored.names, [name(gone)]);
-        runtime.block_on(stored.sync(&workers, &notifier));
-        let mut seen = Vec::new();
-        for _ in 0..2 {
+        let mut known = vec![(name(a), 3), (name(b), 2), (name(gone), 1)];
+        known.sort();
+        assert_eq!(stored.names, known);
+
+        // A message with its sockets' addresses, in the order sent.
+        let next = || {
             let (text, fds) = recv_with_fds(&sock);
             let addrs: Vec<_> = fds
                 .into_iter()
                 .map(|fd| Inherited::identify(fd).unwrap().addr)
                 .collect();
-            seen.push((text, addrs));
-        }
-        seen.sort();
+            (text, addrs)
+        };
+        runtime.block_on(stored.sync(&workers, &notifier));
+        let mut removed = vec![next(), next()];
+        removed.sort();
+        let mut expected = vec![
+            (format!("FDSTOREREMOVE=1\nFDNAME={}", name(a)), vec![]),
+            (format!("FDSTOREREMOVE=1\nFDNAME={}", name(gone)), vec![]),
+        ];
+        expected.sort();
+        assert_eq!(
+            removed, expected,
+            "first out: the address no listener has, and the one with a socket more than cores"
+        );
+        let mut kept = vec![next(), next()];
+        kept.sort();
         let mut expected = vec![
             (format!("FDSTORE=1\nFDNAME={}", name(a)), vec![a, a]),
             (format!("FDSTORE=1\nFDNAME={}", name(b)), vec![b, b]),
         ];
         expected.sort();
-        assert_eq!(seen, expected, "one message per address, a socket per core");
         assert_eq!(
-            recv(&sock),
-            format!("FDSTOREREMOVE=1\nFDNAME={}", name(gone)),
-            "an inherited socket no listener serves is taken out of the store"
+            kept, expected,
+            "then in: one message per address, a socket per core"
         );
 
-        let disabled = Stored {
+        runtime.block_on(stored.sync(&workers, &notifier));
+        let mut again = vec![next(), next()];
+        again.sort();
+        assert_eq!(again, expected, "nothing is removed when nothing changed");
+
+        let mut disabled = Stored {
             enabled: false,
             names: Vec::new(),
         };
-        let mut disabled = disabled;
         runtime.block_on(disabled.sync(&workers, &notifier));
         sock.set_read_timeout(Some(Duration::from_millis(50)))
             .unwrap();
