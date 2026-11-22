@@ -374,3 +374,83 @@ fn convert_and_example_usage_errors_exit_2() {
     let out = upstreamer(&["convert", "/nonexistent/config.toml"]);
     assert_eq!(out.status.code(), Some(3));
 }
+
+#[test]
+fn reload_usage_errors_exit_2() {
+    for args in [
+        &["reload"][..],
+        &["reload", "--reload-socket"],
+        &["reload", "/run/upstreamer/reload"],
+        &["reload", "--reload-socket", "a", "--reload-socket", "b"],
+        &["run", "config.json", "--reload-socket"],
+    ] {
+        let out = upstreamer(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("usage:"),
+            "{args:?}"
+        );
+    }
+}
+
+/// Runs `upstreamer reload` against a server that greets its one client with `greeting` and
+/// then closes the connection. `main_pid` is the variable systemd sets for a reload command.
+fn reload_greeted_with(greeting: &'static str, main_pid: Option<&str>) -> Output {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("reload");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.write_all(greeting.as_bytes()).unwrap();
+    });
+    let mut command = Command::new(env!("CARGO_BIN_EXE_upstreamer"));
+    command.args(["reload", "--reload-socket"]).arg(&socket);
+    match main_pid {
+        Some(pid) => command.env("MAINPID", pid),
+        None => command.env_remove("MAINPID"),
+    };
+    let out = command.output().unwrap();
+    server.join().unwrap();
+    out
+}
+
+#[test]
+fn reload_leaves_a_process_it_cannot_ask_to_the_service_manager_s_signal() {
+    let newer = "{\"versions\":[2,3]}\n";
+    let out = reload_greeted_with(newer, Some("4242"));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_eq!(
+        stderr,
+        "upstreamer: the running process speaks reload protocol version 2, 3, this program 1; \
+         leaving the reload to the service manager's signal, after which only the service's \
+         status says whether it failed\n"
+    );
+
+    let out = reload_greeted_with(newer, None);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "nothing signals the process: {stderr}"
+    );
+    assert_eq!(
+        stderr,
+        "upstreamer: the running process speaks reload protocol version 2, 3, this program 1; \
+         send it SIGHUP to reload it\n"
+    );
+}
+
+#[test]
+fn reload_fails_when_the_running_process_goes_without_an_answer() {
+    for main_pid in [None, Some("4242")] {
+        let out = reload_greeted_with("{\"versions\":[1]}\n", main_pid);
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert_eq!(out.status.code(), Some(3), "{stderr}");
+        assert!(
+            stderr.contains("closed the connection before it answered"),
+            "{stderr}"
+        );
+    }
+}

@@ -1,7 +1,8 @@
-//! A SIGHUP that finds another program file at the path the proxy was started from hands the
+//! A reload that finds another program file at the path the proxy was started from hands the
 //! listening sockets over to a process of that file: observed through the `NOTIFY_SOCKET`
 //! protocol, the two processes, and what clients get over HTTP/1.1, HTTP/2 and HTTP/3 while it
-//! happens.
+//! happens. A reload is asked for by SIGHUP, or by `upstreamer reload`, which exits with what
+//! came of it.
 
 #![cfg(target_os = "linux")]
 
@@ -170,10 +171,61 @@ fn handed_over(proxy: &Proxy) -> u32 {
         .unwrap();
     assert_eq!(
         proxy.notification(),
-        "READY=1\nSTATUS=serving generation 1",
-        "the successor reports as a started process does, once it is the main one"
+        "STATUS=serving generation 1",
+        "the successor reports its status once it is the main process, and no second READY=1: \
+         the service manager would take that for the end of a reload it has not asked for yet"
     );
     pid
+}
+
+/// What `upstreamer reload` came to.
+struct Asked {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    took: Duration,
+}
+
+/// Runs `upstreamer reload` on the proxy's reload socket until it exits. The command is the
+/// program the tests are built with, whatever file is at the proxy's start path: a program
+/// that cannot serve may still be able to ask.
+fn ask(proxy: &Proxy) -> Asked {
+    let started = Instant::now();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_upstreamer"))
+        .arg("reload")
+        .arg("--reload-socket")
+        .arg(&proxy.reload_socket)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    Asked {
+        code: out.status.code(),
+        stdout: String::from_utf8(out.stdout).unwrap(),
+        stderr: String::from_utf8(out.stderr).unwrap(),
+        took: started.elapsed(),
+    }
+}
+
+/// Asks for a reload that must fail: the command exits 1 with the reason on stderr, after the
+/// proxy ended the reload towards the service manager with the same reason in its status.
+/// Returns the reason.
+fn ask_refused(proxy: &Proxy) -> String {
+    let asked = ask(proxy);
+    let reloading = proxy.notification();
+    assert!(reloading.starts_with("RELOADING=1"), "{reloading}");
+    let ended = proxy.notification();
+    let status = ended
+        .strip_prefix("READY=1\nSTATUS=")
+        .unwrap_or_else(|| panic!("the reload ends with a status: {ended:?}"));
+    assert_eq!(
+        (asked.code, asked.stdout.as_str(), asked.stderr.as_str()),
+        (Some(1), "", format!("upstreamer: {status}\n").as_str()),
+        "the command fails with the reason the status has"
+    );
+    status
+        .strip_prefix("reload failed, ")
+        .unwrap_or_else(|| panic!("a failed reload says so: {status:?}"))
+        .to_owned()
 }
 
 /// Stops the successor (the process group gets the signal) and waits until it is gone.
@@ -742,15 +794,65 @@ fn a_second_handover_leaves_the_udp_sockets_with_the_first_process_until_it_lets
     stop_successor(&proxy, third);
 }
 
+fn plain_site(body: &str) -> Value {
+    json!([{ "name": "plain", "hosts": ["*"], "routes": [{ "respond": { "body": body } }] }])
+}
+
+#[test]
+fn the_reload_command_succeeds_once_the_config_is_applied_or_the_new_program_serves() {
+    let program = Program::install();
+    let mut proxy = Proxy::start_program(&program.path, plain_site("one"), json!({}));
+    let old = proxy.pid();
+
+    proxy.rewrite(plain_site("two"));
+    let asked = ask(&proxy);
+    assert_eq!(
+        (asked.code, asked.stdout.as_str(), asked.stderr.as_str()),
+        (Some(0), "serving generation 2\n", ""),
+        "the same file at the path: the config is reloaded in the process"
+    );
+    assert_eq!(
+        proxy.client().get("/").text(),
+        "two",
+        "the config is applied when the command returns"
+    );
+    assert!(proxy.notification().starts_with("RELOADING=1"));
+    assert_eq!(proxy.notification(), "READY=1\nSTATUS=serving generation 2");
+
+    program.replace();
+    proxy.rewrite(plain_site("three"));
+    let asked = ask(&proxy);
+    let new = handed_over(&proxy);
+    assert_eq!(
+        (asked.code, asked.stdout, asked.stderr.as_str()),
+        (Some(0), format!("handed over to process {new}\n"), ""),
+        "another file at the path: the command returns once its process is the main one"
+    );
+    assert_ne!(new, old);
+    assert_eq!(program_of(new), program.path);
+    assert_eq!(proxy.client().get("/").text(), "three");
+    let status = proxy.exit_within(PATIENCE).expect("the old process exits");
+    assert!(status.success(), "{status}");
+
+    proxy.rewrite(plain_site("four"));
+    let asked = ask(&proxy);
+    assert_eq!(
+        (asked.code, asked.stdout.as_str(), asked.stderr.as_str()),
+        (Some(0), "serving generation 2\n", ""),
+        "the new process answers on the socket it was handed"
+    );
+    assert_eq!(proxy.client().get("/").text(), "four");
+    stop_successor(&proxy, new);
+}
+
 #[test]
 fn a_program_that_cannot_take_over_leaves_the_running_one_serving() {
-    let plain = |body: &str| json!([{ "name": "plain", "hosts": ["*"], "routes": [{ "respond": { "body": body } }] }]);
     let program = Program::install();
-    let mut proxy = Proxy::start_program(&program.path, plain("one"), json!({}));
+    let mut proxy = Proxy::start_program(&program.path, plain_site("one"), json!({}));
     let mut kept = proxy.client();
     assert_eq!(kept.get("/").text(), "one");
 
-    proxy.rewrite(plain("two"));
+    proxy.rewrite(plain_site("two"));
     assert_eq!(
         proxy.reload(),
         "serving generation 2",
@@ -768,44 +870,123 @@ fn a_program_that_cannot_take_over_leaves_the_running_one_serving() {
         assert!(proxy.exit_within(Duration::ZERO).is_none());
     };
     let refused = format!(
-        "reload failed, still serving generation 2: cannot hand over to {}: ",
+        "still serving generation 2: cannot hand over to {}: ",
         program.path.display()
     );
 
-    proxy.rewrite(plain("three"));
+    proxy.rewrite(plain_site("{lang}"));
+    let reason = ask_refused(&proxy);
+    assert!(
+        reason.starts_with("still serving generation 2: ")
+            && reason.contains("/sites/0/routes/0/respond/body")
+            && reason.contains("unknown placeholder `{lang}`"),
+        "a config that does not compile: {reason}"
+    );
+    still_serving(&mut proxy, &mut kept);
+
+    proxy.rewrite(plain_site("three"));
     program.replace_with("#!/bin/sh\nexit 1\n", 0o755);
     assert_eq!(
-        proxy.reload(),
-        format!("{refused}it exited before it was ready")
+        ask_refused(&proxy),
+        format!("{refused}it exited before it was ready"),
+        "a program that exits"
     );
     still_serving(&mut proxy, &mut kept);
 
     program.replace_with("#!/bin/sh\nexit 1\n", 0o644);
-    let status = proxy.reload();
+    let reason = ask_refused(&proxy);
     assert!(
-        status.starts_with(&format!("{refused}cannot start it: ")),
-        "{status}"
+        reason.starts_with(&format!("{refused}cannot start it: ")),
+        "a file that cannot be executed: {reason}"
     );
     still_serving(&mut proxy, &mut kept);
 
     program.replace();
-    proxy.rewrite(plain("{lang}"));
-    let status = proxy.reload();
+    proxy.rewrite(plain_site("{lang}"));
+    let reason = ask_refused(&proxy);
     assert!(
-        status.starts_with(&refused)
-            && status.contains("/sites/0/routes/0/respond/body")
-            && status.contains("unknown placeholder `{lang}`"),
-        "the new process says what is wrong with the config: {status}"
+        reason.starts_with(&refused)
+            && reason.contains("/sites/0/routes/0/respond/body")
+            && reason.contains("unknown placeholder `{lang}`"),
+        "a program that fails says what is wrong with the config: {reason}"
     );
     still_serving(&mut proxy, &mut kept);
 
-    proxy.rewrite(plain("three"));
+    program.replace_with("#!/bin/sh\nexit 1\n", 0o755);
+    assert_eq!(
+        proxy.reload(),
+        format!("reload failed, {refused}it exited before it was ready"),
+        "a SIGHUP fails the same way, and tells only the status"
+    );
+    still_serving(&mut proxy, &mut kept);
+
+    program.replace();
+    proxy.rewrite(plain_site("three"));
     proxy.signal(libc::SIGHUP);
     let new = handed_over(&proxy);
     assert_eq!(proxy.client().get("/").text(), "three");
     let status = proxy.exit_within(PATIENCE).expect("the old process exits");
     assert!(status.success(), "{status}");
     stop_successor(&proxy, new);
+}
+
+#[test]
+fn a_program_that_never_gets_ready_fails_the_reload_command_when_its_time_is_up() {
+    let program = Program::install();
+    let mut proxy = Proxy::start_program(&program.path, plain_site("one"), json!({}));
+    // Only as the proxy starts it: the test runs the file once to see that it can be run.
+    program.replace_with(
+        "#!/bin/sh\n[ \"$1\" = run ] || exit 0\nexec sleep 600\n",
+        0o755,
+    );
+    let asked = ask(&proxy);
+    assert_eq!(
+        (asked.code, asked.stdout.as_str(), asked.stderr),
+        (
+            Some(1),
+            "",
+            format!(
+                "upstreamer: reload failed, still serving generation 1: cannot hand over to {}: \
+                 not ready after 30 s\n",
+                program.path.display()
+            )
+        )
+    );
+    assert!(
+        asked.took >= Duration::from_secs(30) && asked.took < Duration::from_secs(40),
+        "the command waits as long as the proxy waits for the program: {:?}",
+        asked.took
+    );
+    assert!(proxy.notification().starts_with("RELOADING=1"));
+    assert!(
+        proxy
+            .notification()
+            .starts_with("READY=1\nSTATUS=reload failed, still serving generation 1: ")
+    );
+    assert_eq!(proxy.client().get("/").text(), "one");
+    assert!(proxy.exit_within(Duration::ZERO).is_none());
+}
+
+#[test]
+fn the_reload_command_cannot_ask_a_process_that_is_not_there() {
+    let program = Program::install();
+    let proxy = Proxy::start_program(&program.path, plain_site("one"), json!({}));
+    let socket = proxy.reload_socket.clone();
+    drop(proxy);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_upstreamer"))
+        .args(["reload", "--reload-socket"])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(
+        stderr.starts_with(&format!(
+            "upstreamer: no process listens at {}: ",
+            socket.display()
+        )),
+        "{stderr}"
+    );
 }
 
 /// One `GET /` over TLS on a connection of its own, with `config`'s sessions; says whether the
