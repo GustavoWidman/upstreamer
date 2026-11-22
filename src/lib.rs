@@ -151,6 +151,10 @@ impl fmt::Display for StartError {
 
 /// Runs the proxy until SIGTERM/SIGINT, reloading on SIGHUP. Blocks the calling thread, which
 /// becomes the control thread.
+///
+/// On Linux a SIGHUP that finds another program file at the path this process was started from
+/// starts that file and hands it the listening sockets instead; `run` then returns once the
+/// requests in flight have finished.
 pub fn run(opts: RunOptions) -> Result<(), StartError> {
     runtime::control::run(opts)
 }
