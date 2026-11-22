@@ -22,8 +22,9 @@
 //! answered as the stream error it is, and a request reset in the same breath never starts.
 //! A RST_STREAM that arrives later drops the stream's work before the next frame is read: an
 //! upstream exchange in progress is closed, never pooled. Draining and the keep-alive
-//! timeout (a connection without streams) shut down gracefully: GOAWAY, then the open
-//! streams finish.
+//! timeout (a connection without streams) shut down gracefully: the streams in progress
+//! finish, and a GOAWAY that names the last stream served ends the connection
+//! (`Engine::start_shutdown`).
 //!
 //! Extended CONNECT is not advertised, so browsers open WebSockets over HTTP/1.1, the only
 //! upgrade path.
@@ -77,7 +78,8 @@ const MIN_READ: usize = 4096;
 /// Reads and turns one wake of a connection takes before it lets other connections run.
 const READS: usize = 16;
 const TURNS: usize = 16;
-/// How long a shutdown waits for the client to acknowledge the first GOAWAY.
+/// How long each step of a shutdown waits: the streams in progress to finish before the
+/// GOAWAY, then the client to acknowledge the GOAWAY that announces it.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(1);
 /// How long a closing connection waits for the client to close its side, and how much it
 /// reads meanwhile. Closing with input unread resets the connection, which can discard the
@@ -166,7 +168,7 @@ struct Driver<'a> {
     idle_since: Option<Instant>,
     /// Since when output has been waiting for the client to read.
     unwritten_since: Option<Instant>,
-    /// When a shutdown stops waiting for the client's PING ACK.
+    /// When the current step of a shutdown stops waiting.
     shutdown_at: Option<Instant>,
     shutting_down: bool,
     /// A stream started since the idle clock was last set.
@@ -459,7 +461,7 @@ impl<'a> Driver<'a> {
 
     /// When the connection next has to act if nothing arrives: the client's preface or the
     /// rest of a field block within the header timeout, a stream within the keep-alive
-    /// timeout, room to send within the same, the PING ACK of a shutdown.
+    /// timeout, room to send within the same, the next step of a shutdown.
     fn deadline(&self) -> Option<Instant> {
         let engine = self.conn.engine.borrow();
         // The core's clock counts whole seconds, so a stalled stream is due a second past
@@ -508,8 +510,8 @@ impl<'a> Driver<'a> {
             return Some(End::Gone);
         }
         if self.shutdown_at.is_some_and(past) {
-            self.shutdown_at = None;
-            conn.engine.borrow_mut().finish_shutdown();
+            let more = conn.engine.borrow_mut().shutdown_waited();
+            self.shutdown_at = more.then_some(now + SHUTDOWN_WAIT);
         }
         if !self.shutting_down
             && self
