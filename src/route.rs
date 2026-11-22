@@ -371,7 +371,7 @@ fn answer<'p>(terminal: &'p Terminal, ex: &mut Exchange) -> Outcome<'p> {
 pub mod harness {
     use super::*;
     use crate::exchange::{ConnInfo, ErrorInfo, Proto, Scheme};
-    use crate::msg::{Target, Version};
+    use crate::msg::Version;
     use crate::plan::template::{Part, Placeholder, Template};
     use crate::plan::{BalancePlan, KeyPlan, ListenerKind};
     use crate::proto::h1::codec::{self, Limits, OutFraming, Parsed};
@@ -550,9 +550,7 @@ pub mod harness {
             again
                 .set_line(b"GET", &target, Version::Http11)
                 .unwrap_or_else(|_| panic!("the upstream target {target:?} does not parse"));
-            if ex.req.target() == Target::Rebuilt || again.path() == ex.req.path() {
-                assert_eq!(again.path(), ex.req.path(), "upstream target {target:?}");
-            }
+            assert_eq!(again.path(), ex.req.path(), "upstream target {target:?}");
         }
 
         let mut keys = Vec::new();
