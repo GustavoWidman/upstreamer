@@ -351,6 +351,54 @@ fn an_upgrade_to_another_protocol_tunnels_bytes_both_ways() {
     );
 }
 
+/// Tailscale opens its control channel with `POST /ts2021` and an Upgrade, which RFC 9110
+/// §7.8 allows on any method. A body the request declares reaches the origin as its content,
+/// and the tunnel starts right after it.
+#[test]
+fn a_post_that_asks_to_upgrade_tunnels_bytes_both_ways() {
+    let origin = Origin::start(|stream, _| {
+        let mut conn = Client::over(stream);
+        let request = conn.request().unwrap();
+        assert!(
+            request.line().starts_with("POST /ts2021 "),
+            "{}",
+            request.head
+        );
+        assert_eq!(
+            request.header("upgrade"),
+            Some("tailscale-control-protocol")
+        );
+        let mut hello = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: tailscale-control-protocol\r\nConnection: upgrade\r\n\r\n".to_vec();
+        hello.extend_from_slice(&request.body);
+        conn.send(&hello).unwrap();
+        let got = conn.bytes(b"pingmore".len());
+        conn.send(&got).unwrap();
+        conn.closed();
+    });
+    let proxy = proxy_to(&origin);
+    let head = "POST /ts2021 HTTP/1.1\r\nHost: test\r\nConnection: upgrade\r\nUpgrade: tailscale-control-protocol\r\n";
+    for (framing, body) in [("", ""), ("Content-Length: 5\r\n", "hello")] {
+        let mut client = proxy.client();
+        // The first tunnel bytes follow the request in the same write.
+        client
+            .send(format!("{head}{framing}\r\n{body}ping").as_bytes())
+            .unwrap();
+        let response = client.head().unwrap();
+        assert!(response.starts_with("HTTP/1.1 101 "), "{response}");
+        assert_eq!(
+            support::header(&response, "upgrade"),
+            Some("tailscale-control-protocol")
+        );
+        assert_eq!(
+            client.bytes(body.len()),
+            body.as_bytes(),
+            "the request body"
+        );
+        client.send(b"more").unwrap();
+        assert_eq!(client.bytes(8), b"pingmore", "client to origin and back");
+    }
+}
+
 /// An origin for transfers: `POST` answers the SHA-256 of the body it read, `GET` answers
 /// `blob`.
 fn transfer_origin(blob: Arc<Vec<u8>>) -> Origin {
