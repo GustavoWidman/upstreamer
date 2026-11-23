@@ -618,12 +618,12 @@ impl UpstreamConn {
     }
 }
 
-/// An HTTP/1.1 GET with `Connection: upgrade` and an Upgrade field.
+/// An HTTP/1.1 request, of any method (RFC 9110 §7.8), with `Connection: upgrade` and an
+/// Upgrade field.
 fn wants_upgrade(ex: &Exchange) -> bool {
     let fields = &ex.req.fields;
     ex.conn.proto == Proto::H1
         && ex.req.version == Version::Http11
-        && ex.req.method == Method::Get
         && fields.get(Known::Upgrade).is_some_and(|v| !v.is_empty())
         && fields.has_token(Known::Connection, b"upgrade")
 }
