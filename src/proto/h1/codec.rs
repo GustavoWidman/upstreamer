@@ -58,7 +58,7 @@ pub(crate) enum Parsed<T> {
 pub(crate) struct RequestExtra {
     pub keep_alive: bool,
     pub expect_continue: bool,
-    /// `Connection: upgrade` + `Upgrade: <proto>` on an HTTP/1.1 GET.
+    /// `Connection: upgrade` + `Upgrade: <proto>` on an HTTP/1.1 request of any method.
     pub upgrade: bool,
 }
 
@@ -323,7 +323,6 @@ pub(crate) fn parse_request(
                 .get(Known::Expect)
                 .is_some_and(|v| v.eq_ignore_ascii_case(b"100-continue")),
         upgrade: http11
-            && head.method == Method::Get
             && fields.has_token(Known::Connection, b"upgrade")
             && fields.get(Known::Upgrade).is_some_and(|v| !v.is_empty()),
     };
@@ -1470,8 +1469,9 @@ mod tests {
             !up(b"GET /ws HTTP/1.1\r\nHost: a\r\nUpgrade: websocket\r\n\r\n"),
             "Connection must list upgrade"
         );
-        assert!(!up(
-            b"POST /ws HTTP/1.1\r\nHost: a\r\nConnection: upgrade\r\nUpgrade: websocket\r\n\r\n"
+        // RFC 9110 §7.8 ties Upgrade to no method: Tailscale's control channel is a POST.
+        assert!(up(
+            b"POST /ts2021 HTTP/1.1\r\nHost: a\r\nConnection: upgrade\r\nUpgrade: tailscale-control-protocol\r\n\r\n"
         ));
         // RFC 9110 §7.8: Upgrade in an HTTP/1.0 request is ignored.
         assert!(!up(
